@@ -4,6 +4,15 @@
 
 import type { FleetNotification } from "./notify.ts";
 import type { PersistedState } from "./poller.ts";
+import {
+  AGENT_SNAPSHOT_FILE,
+  JOURNAL_FILE,
+  JOURNAL_MAX_BYTES,
+  JOURNAL_OLD_FILE,
+  LOG_FILE,
+} from "./agent-files.ts";
+
+export { JOURNAL_FILE, JOURNAL_OLD_FILE, LOG_FILE };
 
 /**
  * Where `gh` may be, by OS: absolute paths only, the same list the app bakes as its `--allow-run`
@@ -76,9 +85,6 @@ export function saveState(dir: string, state: PersistedState): Promise<void> {
   return writeJson(dir, STATE_FILE, state);
 }
 
-/** The event log's file (the last 2,000 lines and the tracker), in the app's data folder. */
-export const LOG_FILE = "fleet-events.json";
-
 /** Read the event log file (`null` when missing or unreadable). */
 export async function loadLog(dir: string): Promise<unknown> {
   try {
@@ -91,6 +97,70 @@ export async function loadLog(dir: string): Promise<unknown> {
 /** Write the event log file. */
 export function saveLog(dir: string, data: unknown): Promise<void> {
   return writeJson(dir, LOG_FILE, data);
+}
+
+/** The agents' snapshot (lib/agent-snapshot.ts), written atomically like the state file. */
+export function saveAgentSnapshot(dir: string, snap: unknown): Promise<void> {
+  return writeJson(dir, AGENT_SNAPSHOT_FILE, snap);
+}
+
+/**
+ * Append events to the journal, one JSON line each, rotating it to {@linkcode JOURNAL_OLD_FILE}
+ * past {@linkcode JOURNAL_MAX_BYTES} first. Lines are only ever appended, so a reader that pages by
+ * `seq` never sees one change.
+ */
+export async function appendJournal(
+  dir: string,
+  events: readonly { readonly seq: number }[],
+  maxBytes = JOURNAL_MAX_BYTES,
+): Promise<void> {
+  if (events.length === 0) return;
+  await Deno.mkdir(dir, { recursive: true });
+  const target = join(dir, JOURNAL_FILE);
+  try {
+    if ((await Deno.stat(target)).size >= maxBytes) {
+      await Deno.rename(target, join(dir, JOURNAL_OLD_FILE));
+    }
+  } catch {
+    // No journal yet.
+  }
+  const text = events.map((e) => JSON.stringify(e)).join("\n") + "\n";
+  await Deno.writeTextFile(target, text, { append: true });
+}
+
+/** The journal's last `seq` (0 when there is none), so a lost log file never reuses a number. */
+export async function journalLastSeq(dir: string): Promise<number> {
+  for (const name of [JOURNAL_FILE, JOURNAL_OLD_FILE]) {
+    let file: Deno.FsFile | undefined;
+    try {
+      const path = join(dir, name);
+      const size = (await Deno.stat(path)).size;
+      file = await Deno.open(path, { read: true });
+      const from = Math.max(0, size - 64 * 1024);
+      await file.seek(from, Deno.SeekMode.Start);
+      const buf = new Uint8Array(size - from);
+      let off = 0;
+      while (off < buf.length) {
+        const n = await file.read(buf.subarray(off));
+        if (n === null) break;
+        off += n;
+      }
+      const lines = new TextDecoder().decode(buf.subarray(0, off)).split("\n").reverse();
+      for (const line of lines) {
+        try {
+          const seq = (JSON.parse(line) as { seq?: unknown }).seq;
+          if (typeof seq === "number") return seq;
+        } catch {
+          // A partial first line (or a torn last one): skip it.
+        }
+      }
+    } catch {
+      // Missing: try the rotated one.
+    } finally {
+      file?.close();
+    }
+  }
+  return 0;
 }
 
 async function writeJson(dir: string, name: string, data: unknown): Promise<void> {

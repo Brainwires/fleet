@@ -152,6 +152,69 @@ environment makes every control show its dialog (saying it's a dry run) and send
 button is pressed. There the pool cards also use the watchdog's local
 `~/.denext-runners/health.json` when it is fresher than the org variable.
 
+## MCP for agents
+
+Agents (Claude Code sessions and their subagents on the Mac mini) read CI state from Fleet's cache
+instead of each polling the GitHub API: the 5,000-an-hour REST budget is shared with the runner
+scheduler, and every agent watch loop spends it. `mcp/fleet-mcp.ts` is a zero-dependency MCP server
+over stdio, **read-only** over files Fleet already keeps: no network, no GitHub API, no token, no
+environment, no subprocess. It runs with exactly one grant:
+
+```sh
+deno run --no-config --no-prompt \
+  "--allow-read=$HOME/Library/Application Support/dev.brainwires.fleet,$HOME/.denext-runners/hooks,$HOME/.denext-runners/health.json" \
+  mcp/fleet-mcp.ts --data-dir "$HOME/Library/Application Support/dev.brainwires.fleet" \
+  --hooks-dir "$HOME/.denext-runners/hooks" --health-file "$HOME/.denext-runners/health.json"
+```
+
+`deno task mcp` runs that. It is registered for Claude Code at user scope as `fleet`
+(`claude mcp add --scope user fleet -- /opt/homebrew/bin/deno run …` with the same flags, absolute
+paths), so every session on the mini has it.
+
+What Fleet writes for it, in its data folder (never the token or any secret):
+
+- `snapshot.json`, atomically (temp + rename) after every poll and every webhook update, and at
+  least once a minute while Fleet runs (a heartbeat that bumps `written_at` only):
+  `{ v: 1, updated_at, written_at, source: "poll" | "hook", auth, poll, rate, hooks, health, summary,
+  pools, hosts, alerts, event_seq, runs, jobs }`.
+  Runs and jobs are every active run plus those finished in the last 2 h (repo, run id, workflow,
+  branch, sha, event, status, conclusion, times, `html_url`; jobs also name, labels, `runner_name`,
+  pool, steps, and for a failure `failed_step` and the first failure annotation).
+- `fleet-events.jsonl`, the event log as an append-only journal: one event a line, `seq` increasing
+  across restarts (it never numbers below the journal's last line), `run_id` / `job_id` on job and
+  run lines. Past 5 MB it rotates to `fleet-events.1.jsonl` (one kept). `fleet-events.json` stays
+  the window's own copy (the last 2,000 lines and the tracker).
+
+| Tool           | Arguments                                                           | Returns                                                                                                                              |
+| -------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `fleet_status` | none                                                                | pools and hosts (health, slots, busy, paused), queue counts and the oldest wait, rate budget, webhooks, the watchdog's `health.json` |
+| `fleet_runs`   | `repo?`, `branch?`, `sha?` (prefix), `status?`, `limit?`            | runs newest first, each with its jobs' counts and failed jobs (name + failed step)                                                   |
+| `fleet_jobs`   | `run_id?`, `repo?`, `status?`, `conclusion?`, `pool?`, `limit?`     | jobs; steps for failed jobs, and for every job when `run_id` is given; `conclusion: "failed"` = failure, timed_out, startup_failure  |
+| `fleet_events` | `since_seq?`, `kinds?`, `repo?`, `limit?`                           | `{ events, next_seq, has_more }`: pass `next_seq` back as `since_seq` for only what's new                                            |
+| `fleet_wait`   | `run_ids?`, `job_ids?`, `until`, `timeout_s?` (≤ 1800, default 600) | blocks until `any_failure` / `completed` / `first_event`, then `{ triggered, runs, failed_jobs, jobs, events, next_seq }`            |
+
+`repo` takes `Brainwires/denext` or `denext`; `status` also takes `active` (anything not completed).
+`fleet_wait` watches the data folder and the webhook spool's folder (plus a 2 s re-read), returns at
+once when the state is already there, and `triggered` says why it returned: `failure`, `completed`,
+`event`, `timeout` or `stale`. Example, instead of a watch script:
+
+```text
+fleet_runs({ repo: "denext", branch: "development", status: "active" })   → run 43194560988
+fleet_wait({ run_ids: [43194560988], until: "any_failure", timeout_s: 1800 })
+  → { triggered: "failure", failed_jobs: [{ name: "windows-tests", failed_step: "Run tests", … }] }
+fleet_jobs({ run_id: 43194560988, conclusion: "failed" })                  → steps + annotation
+fleet_events({ since_seq: <next_seq>, kinds: ["finished", "run-completed"] })  → what changed since
+```
+
+**Freshness.** Every answer carries `as_of` (Fleet's last poll or webhook update), `age_s`,
+`written_at`, `fleet_running` (written in the last 2 min) and `stale`. It is stale when Fleet hasn't
+written for 5 min (not running), or its data is over 5 min old without live webhooks (polls failing
+or slowed); with live webhooks a quiet fleet is current however old `as_of` is. A stale answer says
+so in `warning`, and `fleet_wait` returns at once with `triggered: "stale"`: the agent then falls
+back to `gh`. Runs that finished over 2 h ago are not in the snapshot (a waited-for id that isn't is
+listed under `missing`). A Fleet build from before these files answers with `stale: true` and the
+events of `fleet-events.json`.
+
 ## Permissions (baked into the binary)
 
 `--allow-net=127.0.0.1,localhost,api.github.com` (split into connect / listen on the pinned runtime;
@@ -184,6 +247,8 @@ denext desktop package .
 | `lib/hooks.ts`           | The webhook handler (route, size, signature, dedupe)                                     |
 | `lib/deno-hooks.ts`      | The receiver on the mini: enable check, secret, listener, JSONL sink                     |
 | `hooks-only.ts`          | The receiver without a window (`denext task hooks`)                                      |
+| `lib/agent-snapshot.ts`  | The agents' `snapshot.json` (runs, jobs, pools), built from the poller's state           |
+| `mcp/fleet-mcp.ts`       | The read-only MCP server for agents (stdio); `mcp/queries.ts`, its tools' answers        |
 | `lib/classify.ts`        | Job classification, queue ages, warnings, lane grouping                                  |
 | `lib/health.ts`          | The `DENEXT_POOL_HEALTH` parser                                                          |
 | `lib/snapshot.ts`        | Pool cards, summary, the page's snapshot                                                 |

@@ -10,7 +10,8 @@
     "test": "deno run -A jsr:@denext/denext@^4.16.0/cli test",
     "check": "deno fmt --check && deno lint && deno task test",
     "icons": "deno run --allow-write=icons,public tools/make-icons.ts",
-    "hooks": "deno run --allow-net=127.0.0.1:8789 --allow-run=/usr/bin/security --allow-env=HOME --allow-read=$HOME/Library/LaunchAgents/com.brainwires.denext-ci-hooks-tunnel.plist,/Library/LaunchDaemons/com.brainwires.denext-ci-hooks-tunnel.plist,/Library/LaunchAgents/com.brainwires.denext-ci-hooks-tunnel.plist,$HOME/.denext-runners/hooks --allow-write=$HOME/.denext-runners/hooks hooks-only.ts"
+    "hooks": "deno run --allow-net=127.0.0.1:8789 --allow-run=/usr/bin/security --allow-env=HOME --allow-read=$HOME/Library/LaunchAgents/com.brainwires.denext-ci-hooks-tunnel.plist,/Library/LaunchDaemons/com.brainwires.denext-ci-hooks-tunnel.plist,/Library/LaunchAgents/com.brainwires.denext-ci-hooks-tunnel.plist,$HOME/.denext-runners/hooks --allow-write=$HOME/.denext-runners/hooks hooks-only.ts",
+    "mcp": "deno run --no-config --no-prompt \"--allow-read=$HOME/Library/Application Support/dev.brainwires.fleet,$HOME/.denext-runners/hooks,$HOME/.denext-runners/health.json\" mcp/fleet-mcp.ts --data-dir \"$HOME/Library/Application Support/dev.brainwires.fleet\" --hooks-dir \"$HOME/.denext-runners/hooks\" --health-file \"$HOME/.denext-runners/health.json\""
   },
   "allowScripts": {
     "deny": [

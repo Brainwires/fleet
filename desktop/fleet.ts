@@ -5,10 +5,13 @@
 
 import { defineDesktopExtension, DesktopCapError, type DesktopExtensionHost } from "denext/desktop";
 import {
+  appendJournal,
   ghToken,
+  journalLastSeq,
   loadLog,
   loadState,
   postNotification,
+  saveAgentSnapshot,
   saveLog,
   saveState,
 } from "../lib/deno-host.ts";
@@ -62,6 +65,10 @@ function start(host: DesktopExtensionHost): void {
     save: (s) => saveState(dir, s),
     loadLog: () => loadLog(dir),
     saveLog: (d) => saveLog(dir, d),
+    // For agents (mcp/fleet-mcp.ts reads these, read-only): the snapshot and the event journal.
+    saveAgentSnapshot: (snap) => saveAgentSnapshot(dir, snap),
+    appendJournal: (events) => appendJournal(dir, events),
+    journalLastSeq: () => journalLastSeq(dir),
     ...(pools ? { localHealth: readLocalHealth } : {}),
   });
   service.onChange(() => {

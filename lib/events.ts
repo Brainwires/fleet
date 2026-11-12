@@ -47,6 +47,10 @@ export interface FleetEvent {
   readonly text: string;
   readonly url: string | null;
   readonly branch?: string;
+  /** The workflow run this line is about (job and run lines). */
+  readonly run_id?: number;
+  /** The job this line is about (job lines). */
+  readonly job_id?: number;
   /** Logged for something the user did in Fleet (a control). */
   readonly user?: boolean;
 }
@@ -166,6 +170,7 @@ export function diffObservation(state: TrackerState, obs: Observation): NewEvent
         sev,
         kind,
         job: job.name,
+        job_id: job.id,
         text,
         url: job.html_url ?? run.html_url,
       });
@@ -230,6 +235,7 @@ export function diffObservation(state: TrackerState, obs: Observation): NewEvent
             sev: "muted",
             kind: "finished",
             job: job.name,
+            job_id: job.id,
             text: "finished: cancelled",
             url: job.html_url ?? run.html_url,
           });
@@ -263,7 +269,7 @@ export function diffObservation(state: TrackerState, obs: Observation): NewEvent
 }
 
 function runBase(repo: string, run: GhRun) {
-  return { repo, workflow: run.name ?? "workflow", branch: run.head_branch ?? "" };
+  return { repo, workflow: run.name ?? "workflow", branch: run.head_branch ?? "", run_id: run.id };
 }
 
 /** A job late right now: running past STALL_MS, or queued with no runner past QUEUE_LONG_MS. */

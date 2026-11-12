@@ -20,6 +20,7 @@ import { type PersistedState, Poller } from "./poller.ts";
 import { pollPlan } from "./budget.ts";
 import type { HealthState } from "./health.ts";
 import { type HookDelivery, HOOKS_STALE_MS, hooksState } from "./hooks.ts";
+import { AGENT_HEARTBEAT_MS, type AgentSnapshot, buildAgentSnapshot } from "./agent-snapshot.ts";
 /** A page that hasn't said it's visible for this long counts as hidden (it may be suspended). */
 export const VISIBLE_TTL_MS = 30_000;
 /** The secure-store key of a pasted token. */
@@ -47,6 +48,12 @@ export interface ServiceDeps {
   /** The event log and its tracker (`{ log, tracker }`), or `null`. */
   readonly loadLog?: () => Promise<unknown>;
   readonly saveLog?: (data: { log: unknown; tracker: TrackerState }) => Promise<void>;
+  /** Write the agents' snapshot (snapshot.json) after every poll and webhook update. */
+  readonly saveAgentSnapshot?: (s: AgentSnapshot) => Promise<void>;
+  /** Append newly logged events to the append-only journal (fleet-events.jsonl). */
+  readonly appendJournal?: (events: readonly FleetEvent[]) => Promise<void>;
+  /** The journal's last `seq`, so the log never numbers below it after a restart. */
+  readonly journalLastSeq?: () => Promise<number>;
   /** The Mac mini's local pool health, merged over the variable's. */
   readonly localHealth?: (variable: HealthState) => Promise<HealthState>;
   readonly setTimeout?: (fn: () => void, ms: number) => number;
@@ -140,6 +147,13 @@ export function createFleetService(deps: ServiceDeps): FleetService {
   let hooksVia: "listener" | "spool" = "listener";
   let lastDelivery: number | null = null;
   const hooks = () => hooksState(hooksEnabled, lastDelivery, now());
+  /** The agents' snapshot: when its data last changed, and from what. */
+  let dataAt: number | null = null;
+  let dataSource: "poll" | "hook" = "poll";
+  let agentWriting: Promise<void> | null = null;
+  let agentDirty = false;
+  let heartbeat: number | null = null;
+  let journalChain: Promise<void> = Promise.resolve();
   const paused = () => prefs.notificationsPaused === true;
 
   const visible = () => now() < visibleUntil;
@@ -250,11 +264,65 @@ export function createFleetService(deps: ServiceDeps): FleetService {
     }, Math.max(250, due - now()));
   };
 
+  /** Append newly numbered events to the journal, in order. */
+  const journal = (added: readonly FleetEvent[]): Promise<void> => {
+    if (!deps.appendJournal || added.length === 0) return journalChain;
+    const append = deps.appendJournal;
+    journalChain = journalChain.then(() => append(added)).catch(() => {});
+    return journalChain;
+  };
+
+  const agentSnapshot = (): AgentSnapshot =>
+    buildAgentSnapshot({
+      now: now(),
+      updatedAt: dataAt ?? startedAt,
+      source: dataSource,
+      snapshot: snapshot(),
+      hosts: poller?.hosts() ?? {},
+      runs: poller?.knownRuns() ?? [],
+      annotations: poller?.annotations ?? new Map(),
+    });
+
+  /** Re-arm the heartbeat: the file is rewritten (`written_at`) at least once a minute. */
+  const beat = () => {
+    if (!deps.saveAgentSnapshot || stopped) return;
+    if (heartbeat !== null) clearT(heartbeat);
+    heartbeat = setT(() => {
+      heartbeat = null;
+      void writeAgent();
+    }, AGENT_HEARTBEAT_MS);
+  };
+
+  /** Write the agents' snapshot; writes asked for meanwhile coalesce into one more. */
+  const writeAgent = (): Promise<void> => {
+    const save = deps.saveAgentSnapshot;
+    if (!save) return Promise.resolve();
+    if (agentWriting) {
+      agentDirty = true;
+      return agentWriting;
+    }
+    agentWriting = (async () => {
+      do {
+        agentDirty = false;
+        try {
+          await save(agentSnapshot());
+        } catch {
+          // Best effort: the next update or heartbeat writes again.
+        }
+      } while (agentDirty);
+    })().finally(() => {
+      agentWriting = null;
+      beat();
+    });
+    return agentWriting;
+  };
+
   /** Diff the poller's state into the event log (after a poll or a webhook). */
   const recordEvents = async (p: Poller) => {
-    log.append(diffObservation(tracker, p.observation()));
+    const added = log.append(diffObservation(tracker, p.observation()));
     p.consumeFinished();
     await saveLog();
+    await journal(added);
   };
 
   const notifyAndPersist = async () => {
@@ -292,9 +360,14 @@ export function createFleetService(deps: ServiceDeps): FleetService {
         auth = "invalid";
         poller = null;
       } else {
-        if (r.ok) await recordEvents(p);
+        if (r.ok) {
+          await recordEvents(p);
+          dataAt = now();
+          dataSource = "poll";
+        }
         await notifyAndPersist();
       }
+      await writeAgent();
       emit();
     })().finally(() => {
       polling = null;
@@ -316,6 +389,9 @@ export function createFleetService(deps: ServiceDeps): FleetService {
       | { log?: unknown; tracker?: unknown }
       | null;
     log = EventLog.from(l?.log ?? null);
+    // The journal outlives a lost or garbled log file: never number below its last line.
+    const journaled = await deps.journalLastSeq?.().catch(() => 0) ?? 0;
+    if (journaled > log.lastSeq) log = EventLog.from({ ...log.toJSON(), seq: journaled });
     tracker = restoreTracker(l?.tracker ?? null, now());
   };
 
@@ -361,6 +437,7 @@ export function createFleetService(deps: ServiceDeps): FleetService {
       }
       emit();
       if (poller) await pollNow();
+      else await writeAgent();
     },
     snapshot,
     visibility(v) {
@@ -424,7 +501,10 @@ export function createFleetService(deps: ServiceDeps): FleetService {
         const p = poller;
         if (!p || !p.applyHook(d)) return;
         await recordEvents(p);
+        dataAt = now();
+        dataSource = "hook";
         await notifyAndPersist();
+        await writeAgent();
         emit();
         schedule();
       }).catch(() => {});
@@ -432,8 +512,9 @@ export function createFleetService(deps: ServiceDeps): FleetService {
     },
     events: (seq) => ({ events: log.after(seq), lastSeq: log.lastSeq }),
     async logAction(e) {
-      log.append([{ ...e, at: now(), user: true }]);
+      const added = log.append([{ ...e, at: now(), user: true }]);
       await saveLog();
+      await journal(added);
       emit();
     },
     async setNotificationsPaused(v) {
@@ -454,6 +535,8 @@ export function createFleetService(deps: ServiceDeps): FleetService {
       stopped = true;
       if (timer !== null) clearT(timer);
       timer = null;
+      if (heartbeat !== null) clearT(heartbeat);
+      heartbeat = null;
     },
   };
 }

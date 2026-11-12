@@ -18,7 +18,7 @@ import type {
   GhRunnerList,
   GhVariable,
 } from "./github-types.ts";
-import { type HealthState, parsePoolHealth } from "./health.ts";
+import { type HealthState, type HostHealth, parsePoolHealth } from "./health.ts";
 import type { AuthState, FinishedJob, Snapshot } from "./model.ts";
 import {
   CORE_REPOS,
@@ -31,6 +31,7 @@ import {
   setPools,
 } from "./pools.ts";
 import { buildSnapshot } from "./snapshot.ts";
+import { AGENT_FINISHED_KEEP_MS, type KnownRun } from "./agent-snapshot.ts";
 import { type HookDelivery, payloadRepo } from "./hooks.ts";
 
 /** One run as the event tracker sees it after a round: active, or just finished (final state). */
@@ -145,6 +146,8 @@ export class Poller {
   #finishedRuns: ObservedRun[] = [];
   #annotations = new Map<number, string>();
   #annotated = new Set<number>();
+  /** Runs that finished, with their final jobs, kept 2 h for the agents' snapshot. */
+  #recent = new Map<number, KnownRun & { readonly doneAt: number }>();
 
   constructor(options: PollerOptions) {
     this.#client = options.client;
@@ -351,6 +354,7 @@ export class Poller {
           .then((r) => r?.body ?? a.run)
           .catch(() => a.run);
         this.#recordCompleted(a.repo, run, jobs);
+        this.#remember(a.repo, run, jobs);
         this.#jobs.delete(a.run.id);
         this.#runUpdated.delete(a.run.id);
         finished.push({ repo: a.repo, run, jobs });
@@ -439,6 +443,7 @@ export class Poller {
         this.#jobs.delete(run.id);
         this.#runUpdated.delete(run.id);
         this.#recordCompleted(repo, run, jobs);
+        this.#remember(repo, run, jobs);
         this.#finishedRuns = [...this.#finishedRuns, { repo, run, jobs }];
       } else {
         this.#runs.set(run.id, { repo, run });
@@ -450,6 +455,16 @@ export class Poller {
     if (!job) return false;
     let active = this.#runs.get(job.run_id);
     if (!active) {
+      const recent = this.#recent.get(job.run_id);
+      if (recent && job.status === "completed") {
+        // The run's completion arrived first: its job's final state goes to the agents' copy.
+        const jobs = [...recent.jobs];
+        const i = jobs.findIndex((j) => j.id === job.id);
+        if (i === -1) jobs.push(job);
+        else jobs[i] = job;
+        this.#recent.set(job.run_id, { ...recent, jobs });
+        return true;
+      }
       if (job.status === "completed") return false; // a run we never saw: the next poll has it
       active = {
         repo,
@@ -475,6 +490,47 @@ export class Poller {
     this.#jobs.set(job.run_id, jobs);
     if (job.status === "completed") this.#recordCompleted(repo, active.run, [job]);
     return true;
+  }
+
+  /** Keep a finished run for the agents' snapshot. */
+  #remember(repo: string, run: GhRun, jobs: readonly GhJob[]): void {
+    const prev = this.#recent.get(run.id);
+    // A completed run from a webhook may come before its final jobs: keep the jobs seen so far.
+    this.#recent.set(run.id, {
+      repo,
+      run,
+      jobs: jobs.length ? jobs : prev?.jobs ?? [],
+      doneAt: this.#now(),
+    });
+  }
+
+  /**
+   * The runs for the agents' snapshot: the active ones with their jobs, then those that finished
+   * in the last {@linkcode AGENT_FINISHED_KEEP_MS} with their final jobs.
+   */
+  knownRuns(): KnownRun[] {
+    const now = this.#now();
+    const out: KnownRun[] = [];
+    for (const a of this.#runs.values()) {
+      out.push({ repo: a.repo, run: a.run, jobs: this.#jobs.get(a.run.id) ?? [] });
+    }
+    for (const [id, r] of this.#recent) {
+      if (this.#runs.has(id)) continue; // re-run: the active attempt wins
+      if (now - r.doneAt > AGENT_FINISHED_KEEP_MS) continue;
+      out.push({ repo: r.repo, run: r.run, jobs: r.jobs });
+    }
+    return out;
+  }
+
+  /** The watchdog's per-host health (the variable, or the mini's local file merged over it). */
+  hosts(): Readonly<Record<string, HostHealth>> {
+    const h = this.#health;
+    return h.state === "ok" || h.state === "stale" ? h.doc.hosts ?? {} : {};
+  }
+
+  /** The first failure annotation of failed jobs, by job id. */
+  get annotations(): ReadonlyMap<number, string> {
+    return this.#annotations;
   }
 
   /** A tracked run and its jobs, or `undefined`. */
@@ -528,6 +584,9 @@ export class Poller {
     const now = this.#now();
     for (const [id, f] of this.#finished) {
       if (now - f.completedAt > FINISHED_KEEP_MS) this.#finished.delete(id);
+    }
+    for (const [id, r] of this.#recent) {
+      if (now - r.doneAt > AGENT_FINISHED_KEEP_MS) this.#recent.delete(id);
     }
     if (this.#counted.size > 5000) this.#counted = new Set([...this.#counted].slice(-2000));
   }
