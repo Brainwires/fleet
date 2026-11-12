@@ -18,6 +18,11 @@ export interface JobRow {
   readonly pool: string;
   /** The runner's name while running. */
   readonly runner: string | null;
+  /**
+   * GitHub-hosted: the runner image the job asked for (its runs-on label, `ubuntu-22.04`,
+   * `macos-15-intel`), when the job data has one. Absent / `null` for self-hosted.
+   */
+  readonly image?: string | null;
   /** Queued: when it was created. Running: when it started. */
   readonly since: number;
   /** The median length of this job's recent successful runs, when known. */

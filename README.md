@@ -90,7 +90,15 @@ The token is never logged, rendered, written to a file, or returned to the page.
   15 min (amber when every slot is busy: the jobs are waiting for capacity, not faulting). Hosts
   that share a runs-on label (`win-x64` and `win-x64-brain` on `denext-windows-x64`) each show their
   own numbers; a running job is placed by its runner's name, and a queued job of a shared label sits
-  on that label's first card (its label can't say which host will take it).
+  on that label's first card (its label can't say which host will take it). A long pool name
+  truncates with "…" (full name on hover); the state chip stays on its line. A self-hosted card is
+  compact; when its pool has running jobs, its `busy/slots` count is a toggle that widens the card
+  to two columns and lists the busy runners.
+- **GitHub-hosted panel**: a wider card beside the self-hosted grid (stacked below it under 1000
+  px), as tall as the cards and scrolling inside, with one row per running job's runner: the image
+  label from the job's runs-on labels (`macos-15-intel`, `ubuntu-22.04`) and the short runner id
+  (`#1000058781`, full name on hover), its state (running / over usual), elapsed, and the job (repo
+  · workflow · job, a link to it). Self-hosted cards use the same rows when opened.
 - **Running / Queued lanes**: repo → run (workflow, branch, short SHA, event) → job (name, pool
   chip, runner, elapsed or waited, ticking each second; `/ ~usual` once three successful runs of
   that job were seen). A default branch (`development-denext`, `development`, `main`) gets a violet
@@ -99,9 +107,12 @@ The token is never logged, rendered, written to a file, or returned to the page.
   counted in the header as "N waiting for capacity" (a free slot, a paused, unhealthy or no-health
   pool stay red); one running past 1.5× its usual length (and at least 3 min over) turns amber. A
   queued run GitHub hasn't expanded into jobs shows "queued, no jobs yet" for its first 10 min; past
-  that it is GitHub's stale status (the jobs list never fills) and is left out.
-- **Side**: the health variable's recent alerts, and jobs finished in the last 30 min with ✓ / ✕ /
-  ⊘.
+  that it is GitHub's stale status (the jobs list never fills) and is left out. The job name takes a
+  row's spare width; the runner (`#id` for GitHub's) is capped and gives way first. A long branch
+  moves to its own header line before it truncates. With nothing queued, the Queued lane shrinks to
+  a narrow column and Running takes the width.
+- **Side**: the health variable's recent alerts (each clamped to three lines; a click expands it,
+  the full text is also the tooltip), and jobs finished in the last 30 min with ✓ / ✕ / ⊘.
 - A click on a run or job opens it on github.com in the system browser.
 
 ## Event log
@@ -114,13 +125,17 @@ repeated every 30 min while it lasts, run completed, a burst of cancelled jobs f
 line ("run N cancelled (14 jobs)"), pool health changes, the health variable's alerts, and every
 control you used or that was refused (marked "you").
 
-Each line: local time, a severity glyph (✓ ✕ ▲ • ⊘, coloured too), repo, workflow / job, the text, a
-link. Filters: all / problems, repo, search. The first poll only records the state (no flood). The
-log survives a restart (see [Data files](#data-files)); state older than 15 min at a restart is
-re-seeded silently. Where the webhook spool exists, startup back-fills the gap from it: the job
-queued / started / finished lines and run completions received after the log's last line (the last
-24 h, at most 500 lines), at their real times, marked ↺ ("while Fleet was closed"), never duplicated
-and never notified (`lib/backfill.ts`).
+Each line: local time, a severity glyph (✓ ✕ ▲ • ⊘, coloured too), repo, workflow / job (the wider
+column), the text, a link. A start reads short, `started · GitHub #1000058781` or
+`started · mac-arm
+· denext-mac-arm-1-…`, the runner trimmed apart with its full name on hover (the
+recorded text, for agents and the search, is unchanged: `started on <pool> on <runner>`). Filters:
+all / problems, repo, search. The first poll only records the state (no flood). The log survives a
+restart (see [Data files](#data-files)); state older than 15 min at a restart is re-seeded silently.
+Where the webhook spool exists, startup back-fills the gap from it: the job queued / started /
+finished lines and run completions received after the log's last line (the last 24 h, at most 500
+lines), at their real times, marked ↺ ("while Fleet was closed"), never duplicated and never
+notified (`lib/backfill.ts`).
 
 ## Notifications
 
@@ -205,9 +220,10 @@ GitHub controls go through the backend with the same token, never from page JS:
   from that block of the workflow YAML).
 
 Pool controls, only on the machine with the runner scheduler's ops checkout
-(`~/Source/Brainwires/denext-internal/ops/runners/pause-pool.sh`, the Mac mini): per pool Pause (60
-/ 120 / 180 s; the script's own expiry still applies) and Resume, Restart scheduler
-(`launchctl kickstart -k gui/<uid>/com.brainwires.denext-runners`) and Run watchdog pass now.
+(`~/Source/Brainwires/denext-internal/ops/runners/pause-pool.sh`, the Mac mini): per pool Pause (1m
+/ 2m / 3m, a segmented group on the card's last row; the script's own expiry still applies) and
+Resume, Restart scheduler (`launchctl kickstart -k gui/<uid>/com.brainwires.denext-runners`) and Run
+watchdog pass now.
 
 Guardrails, as code in `lib/controls.ts` (unit-tested):
 

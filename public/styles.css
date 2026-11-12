@@ -338,6 +338,14 @@ a:hover {
   border-bottom: 1px solid var(--line);
   background: var(--bg);
 }
+/* The self-hosted cards on the left; the GitHub-hosted card a wider panel on the right, as tall
+   as the cards beside it, listing its runners one per row. */
+.pools-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 32%);
+  gap: 8px;
+  align-items: stretch;
+}
 .pools {
   list-style: none;
   margin: 0;
@@ -346,6 +354,7 @@ a:hover {
   /* One card per pool, wrapping to a second row when they don't fit (never clipped). */
   grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));
   gap: 8px;
+  align-content: start;
 }
 .pool {
   background: var(--surface);
@@ -354,8 +363,13 @@ a:hover {
   border-radius: 6px;
   padding: 7px 9px 8px;
   display: grid;
+  align-content: start;
   gap: 5px;
   min-width: 0;
+}
+/* A self-hosted card showing its busy runners takes two columns. */
+.pool-open {
+  grid-column: span 2;
 }
 .pool-ok {
   border-top-color: var(--ok);
@@ -370,15 +384,23 @@ a:hover {
 .pool-github {
   border-top-color: var(--text-3);
   background: var(--surface-2);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
+/* The name truncates; the state chip never wraps below it. */
 .pool-head {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 4px 6px;
+  gap: 6px;
+  min-width: 0;
+}
+.pool-head .chip {
+  flex: none;
 }
 .pool-name {
+  flex: 0 1 auto;
   min-width: 0;
   font: 500 14.5px/1.2 var(--mono);
   white-space: nowrap;
@@ -389,8 +411,97 @@ a:hover {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 6px;
   font-size: 14px;
   color: var(--text-2);
+}
+.pool-toggle {
+  font: 400 14px/1 var(--sans);
+  font-variant-numeric: tabular-nums;
+  padding: 2px 5px;
+  margin: -2px -5px -2px 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.pool-toggle:hover,
+.pool-toggle[aria-expanded="true"] {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+/* ---- runner rows (a pool's busy runners) ---- */
+
+.runners {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+  display: grid;
+  align-content: start;
+  gap: 1px;
+  border-top: 1px solid var(--line);
+}
+/* In the GitHub panel the list fills the card's height and scrolls, never growing the strip. */
+.pool-github .runners,
+.pool-github .runners-empty {
+  flex: 1 1 0;
+  contain: size;
+  min-height: 92px;
+  overflow-y: auto;
+}
+.runners-empty {
+  margin: 2px 0 0;
+  font-size: 13.5px;
+}
+.runner {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-areas: "n s t" "j j j";
+  column-gap: 8px;
+  padding: 3px 0 4px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13.5px;
+}
+.runner-name {
+  grid-area: n;
+  min-width: 0;
+  font: 500 13.5px/1.3 var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.runner-id {
+  margin-left: 6px;
+  font-weight: 400;
+  color: var(--text-3);
+}
+.runner-state {
+  grid-area: s;
+  font-size: 12.5px;
+  color: var(--run);
+  white-space: nowrap;
+}
+.runner-warn .runner-state,
+.runner-warn .runner-time {
+  color: var(--warn);
+}
+.runner-time {
+  grid-area: t;
+  font-family: var(--mono);
+  color: var(--text-2);
+  text-align: right;
+  white-space: nowrap;
+}
+.runner-job {
+  grid-area: j;
+  min-width: 0;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .pips {
   display: inline-flex;
@@ -458,6 +569,16 @@ a:hover {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(290px, 360px);
   min-height: 0;
+}
+/* Nothing queued: the Queued lane shrinks to a narrow column and Running takes the width. */
+.lanes-q-empty {
+  grid-template-columns: minmax(0, 1fr) 150px minmax(290px, 360px);
+}
+.lane-collapsed {
+  background: var(--surface-2);
+}
+.lane-collapsed .empty {
+  font-size: 13.5px;
 }
 .lane,
 .side {
@@ -532,13 +653,15 @@ a:hover {
   text-overflow: ellipsis;
   min-width: 0;
 }
+/* A long branch moves to its own header line first; it truncates only past the full width. */
 .branch {
   font: 400 13.5px/1.2 var(--mono);
   color: var(--text-2);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 40%;
+  min-width: 0;
+  max-width: 100%;
 }
 .branch-default {
   color: var(--default);
@@ -573,11 +696,13 @@ a:hover {
   margin: 0;
   padding: 0;
 }
+/* The job name gets the width: it grows, and the runner (capped, shrinking four times faster)
+   gives way first when the lane is narrow. */
 .job {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 170px) 108px;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  column-gap: 8px;
   padding: 3px 4px 3px 6px;
   margin: 0 -4px 0 -6px;
   border-left: 2px solid transparent;
@@ -587,11 +712,15 @@ a:hover {
   background: var(--surface-2);
 }
 .job-name {
+  flex: 1 1 12rem;
+  min-width: 7ch;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .job-runner {
+  flex: 0 4 9rem;
+  min-width: 0;
   font: 400 13px/1.2 var(--mono);
   color: var(--text-3);
   white-space: nowrap;
@@ -599,6 +728,7 @@ a:hover {
   text-overflow: ellipsis;
 }
 .job-time {
+  flex: 0 0 108px;
   text-align: right;
   font-family: var(--mono);
   font-size: 14px;
@@ -607,7 +737,8 @@ a:hover {
   text-overflow: ellipsis;
 }
 .job .chip {
-  max-width: 160px;
+  flex: 0 0 auto;
+  max-width: 120px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -617,7 +748,7 @@ a:hover {
   margin-left: 3px;
 }
 .warn-tag {
-  grid-column: 1 / -1;
+  flex: 0 0 100%;
   font-size: 12.5px;
   font-weight: 500;
   letter-spacing: 0.02em;
@@ -671,10 +802,36 @@ a:hover {
   font-size: 13px;
   color: var(--text-3);
 }
+.alert-pool {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Three lines at most; a click shows the rest (the full text is also the tooltip). The clamp sits
+   on an inner span: WebKit doesn't box-clamp a button itself. */
 .alert-msg {
+  display: block;
+  font: inherit;
+  text-align: left;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
   color: var(--text-2);
   min-width: 0;
+}
+.alert-text {
   overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+}
+.alert.is-open .alert-text {
+  display: block;
+  -webkit-line-clamp: none;
+  line-clamp: none;
 }
 .done {
   display: grid;
@@ -750,7 +907,8 @@ a:hover {
   border-color: var(--bad);
 }
 .ctl-dur {
-  padding: 3px 4px;
+  padding: 3px 5px;
+  font-variant-numeric: tabular-nums;
   color: var(--text-3);
 }
 .ctl-dur.is-on {
@@ -780,9 +938,29 @@ a:hover {
 .done-when .ctl {
   margin-left: 6px;
 }
+/* Pause and its duration on one row: the durations a joined segmented group. */
 .pool .ctl-group {
   margin: 2px 0 0;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+.ctl-seg {
+  display: inline-flex;
+}
+.ctl-seg .ctl {
+  border-radius: 0;
+}
+.ctl-seg .ctl + .ctl {
+  margin-left: -1px;
+}
+.ctl-seg .ctl:first-child {
+  border-radius: 4px 0 0 4px;
+}
+.ctl-seg .ctl:last-child {
+  border-radius: 0 4px 4px 0;
+}
+.ctl-seg .ctl.is-on {
+  position: relative;
 }
 .pool-fleet {
   display: flex;
@@ -899,7 +1077,8 @@ a:hover {
 }
 .ev {
   display: grid;
-  grid-template-columns: 76px 18px 96px minmax(120px, 280px) minmax(0, 1fr) auto;
+  /* The job column takes the larger share; the message (short: the runner trimmed apart) the rest. */
+  grid-template-columns: 76px 18px 96px minmax(160px, 1.5fr) minmax(0, 1fr) auto;
   gap: 8px;
   align-items: baseline;
   padding: 2px 14px;
@@ -956,6 +1135,16 @@ a:hover {
 }
 .ev-where {
   color: var(--text-2);
+}
+.ev-runner {
+  display: inline-block;
+  max-width: 22ch;
+  vertical-align: bottom;
+  font: 400 13px/1.4 var(--mono);
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 /* A back-filled line (it happened while Fleet was closed): a quiet ↺ before the text. */
 .ev-backfill {
@@ -1071,9 +1260,33 @@ code {
   font-size: 14px;
 }
 
+/* Wide windows: the side column and the GitHub panel take some of the room. */
+@media (min-width: 1500px) {
+  .lanes {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(320px, 420px);
+  }
+  .lanes-q-empty {
+    grid-template-columns: minmax(0, 1fr) 170px minmax(320px, 420px);
+  }
+}
+
+@media (max-width: 1000px) {
+  .pools-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  /* Stacked under the cards, the GitHub panel has no neighbour to take its height from. */
+  .pool-github .runners {
+    contain: none;
+    max-height: 220px;
+  }
+}
+
 @media (max-width: 1080px) {
   .lanes {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .lanes-q-empty {
+    grid-template-columns: minmax(0, 1fr) 150px;
   }
   .side {
     grid-column: 1 / -1;

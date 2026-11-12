@@ -41,3 +41,12 @@ export function shortRepo(full: string): string {
 export function formatCount(n: number): string {
   return n.toLocaleString("en-US");
 }
+
+/**
+ * A runner's short name for a narrow column: GitHub's `GitHub Actions 1000058781` → `#1000058781`;
+ * any other name as is (the caller trims it with an ellipsis and keeps the full name as a tooltip).
+ */
+export function shortRunner(name: string): string {
+  const m = /^GitHub Actions (\d+)$/.exec(name.trim());
+  return m ? `#${m[1]}` : name;
+}

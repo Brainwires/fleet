@@ -4,11 +4,18 @@
 // data and the clock come in as props, links go out through `onOpen`, so the tests render it with
 // fixture data.
 
-import type { ReactNode } from "denext";
+import { type ReactNode, useState } from "denext";
 import { jobWarning, poolIsFull } from "../lib/classify.ts";
 import { RATE_LOW, RATE_SLOW, slowText } from "../lib/budget.ts";
 import type { FleetEvent } from "../lib/events.ts";
-import { formatAgo, formatClock, formatCount, formatDuration, shortRepo } from "../lib/format.ts";
+import {
+  formatAgo,
+  formatClock,
+  formatCount,
+  formatDuration,
+  shortRepo,
+  shortRunner,
+} from "../lib/format.ts";
 import { EventLog } from "./event-log.tsx";
 import { type ControlHandlers, PoolControls, RunControls } from "./controls.tsx";
 import type { FinishedJob, JobRow, PoolCard, RepoGroup, RunGroup, Snapshot } from "../lib/model.ts";
@@ -35,14 +42,16 @@ function Out(
     href: string | null;
     onOpen: (url: string) => void;
     class?: string;
+    title?: string;
     children: ReactNode;
   },
 ) {
-  if (!props.href) return <span class={props.class}>{props.children}</span>;
+  if (!props.href) return <span class={props.class} title={props.title}>{props.children}</span>;
   const href = props.href;
   return (
     <a
       class={props.class}
+      title={props.title}
       href={href}
       onClick={(e) => {
         e.preventDefault();
@@ -80,23 +89,112 @@ const STATE_TEXT: Record<PoolCard["state"], string> = {
   unknown: "no health",
 };
 
-function PoolCardView(
-  { pool, now, onPool }: { pool: PoolCard; now: number; onPool?: ControlHandlers["onPool"] },
+/** A running job with the run it belongs to: one row of a pool's runner breakdown. */
+export interface RunnerEntry {
+  readonly job: JobRow;
+  readonly repo: string;
+  readonly workflow: string;
+}
+
+/** The Running lane's jobs by pool id, oldest first (a pool card's busy runners). */
+export function runnersByPool(groups: readonly RepoGroup[]): Map<string, RunnerEntry[]> {
+  const out = new Map<string, RunnerEntry[]>();
+  for (const g of groups) {
+    for (const r of g.runs) {
+      for (const job of r.jobs) {
+        const list = out.get(job.pool) ?? [];
+        list.push({ job, repo: g.repo, workflow: r.workflow });
+        out.set(job.pool, list);
+      }
+    }
+  }
+  for (const list of out.values()) list.sort((a, b) => a.job.since - b.job.since);
+  return out;
+}
+
+/**
+ * One runner: its name (GitHub's as the image label and `#id`, trimmed with the full name as a
+ * tooltip), its state, elapsed, and the job it runs (repo · workflow · job).
+ */
+function RunnerRow(
+  { r, now, onOpen }: { r: RunnerEntry; now: number; onOpen: (u: string) => void },
 ) {
+  const { job } = r;
+  const warn = jobWarning(job, now);
+  const id = job.runner ? shortRunner(job.runner) : null;
+  const label = job.image ?? id ?? "assigning…";
+  const where = `${shortRepo(r.repo)} · ${r.workflow} · ${job.name}`;
+  return (
+    <li class={`runner${warn ? " runner-warn" : ""}`}>
+      <span class="runner-name" title={job.runner ?? label}>
+        {label}
+        {job.image && id ? <span class="runner-id">{id}</span> : null}
+      </span>
+      <span class="runner-state">{warn ? "over usual" : "running"}</span>
+      <span class="runner-time num" title="elapsed">{formatDuration(now - job.since)}</span>
+      <Out href={job.url} onOpen={onOpen} class="runner-job" title={where}>{where}</Out>
+    </li>
+  );
+}
+
+function RunnerList(
+  { runners, now, onOpen, empty }: {
+    runners: readonly RunnerEntry[];
+    now: number;
+    onOpen: (u: string) => void;
+    empty: string;
+  },
+) {
+  return runners.length === 0 ? <p class="runners-empty muted">{empty}</p> : (
+    <ul class="runners">
+      {runners.map((r) => <RunnerRow key={r.job.id} r={r} now={now} onOpen={onOpen} />)}
+    </ul>
+  );
+}
+
+function PoolCardView(
+  { pool, now, onPool, runners, onOpen }: {
+    pool: PoolCard;
+    now: number;
+    onPool?: ControlHandlers["onPool"];
+    runners: readonly RunnerEntry[];
+    onOpen: (u: string) => void;
+  },
+) {
+  const [open, setOpen] = useState(false);
+  const github = pool.id === "github";
   const waited = pool.oldestQueuedSince === null ? null : now - pool.oldestQueuedSince;
   const lateQueue = waited !== null && waited > 15 * 60_000;
   const lateClass = lateQueue ? (poolIsFull(pool) ? " is-capacity" : " is-late") : "";
+  const load = pool.slots === null ? "" : `${pool.busy}/${pool.slots}`;
+  // A self-hosted card stays compact; its busy runners open on demand (the card widens).
+  const expanded = github || (open && runners.length > 0);
+  const Tag = github ? "div" : "li";
   return (
-    <li class={`pool pool-${pool.state}${pool.id === "github" ? " pool-github" : ""}`}>
+    <Tag
+      class={`pool pool-${pool.state}${github ? " pool-github" : ""}${
+        expanded && !github ? " pool-open" : ""
+      }`}
+    >
       <div class="pool-head">
-        <span class="pool-name">{pool.title}</span>
+        <span class="pool-name" title={pool.title}>{pool.title}</span>
         <span class={`chip chip-${pool.state}`}>{STATE_TEXT[pool.state]}</span>
       </div>
       <div class="pool-load">
         <Pips busy={pool.busy} slots={pool.slots} />
-        <span class="num">
-          {pool.slots === null ? "" : `${pool.busy}/${pool.slots}`}
-        </span>
+        {!github && runners.length > 0
+          ? (
+            <button
+              type="button"
+              class="pool-toggle num"
+              aria-expanded={open}
+              title={open ? "Hide the busy runners" : "Show the busy runners"}
+              onClick={() => setOpen(!open)}
+            >
+              {load} <span aria-hidden="true">{open ? "▴" : "▾"}</span>
+            </button>
+          )
+          : <span class="num">{load}</span>}
       </div>
       <div class={`pool-wait${lateClass}`}>
         {waited === null ? <span class="muted">nothing queued</span> : (
@@ -107,10 +205,20 @@ function PoolCardView(
         )}
       </div>
       {pool.reason ? <div class="pool-reason" title={pool.reason}>{pool.reason}</div> : null}
-      {onPool && pool.id !== "github"
+      {expanded
+        ? (
+          <RunnerList
+            runners={runners}
+            now={now}
+            onOpen={onOpen}
+            empty="No GitHub-hosted jobs running."
+          />
+        )
+        : null}
+      {onPool && !github
         ? <PoolControls pool={pool.id} paused={pool.state === "paused"} onPool={onPool} />
         : null}
-    </li>
+    </Tag>
   );
 }
 
@@ -119,11 +227,16 @@ function JobLine({ job, now, onOpen }: { job: JobRow; now: number; onOpen: (u: s
   const age = Math.max(0, now - job.since);
   return (
     <li class={`job${warn ? ` job-${warn}` : ""}`}>
-      <Out href={job.url} onOpen={onOpen} class="job-name">{job.name}</Out>
-      <span class={`chip chip-pool${job.target === "github" ? " chip-gh" : ""}`}>
+      <Out href={job.url} onOpen={onOpen} class="job-name" title={job.name}>{job.name}</Out>
+      <span
+        class={`chip chip-pool${job.target === "github" ? " chip-gh" : ""}`}
+        title={job.image ?? job.pool}
+      >
         {job.pool === "github" ? "GitHub" : job.pool}
       </span>
-      <span class="job-runner" title={job.runner ?? ""}>{job.runner ?? ""}</span>
+      <span class="job-runner" title={job.runner ?? ""}>
+        {job.runner ? shortRunner(job.runner) : ""}
+      </span>
       <span class="job-time num" title={job.lane === "running" ? "elapsed" : "waited"}>
         {formatDuration(age)}
         {job.usualMs !== null && job.lane === "running"
@@ -156,7 +269,9 @@ function RunBlock(
   return (
     <section class={`run${run.defaultBranch ? " run-default" : ""}`}>
       <header class="run-head">
-        <Out href={run.url} onOpen={onOpen} class="run-name">{run.workflow}</Out>
+        <Out href={run.url} onOpen={onOpen} class="run-name" title={run.workflow}>
+          {run.workflow}
+        </Out>
         <span class={`branch${run.defaultBranch ? " branch-default" : ""}`} title={run.branch}>
           {run.defaultBranch ? <span class="diamond" aria-label="default branch">◆</span> : null}
           {run.branch}
@@ -182,11 +297,14 @@ function LaneView(
     onOpen: (u: string) => void;
     empty: string;
     controls?: ControlHandlers;
+    /** Empty: shrink to a narrow column so the other lane gets the width. */
+    collapsible?: boolean;
   },
 ) {
   const count = props.groups.reduce((n, g) => n + g.runs.reduce((k, r) => k + r.jobs.length, 0), 0);
+  const collapsed = props.collapsible === true && props.groups.length === 0;
   return (
-    <section class="lane" aria-label={props.title}>
+    <section class={`lane${collapsed ? " lane-collapsed" : ""}`} aria-label={props.title}>
       <h2 class="lane-title">
         {props.title} <span class="num lane-count">{count}</span>
       </h2>
@@ -259,6 +377,26 @@ function FinishedLine(
   );
 }
 
+/** An alert line: clamped to three lines, the full text as a tooltip; a click expands it. */
+function AlertLine({ a }: { a: Snapshot["alerts"][number] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <li class={`alert${open ? " is-open" : ""}`}>
+      <span class="num alert-at">{formatClock(a.at)}</span>
+      <span class="chip chip-pool alert-pool" title={a.pool}>{a.pool}</span>
+      <button
+        type="button"
+        class="alert-msg"
+        title={a.msg}
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+      >
+        <span class="alert-text">{a.msg}</span>
+      </button>
+    </li>
+  );
+}
+
 /** "hooks: live / stale (last delivery N min ago) / off". */
 function HooksBadge({ hooks, now }: { hooks: Snapshot["hooks"]; now: number }) {
   const via = hooks.via === "spool" ? " (via receiver)" : "";
@@ -327,6 +465,9 @@ function StatusLine({ snapshot, now }: { snapshot: Snapshot; now: number }) {
 export function FleetView(props: FleetViewProps) {
   const { snapshot: s, now, onOpen } = props;
   const sum = s.summary;
+  const busy = runnersByPool(s.running);
+  const github = s.pools.find((p) => p.id === "github");
+  const hosts = s.pools.filter((p) => p.id !== "github");
   return (
     <div class={`fleet sev-${sum.severity}`}>
       <div class="stripe" aria-hidden="true" />
@@ -368,11 +509,30 @@ export function FleetView(props: FleetViewProps) {
       </header>
 
       <section class="pools-wrap" aria-label="Runner pools">
-        <ul class="pools">
-          {s.pools.map((p) => (
-            <PoolCardView key={p.id} pool={p} now={now} onPool={props.controls?.onPool} />
-          ))}
-        </ul>
+        <div class="pools-row">
+          <ul class="pools">
+            {hosts.map((p) => (
+              <PoolCardView
+                key={p.id}
+                pool={p}
+                now={now}
+                onPool={props.controls?.onPool}
+                runners={busy.get(p.id) ?? []}
+                onOpen={onOpen}
+              />
+            ))}
+          </ul>
+          {github
+            ? (
+              <PoolCardView
+                pool={github}
+                now={now}
+                runners={busy.get("github") ?? []}
+                onOpen={onOpen}
+              />
+            )
+            : null}
+        </div>
         {props.controls?.onPool
           ? (
             <p class="pool-fleet">
@@ -417,7 +577,7 @@ export function FleetView(props: FleetViewProps) {
           </p>
         )
         : null}
-      <main class="lanes">
+      <main class={`lanes${s.queued.length === 0 ? " lanes-q-empty" : ""}`}>
         <LaneView
           title="Running"
           groups={s.running}
@@ -433,6 +593,7 @@ export function FleetView(props: FleetViewProps) {
           onOpen={onOpen}
           empty="Nothing queued."
           controls={props.controls}
+          collapsible
         />
         <aside class="side">
           <section>
@@ -447,13 +608,7 @@ export function FleetView(props: FleetViewProps) {
               )
               : (
                 <ul class="alerts">
-                  {s.alerts.map((a, i) => (
-                    <li key={`${a.at}-${i}`} class="alert">
-                      <span class="num alert-at">{formatClock(a.at)}</span>
-                      <span class="chip chip-pool">{a.pool}</span>
-                      <span class="alert-msg">{a.msg}</span>
-                    </li>
-                  ))}
+                  {s.alerts.map((a, i) => <AlertLine key={`${a.at}-${i}`} a={a} />)}
                 </ul>
               )}
           </section>

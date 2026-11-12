@@ -83,7 +83,7 @@ export function PoolControls(
       </span>
     )
     : (
-      <span class="ctl-group">
+      <span class="ctl-group ctl-pool">
         <button
           type="button"
           class="ctl"
@@ -92,17 +92,20 @@ export function PoolControls(
         >
           Pause
         </button>
-        {[60, 120, 180].map((s) => (
-          <button
-            key={s}
-            type="button"
-            class={`ctl ctl-dur${seconds === s ? " is-on" : ""}`}
-            aria-pressed={seconds === s}
-            onClick={() => setSeconds(s)}
-          >
-            {s}s
-          </button>
-        ))}
+        <span class="ctl-seg" role="group" aria-label="Pause for">
+          {[60, 120, 180].map((s) => (
+            <button
+              key={s}
+              type="button"
+              class={`ctl ctl-dur${seconds === s ? " is-on" : ""}`}
+              aria-pressed={seconds === s}
+              title={`Pause for ${s} seconds`}
+              onClick={() => setSeconds(s)}
+            >
+              {s / 60}m
+            </button>
+          ))}
+        </span>
       </span>
     );
 }

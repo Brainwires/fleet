@@ -82,6 +82,11 @@ export function classifyJob(job: GhJob): JobClass | null {
   return { lane, target: "github", pool: GITHUB_POOL };
 }
 
+/** A GitHub-hosted job's image: its first runs-on label not ours (`ubuntu-22.04`), or `null`. */
+export function githubImage(labels: readonly string[] | undefined): string | null {
+  return (labels ?? []).find((l) => l !== "self-hosted" && !l.startsWith("denext-")) ?? null;
+}
+
 /** Parse an ISO time to epoch ms (`null` for missing / garbage). */
 export function time(iso: string | null | undefined): number | null {
   if (!iso) return null;
@@ -208,6 +213,7 @@ export function groupLanes(
         target: c.target,
         pool: c.pool,
         runner: c.lane === "running" ? job.runner_name || null : null,
+        image: c.target === "github" ? githubImage(job.labels) : null,
         since: jobSince(job, c.lane),
         usualMs: usual(a.repo, header.workflow, job.name),
       });

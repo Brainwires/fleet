@@ -5,7 +5,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from "denext";
 import { type FleetEvent, isProblem } from "../lib/events.ts";
-import { shortRepo } from "../lib/format.ts";
+import { shortRepo, shortRunner } from "../lib/format.ts";
 
 /** A severity's glyph and label (never colour alone). */
 export const SEV_MARK: Record<FleetEvent["sev"], { glyph: string; label: string }> = {
@@ -21,6 +21,18 @@ const pad = (n: number) => String(n).padStart(2, "0");
 export function logTime(at: number): string {
   const d = new Date(at);
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+/**
+ * A line's text for the log's narrow column: a job start (`started on <pool> on <runner>`, as the
+ * events record it) reads `started · <pool>` with the runner apart, so the view trims the runner
+ * alone (full name as a tooltip); GitHub-hosted reads `GitHub`. Any other text is kept as is.
+ */
+export function eventText(text: string): { text: string; runner: string | null } {
+  const m = /^started on (\S+)(?: on (.+))?$/.exec(text);
+  if (!m) return { text, runner: null };
+  const pool = m[1] === "GitHub-hosted" ? "GitHub" : m[1];
+  return { text: `started · ${pool}`, runner: m[2] ?? null };
 }
 
 /** The filters. */
@@ -144,6 +156,8 @@ export function EventLog({ events, onOpen }: EventLogProps) {
 function EventLine({ e, onOpen }: { e: FleetEvent; onOpen: (url: string) => void }) {
   const mark = SEV_MARK[e.sev];
   const where = e.job ? `${e.workflow} / ${e.job}` : e.workflow;
+  const shown = e.kind === "started" ? eventText(e.text) : { text: e.text, runner: null };
+  const short = shown.runner === null ? null : shortRunner(shown.runner);
   return (
     <div class={`ev ev-${e.sev}${e.user ? " ev-user" : ""}${e.backfill ? " ev-past" : ""}`}>
       <span class="num ev-time">{logTime(e.at)}</span>
@@ -152,7 +166,7 @@ function EventLine({ e, onOpen }: { e: FleetEvent; onOpen: (url: string) => void
       </span>
       <span class="ev-repo">{e.repo ? shortRepo(e.repo) : "fleet"}</span>
       <span class="ev-where" title={where}>{where}</span>
-      <span class="ev-text">
+      <span class="ev-text" title={e.text}>
         {e.user ? <span class="ev-you">you</span> : null}
         {e.backfill
           ? (
@@ -166,7 +180,13 @@ function EventLine({ e, onOpen }: { e: FleetEvent; onOpen: (url: string) => void
             </span>
           )
           : null}
-        {e.text}
+        {shown.text}
+        {short === null ? null : (
+          <>
+            {short.startsWith("#") ? " " : " · "}
+            <span class="ev-runner" title={shown.runner!}>{short}</span>
+          </>
+        )}
       </span>
       {e.url
         ? (

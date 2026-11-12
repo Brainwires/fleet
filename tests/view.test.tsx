@@ -8,7 +8,10 @@ import { TokenScreen } from "../app/token-screen.tsx";
 import { createGitHubClient } from "../lib/github.ts";
 import type { GhRunList } from "../lib/github-types.ts";
 import type { FleetEvent } from "../lib/events.ts";
-import type { Snapshot } from "../lib/model.ts";
+import type { JobRow, Snapshot } from "../lib/model.ts";
+import { eventText } from "../app/event-log.tsx";
+import { githubImage } from "../lib/classify.ts";
+import { shortRunner } from "../lib/format.ts";
 import { Poller } from "../lib/poller.ts";
 import { fakeFetch, fixture, NOW, standardRoutes } from "./helpers.ts";
 
@@ -299,4 +302,252 @@ Deno.test("view: the rate-limit banner and the budget colour", async () => {
   assertEquals(one(screen.container, ".banner"), undefined);
   assertStringIncludes(one(screen.container, ".rate")!.getAttribute("class") ?? "", "status-warn");
   await screen.unmount();
+});
+
+/** The fixture snapshot with one GitHub-hosted job running in the first running run. */
+async function withGithubJob(): Promise<Snapshot> {
+  const snap = await fixtureSnapshot();
+  const [g, ...rest] = snap.running;
+  const [r, ...runs] = g.runs;
+  const gh: JobRow = {
+    id: 999,
+    name: "ios-export-router",
+    url: "https://github.com/Brainwires/denext/actions/runs/1/job/999",
+    lane: "running",
+    target: "github",
+    pool: "github",
+    runner: "GitHub Actions 1000058781",
+    image: "macos-15-intel",
+    since: NOW - 125_000,
+    usualMs: null,
+  };
+  return {
+    ...snap,
+    running: [{ ...g, runs: [{ ...r, jobs: [...r.jobs, gh] }, ...runs] }, ...rest],
+  };
+}
+
+Deno.test("view: long names truncate with the full name as a tooltip", async () => {
+  const snap = await withGithubJob();
+  const screen = await render(
+    <FleetView snapshot={snap} now={NOW} onOpen={() => {}} onRefresh={() => {}} />,
+  );
+  // Pool names: the full name as a title (the chip stays on the head's line: CSS, no wrap).
+  const names = all(screen.container, ".pool-name");
+  assert(names.every((n) => n.getAttribute("title") === n.textContent));
+  // Job rows: the name has a title; GitHub's runner shows as #id with the full name on hover.
+  const running = all(screen.container, ".lane")[0];
+  const jobNames = all(running, ".job-name");
+  assert(jobNames.every((n) => n.getAttribute("title") === n.textContent));
+  const ghRunner = all(running, ".job-runner").find((n) => n.textContent === "#1000058781");
+  assertEquals(ghRunner?.getAttribute("title"), "GitHub Actions 1000058781");
+  // Run headers: the workflow and branch keep their full text as titles.
+  assert(all(running, ".run-name").every((n) => n.getAttribute("title") === n.textContent));
+  assertEquals(one(running, ".branch")?.getAttribute("title"), "train/4.17");
+  await screen.unmount();
+});
+
+Deno.test("view: the GitHub-hosted card lists each runner and its job", async () => {
+  const snap = await withGithubJob();
+  const opened: string[] = [];
+  const screen = await render(
+    <FleetView snapshot={snap} now={NOW} onOpen={(u) => opened.push(u)} onRefresh={() => {}} />,
+  );
+  const gh = one(screen.container, ".pool-github")!;
+  // The wide panel sits beside the self-hosted grid, not in it.
+  assertEquals(gh.localName, "div");
+  assertEquals(all(one(screen.container, ".pools")!, ".pool-github").length, 0);
+  const rows = all(gh, ".runner");
+  assertEquals(rows.length, 1);
+  const name = one(rows[0], ".runner-name")!;
+  assertEquals(name.getAttribute("title"), "GitHub Actions 1000058781");
+  assertStringIncludes(name.textContent, "macos-15-intel");
+  assertEquals(one(rows[0], ".runner-id")?.textContent, "#1000058781");
+  assertEquals(one(rows[0], ".runner-state")?.textContent, "running");
+  assertEquals(one(rows[0], ".runner-time")?.textContent, "2m 05s");
+  const job = one(rows[0], ".runner-job")!;
+  assertStringIncludes(job.textContent, "denext · ");
+  assertStringIncludes(job.textContent, " · ios-export-router");
+  assertEquals(job.getAttribute("title"), job.textContent);
+  await screen.fireEvent.click(job);
+  assertEquals(opened, ["https://github.com/Brainwires/denext/actions/runs/1/job/999"]);
+  await screen.unmount();
+  // No GitHub job running: the panel says so.
+  const empty = await render(
+    <FleetView
+      snapshot={await fixtureSnapshot()}
+      now={NOW}
+      onOpen={() => {}}
+      onRefresh={() => {}}
+    />,
+  );
+  assertStringIncludes(
+    one(empty.container, ".pool-github")!.textContent,
+    "No GitHub-hosted jobs running.",
+  );
+  await empty.unmount();
+});
+
+Deno.test("view: a self-hosted card opens its busy runners on demand", async () => {
+  const snap = await fixtureSnapshot();
+  const screen = await render(
+    <FleetView snapshot={snap} now={NOW} onOpen={() => {}} onRefresh={() => {}} />,
+  );
+  const card = () =>
+    all(screen.container, ".pool").find((p) =>
+      one(p, ".pool-name")?.textContent === "linux-x64-docker"
+    )!;
+  // Compact by default: the load is a toggle, no runner rows.
+  const toggle = one(card(), ".pool-toggle")!;
+  assertEquals(toggle.getAttribute("aria-expanded"), "false");
+  assertEquals(all(card(), ".runner").length, 0);
+  assertFalse((card().getAttribute("class") ?? "").includes("pool-open"));
+  // A pool with nothing running has no toggle.
+  const macX64 = all(screen.container, ".pool").find((p) =>
+    one(p, ".pool-name")?.textContent === "mac-x64"
+  )!;
+  assertEquals(one(macX64, ".pool-toggle"), undefined);
+  await screen.fireEvent.click(toggle);
+  assertStringIncludes(card().getAttribute("class") ?? "", "pool-open");
+  const rows = all(card(), ".runner");
+  assertEquals(rows.length, 1);
+  assertEquals(
+    one(rows[0], ".runner-name")?.getAttribute("title"),
+    "denext-linux-x64-docker-1-1794415456",
+  );
+  assertStringIncludes(one(rows[0], ".runner-job")!.textContent, "coverage");
+  await screen.fireEvent.click(one(card(), ".pool-toggle")!);
+  assertEquals(all(card(), ".runner").length, 0);
+  await screen.unmount();
+});
+
+Deno.test("view: an empty Queued lane collapses; it returns when jobs queue", async () => {
+  const snap = await fixtureSnapshot();
+  const screen = await render(
+    <FleetView snapshot={snap} now={NOW} onOpen={() => {}} onRefresh={() => {}} />,
+  );
+  assertFalse(one(screen.container, "main")!.getAttribute("class")!.includes("lanes-q-empty"));
+  assertEquals(all(screen.container, ".lane-collapsed").length, 0);
+  await screen.rerender(
+    <FleetView
+      snapshot={{ ...snap, queued: [] }}
+      now={NOW}
+      onOpen={() => {}}
+      onRefresh={() => {}}
+    />,
+  );
+  assertStringIncludes(one(screen.container, "main")!.getAttribute("class")!, "lanes-q-empty");
+  const collapsed = all(screen.container, ".lane-collapsed");
+  assertEquals(collapsed.length, 1);
+  assertEquals(collapsed[0].getAttribute("aria-label"), "Queued");
+  assertStringIncludes(collapsed[0].textContent, "Nothing queued.");
+  // An empty Running lane never collapses.
+  await screen.rerender(
+    <FleetView
+      snapshot={{ ...snap, running: [] }}
+      now={NOW}
+      onOpen={() => {}}
+      onRefresh={() => {}}
+    />,
+  );
+  assertEquals(all(screen.container, ".lane-collapsed").length, 0);
+  await screen.unmount();
+});
+
+Deno.test("view: an alert is clamped with its text as a title, expanded on click", async () => {
+  const snap = await fixtureSnapshot();
+  const screen = await render(
+    <FleetView snapshot={snap} now={NOW} onOpen={() => {}} onRefresh={() => {}} />,
+  );
+  const msg = one(screen.container, ".alert-msg")!;
+  assertEquals(msg.localName, "button");
+  assertEquals(msg.getAttribute("title"), msg.textContent);
+  assertEquals(msg.getAttribute("aria-expanded"), "false");
+  await screen.fireEvent.click(msg);
+  assertStringIncludes(one(screen.container, ".alert")!.getAttribute("class") ?? "", "is-open");
+  assertEquals(one(screen.container, ".alert-msg")!.getAttribute("aria-expanded"), "true");
+  await screen.unmount();
+});
+
+Deno.test("view: a pool's pause durations are one compact segmented group", async () => {
+  const snap = await fixtureSnapshot();
+  const asked: unknown[] = [];
+  const screen = await render(
+    <FleetView
+      snapshot={snap}
+      now={NOW}
+      onOpen={() => {}}
+      onRefresh={() => {}}
+      controls={{ onControl: () => {}, onPool: (c) => asked.push(c) }}
+    />,
+  );
+  const card = all(screen.container, ".pool")[0];
+  const seg = one(card, ".ctl-seg")!;
+  const durs = all(seg, ".ctl-dur");
+  assertEquals(durs.map((b) => b.textContent), ["1m", "2m", "3m"]);
+  assertEquals(durs[0].getAttribute("title"), "Pause for 60 seconds");
+  await screen.fireEvent.click(durs[1]);
+  await screen.fireEvent.click(all(card, ".ctl")[0]);
+  assertEquals(asked, [{ kind: "pause", pool: "mac-arm", seconds: 120 }]);
+  // The GitHub panel has no pool controls.
+  assertEquals(one(one(screen.container, ".pool-github")!, ".ctl"), undefined);
+  await screen.unmount();
+});
+
+Deno.test("event log: a start reads short, the runner trimmed apart with a tooltip", async () => {
+  const snap = await fixtureSnapshot();
+  const base = EVENTS[0];
+  const events: FleetEvent[] = [
+    {
+      ...base,
+      seq: 10,
+      kind: "started",
+      text: "started on GitHub-hosted on GitHub Actions 1000058781",
+    },
+    {
+      ...base,
+      seq: 11,
+      kind: "started",
+      text: "started on mac-arm on denext-mac-arm-1-1794415653",
+    },
+    { ...base, seq: 12, kind: "started", text: "started on linux-x64" },
+  ];
+  const screen = await render(
+    <FleetView
+      snapshot={snap}
+      now={NOW}
+      onOpen={() => {}}
+      onRefresh={() => {}}
+      events={events}
+    />,
+  );
+  const texts = all(one(screen.container, ".log")!, ".ev-text");
+  assertEquals(texts.map((t) => t.textContent), [
+    "started · GitHub #1000058781",
+    "started · mac-arm · denext-mac-arm-1-1794415653",
+    "started · linux-x64",
+  ]);
+  assertEquals(one(texts[0], ".ev-runner")?.getAttribute("title"), "GitHub Actions 1000058781");
+  assertEquals(
+    one(texts[1], ".ev-runner")?.getAttribute("title"),
+    "denext-mac-arm-1-1794415653",
+  );
+  assertEquals(texts[0].getAttribute("title"), events[0].text);
+  // The job column keeps its full text as a title.
+  assertEquals(one(screen.container, ".ev-where")?.getAttribute("title"), "CI / check");
+  await screen.unmount();
+});
+
+Deno.test("format: shortRunner, githubImage and eventText", () => {
+  assertEquals(shortRunner("GitHub Actions 1000058781"), "#1000058781");
+  assertEquals(shortRunner("denext-mac-arm-1-17944"), "denext-mac-arm-1-17944");
+  assertEquals(githubImage(["macos-15-intel"]), "macos-15-intel");
+  assertEquals(githubImage(["self-hosted", "denext-linux-x64"]), null);
+  assertEquals(githubImage(undefined), null);
+  assertEquals(eventText("started on GitHub-hosted on GitHub Actions 7"), {
+    text: "started · GitHub",
+    runner: "GitHub Actions 7",
+  });
+  assertEquals(eventText("started on linux-x64"), { text: "started · linux-x64", runner: null });
+  assertEquals(eventText("finished: success"), { text: "finished: success", runner: null });
 });
