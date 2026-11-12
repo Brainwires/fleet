@@ -1,0 +1,20 @@
+{
+  "total_count": 1,
+  "workflow_runs": [
+    {
+      "id": 43059933092,
+      "name": "CI",
+      "display_title": "CI",
+      "head_branch": "train/4.17",
+      "head_sha": "97fe04073fad3a4b7482e01ad80c54fccac695b0",
+      "event": "workflow_dispatch",
+      "status": "in_progress",
+      "conclusion": null,
+      "html_url": "https://github.com/Brainwires/denext/actions/runs/43059933092",
+      "workflow_id": 329571490,
+      "created_at": "2026-11-11T16:36:06Z",
+      "run_started_at": "2026-11-11T16:36:06Z",
+      "run_attempt": 1
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "total_count": 2,
+  "runners": [
+    {
+      "id": 101,
+      "name": "denext-linux-x64-docker-1-1794415456",
+      "os": "Linux",
+      "status": "online",
+      "busy": true,
+      "labels": [
+        {
+          "id": 1,
+          "name": "self-hosted",
+          "type": "read-only"
+        },
+        {
+          "id": 2,
+          "name": "denext-linux-x64-docker",
+          "type": "custom"
+        }
+      ]
+    },
+    {
+      "id": 102,
+      "name": "denext-win-x64-1-1794417763",
+      "os": "Windows",
+      "status": "online",
+      "busy": true,
+      "labels": [
+        {
+          "id": 1,
+          "name": "self-hosted",
+          "type": "read-only"
+        },
+        {
+          "id": 3,
+          "name": "denext-windows-x64",
+          "type": "custom"
+        }
+      ]
+    }
+  ]
+}

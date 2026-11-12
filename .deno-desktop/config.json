@@ -1,0 +1,98 @@
+{
+  "desktop": {
+    "installers": {
+      "macos": [
+        "dmg"
+      ],
+      "linux": [],
+      "windows": [
+        "zip"
+      ]
+    },
+    "app": {
+      "name": "Fleet",
+      "identifier": "dev.brainwires.fleet",
+      "icons": {
+        "macos": "./icons/app.png",
+        "linux": "./icons/app.png",
+        "windows": "./icons/app.ico"
+      },
+      "origin": "fleet://app",
+      "singleInstance": true,
+      "keepAlive": true,
+      "activationPolicy": "accessory"
+    },
+    "window": {
+      "width": 1320,
+      "height": 860,
+      "title": "Fleet",
+      "show": false
+    },
+    "minSize": {
+      "width": 860,
+      "height": 560
+    },
+    "tray": {
+      "icon": "/tray.png",
+      "tooltip": "Fleet",
+      "menu": [
+        {
+          "id": "toggle",
+          "label": "Show Fleet"
+        },
+        {
+          "id": "summary",
+          "label": "Starting…",
+          "disabled": true
+        },
+        {
+          "separator": true
+        },
+        {
+          "id": "pause-notifications",
+          "label": "Pause notifications",
+          "checked": false
+        },
+        {
+          "id": "refresh",
+          "label": "Refresh now"
+        },
+        {
+          "separator": true
+        },
+        {
+          "id": "quit",
+          "label": "Quit Fleet"
+        }
+      ]
+    },
+    "secureStore": {
+      "legacy": false
+    },
+    "capabilities": {
+      "secureStore": true,
+      "notifications": true,
+      "launchAtLogin": true,
+      "extensions": [
+        "./desktop/fleet.ts"
+      ]
+    },
+    "extraPermissions": {
+      "netConnect": [
+        "api.github.com"
+      ],
+      "run": [
+        "/opt/homebrew/bin/gh",
+        "/usr/local/bin/gh",
+        "/usr/bin/gh",
+        "/usr/local/bin/gh",
+        "C:\\Program Files\\GitHub CLI\\gh.exe",
+        "/usr/bin/security"
+      ],
+      "write": [
+        "$APPDATA",
+        "/Users/nightness/.denext-runners/hooks"
+      ]
+    }
+  }
+}

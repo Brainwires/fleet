@@ -1,0 +1,35 @@
+{
+  "total_count": 2,
+  "workflow_runs": [
+    {
+      "id": 43097440106,
+      "name": "denext tests",
+      "display_title": "chore(release): version 3.0.0-denext.21",
+      "head_branch": "rel/3.0.0-denext.21",
+      "head_sha": "8451efa29262f560c8bd1ab14682f960e07935aa",
+      "event": "push",
+      "status": "queued",
+      "conclusion": null,
+      "html_url": "https://github.com/Brainwires/deno/actions/runs/43097440106",
+      "workflow_id": 372818006,
+      "created_at": "2026-11-11T20:40:27Z",
+      "run_started_at": "2026-11-11T20:40:27Z",
+      "run_attempt": 1
+    },
+    {
+      "id": 43097439829,
+      "name": "denext runtime",
+      "display_title": "chore(release): version 3.0.0-denext.21",
+      "head_branch": "rel/3.0.0-denext.21",
+      "head_sha": "8451efa29262f560c8bd1ab14682f960e07935aa",
+      "event": "push",
+      "status": "queued",
+      "conclusion": null,
+      "html_url": "https://github.com/Brainwires/deno/actions/runs/43097439829",
+      "workflow_id": 371441440,
+      "created_at": "2026-11-11T20:40:27Z",
+      "run_started_at": "2026-11-11T20:40:27Z",
+      "run_attempt": 1
+    }
+  ]
+}
