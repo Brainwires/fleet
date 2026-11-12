@@ -93,7 +93,9 @@ The token is never logged, rendered, written to a file, or returned to the page.
   chip, runner, elapsed or waited, ticking each second; `/ ~usual` once three successful runs of
   that job were seen). A default branch (`development-denext`, `development`, `main`) gets a violet
   left rule and a ◆ branch chip. A job queued over 15 min turns red; one running past 1.5× its usual
-  length (and at least 3 min over) turns amber.
+  length (and at least 3 min over) turns amber. A queued run GitHub hasn't expanded into jobs shows
+  "queued, no jobs yet" for its first 10 min; past that it is GitHub's stale status (the jobs list
+  never fills) and is left out.
 - **Side**: the health variable's recent alerts, and jobs finished in the last 30 min with ✓ / ✕ /
   ⊘.
 - A click on a run or job opens it on github.com in the system browser.
@@ -110,7 +112,10 @@ health variable's alerts, and every control you used or that was refused (marked
 Each line: local time, a severity glyph (✓ ✕ ▲ • ⊘, coloured too), repo, workflow / job, the text, a
 link. Filters: all / problems, repo, search. The first poll only records the state (no flood). The
 log survives a restart (see [Data files](#data-files)); state older than 15 min at a restart is
-re-seeded silently.
+re-seeded silently. Where the webhook spool exists, startup back-fills the gap from it: the job
+queued / started / finished lines and run completions received after the log's last line (the last
+24 h, at most 500 lines), at their real times, marked ↺ ("while Fleet was closed"), never duplicated
+and never notified (`lib/backfill.ts`).
 
 ## Notifications
 
@@ -171,8 +176,9 @@ reconciles.
   (rotated to `events.jsonl.1` at 20 MB), which the runner scheduler reads too.
 - **Fleet** finds the port taken by the receiver and tails that spool every 2 s instead
   (`hooks: live (via receiver)`), applying each delivery to the same state and event log as polling.
-  Without the receiver running, Fleet listens on 8789 itself, with the same checks. A machine
-  without the tunnel's launchd job and the keychain secret has no webhooks: `hooks: off`.
+  The last delivery starts at the spool's newest line, so a restart in a quiet spell isn't "no
+  delivery yet". Without the receiver running, Fleet listens on 8789 itself, with the same checks. A
+  machine without the tunnel's launchd job and the keychain secret has no webhooks: `hooks: off`.
 - **Polling as the fallback**: with deliveries arriving, polling only reconciles every 5 min; with
   no delivery for 10 min while runs are active it goes back to the normal rate, so a missed delivery
   or a dead tunnel costs freshness, not correctness.
@@ -333,6 +339,7 @@ file in this repo.
 | `lib/service.ts`                       | Token lookup, scheduling (visible / hidden / back-off), notifications, persistence                       |
 | `lib/poller.ts`                        | One polling round over the GitHub client; the live pool list                                             |
 | `lib/github.ts`                        | The client: ETag cache, rate limit, back-off, counted requests                                           |
+| `lib/backfill.ts`                      | The event log's back-fill from the webhook spool (what happened while Fleet was closed)                  |
 | `lib/budget.ts`                        | The poll interval from the shared rate budget and the webhooks                                           |
 | `lib/events.ts`                        | The event log: diffing successive observations, the bounded log                                          |
 | `lib/hooks.ts`                         | The webhook handler (route, size, signature, dedupe) and the spool reader                                |

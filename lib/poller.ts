@@ -631,7 +631,7 @@ export class Poller {
 const isStr = (v: unknown): v is string => typeof v === "string";
 
 /** A webhook's `workflow_run`, typed, or `null`. */
-function asRun(v: unknown): GhRun | null {
+export function asRun(v: unknown): GhRun | null {
   const r = v as Record<string, unknown> | null;
   if (!r || typeof r.id !== "number" || !isStr(r.status) || !isStr(r.html_url)) return null;
   if (!isStr(r.created_at) || !isStr(r.head_sha) || !isStr(r.event)) return null;
@@ -640,7 +640,7 @@ function asRun(v: unknown): GhRun | null {
 }
 
 /** A webhook's `workflow_job`, typed, or `null`. */
-function asJob(v: unknown): GhJob | null {
+export function asJob(v: unknown): GhJob | null {
   const j = v as Record<string, unknown> | null;
   if (!j || typeof j.id !== "number" || typeof j.run_id !== "number") return null;
   if (!isStr(j.name) || !isStr(j.status) || !isStr(j.created_at)) return null;

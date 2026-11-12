@@ -53,6 +53,11 @@ export interface FleetEvent {
   readonly job_id?: number;
   /** Logged for something the user did in Fleet (a control). */
   readonly user?: boolean;
+  /**
+   * Back-filled at startup from the webhook spool: it happened while Fleet was closed, and `at` is
+   * the delivery's real time (no notification is ever posted for it).
+   */
+  readonly backfill?: boolean;
 }
 
 /** An event before the log numbers it. */
@@ -123,7 +128,8 @@ function conclusionSev(c: string | null | undefined): EventSeverity {
   return "muted"; // cancelled, skipped, neutral, stale
 }
 
-function poolText(job: GhJob): string {
+/** Where a job runs or waits: its pool's short name, or `GitHub-hosted`. */
+export function poolText(job: GhJob): string {
   const c = classifyJob({
     ...job,
     status: job.status === "completed" ? "in_progress" : job.status,
@@ -366,6 +372,16 @@ export class EventLog {
     return added;
   }
 
+  /**
+   * Insert events that happened earlier (the back-fill), numbering each after the last `seq` (so
+   * the page and the journal still see them as new) and placing them by `at` among the lines held.
+   */
+  insert(events: readonly NewEvent[]): FleetEvent[] {
+    const added = events.map((e) => ({ ...e, seq: ++this.#seq }));
+    this.#events = mergeEvents(this.#events, added).slice(-LOG_LIMIT);
+    return added;
+  }
+
   /** The events after `seq` (all when `seq` is 0 or from another run of the log). */
   after(seq: number): FleetEvent[] {
     if (seq > this.#seq) return [...this.#events];
@@ -395,6 +411,20 @@ export class EventLog {
     );
     return new EventLog(events, typeof r.seq === "number" ? r.seq : 0);
   }
+}
+
+/**
+ * Merge two event lists in time order (`at`, then `seq`), each seq once: the page adds what it
+ * pulls with this, so back-filled lines land at their real times.
+ */
+export function mergeEvents(
+  held: readonly FleetEvent[],
+  more: readonly FleetEvent[],
+): FleetEvent[] {
+  const bySeq = new Map<number, FleetEvent>();
+  for (const e of held) bySeq.set(e.seq, e);
+  for (const e of more) bySeq.set(e.seq, e);
+  return [...bySeq.values()].sort((a, b) => a.at - b.at || a.seq - b.seq);
 }
 
 /** Problems: what the "problems only" filter keeps. */

@@ -145,7 +145,7 @@ function EventLine({ e, onOpen }: { e: FleetEvent; onOpen: (url: string) => void
   const mark = SEV_MARK[e.sev];
   const where = e.job ? `${e.workflow} / ${e.job}` : e.workflow;
   return (
-    <div class={`ev ev-${e.sev}${e.user ? " ev-user" : ""}`}>
+    <div class={`ev ev-${e.sev}${e.user ? " ev-user" : ""}${e.backfill ? " ev-past" : ""}`}>
       <span class="num ev-time">{logTime(e.at)}</span>
       <span class={`ev-mark mark-${e.sev}`} role="img" aria-label={mark.label} title={mark.label}>
         {mark.glyph}
@@ -154,6 +154,18 @@ function EventLine({ e, onOpen }: { e: FleetEvent; onOpen: (url: string) => void
       <span class="ev-where" title={where}>{where}</span>
       <span class="ev-text">
         {e.user ? <span class="ev-you">you</span> : null}
+        {e.backfill
+          ? (
+            <span
+              class="ev-backfill"
+              role="img"
+              aria-label="while Fleet was closed"
+              title="while Fleet was closed (from the webhook spool)"
+            >
+              ↺
+            </span>
+          )
+          : null}
         {e.text}
       </span>
       {e.url

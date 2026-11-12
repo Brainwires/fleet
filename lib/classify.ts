@@ -13,6 +13,21 @@ import {
 /** A job queued longer than this is late (15 min). */
 export const QUEUED_WARN_MS = 15 * 60_000;
 
+/**
+ * A queued run with no jobs older than this is a ghost (10 min): GitHub keeps reporting some runs as
+ * `queued` with a jobs list that never fills. A just-dispatched run has no jobs for a few seconds,
+ * so a younger one still shows ("queued, no jobs yet").
+ */
+export const GHOST_RUN_MS = 10 * 60_000;
+
+/** Whether a queued run with no jobs is a ghost: older than GHOST_RUN_MS (by its latest start). */
+export function isGhostRun(run: GhRun, now: number): boolean {
+  const created = time(run.created_at);
+  const started = time(run.run_started_at);
+  const since = Math.max(created ?? -Infinity, started ?? -Infinity);
+  return Number.isFinite(since) && now - since > GHOST_RUN_MS;
+}
+
 /** Running past this multiple of its usual length is late. */
 export const OVER_USUAL_FACTOR = 1.5;
 
@@ -151,16 +166,19 @@ export function repoOrder(a: string, b: string): number {
 /**
  * Group the active runs' jobs into the Running and Queued lanes: repo → run → job. A run appears
  * in each lane it has jobs in; a queued run GitHub hasn't expanded into jobs yet appears in Queued
- * with `pendingJobs`. Runs sort oldest first (by their oldest job), jobs by `since`.
+ * with `pendingJobs`, unless it is a ghost (no jobs past GHOST_RUN_MS: left out entirely). Runs
+ * sort oldest first (by their oldest job), jobs by `since`.
  *
  * @param runs The active runs.
  * @param jobsByRun Each run's jobs (every status; completed ones are left out here).
  * @param usual The usual-length lookup.
+ * @param now The clock, for the ghost-run cut-off.
  */
 export function groupLanes(
   runs: readonly ActiveRun[],
   jobsByRun: ReadonlyMap<number, readonly GhJob[]>,
   usual: UsualLookup,
+  now: number,
 ): { running: RepoGroup[]; queued: RepoGroup[] } {
   const lanes: Record<Lane, Map<string, RunGroup[]>> = { running: new Map(), queued: new Map() };
   for (const a of runs) {
@@ -184,6 +202,7 @@ export function groupLanes(
     }
     const runStatus = laneOf(a.run.status ?? "queued");
     const noJobsYet = jobs.length === 0 && runStatus === "queued";
+    if (noJobsYet && isGhostRun(a.run, now)) continue;
     for (const lane of ["running", "queued"] as const) {
       const list = rows[lane].sort((x, y) => x.since - y.since || x.id - y.id);
       if (list.length === 0 && !(lane === "queued" && noJobsYet)) continue;

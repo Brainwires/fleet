@@ -6,7 +6,9 @@
 import { assert, assertEquals, assertFalse, assertRejects } from "@std/assert";
 import {
   classifyJob,
+  GHOST_RUN_MS,
   groupLanes,
+  isGhostRun,
   jobAge,
   jobSince,
   jobWarning,
@@ -152,7 +154,7 @@ Deno.test("grouping: repo → run → job, per lane; a queued run with no jobs y
     })),
   ];
   const jobs = new Map([[ciRunId(), fixture<GhJobList>("denext-ci-jobs.json").jobs]]);
-  const { running, queued } = groupLanes(runs, jobs, () => null);
+  const { running, queued } = groupLanes(runs, jobs, () => null, NOW);
   assertEquals(running.map((g) => g.repo), ["Brainwires/denext"]);
   assertEquals(running[0].runs[0].jobs.map((j) => j.name), ["coverage", "windows-tests"]);
   assertEquals(running[0].runs[0].branch, "train/4.17");
@@ -166,6 +168,37 @@ Deno.test("grouping: repo → run → job, per lane; a queued run with no jobs y
     "next-compat",
   ]);
   assertEquals(queued[1].runs[0].sha.length, 7);
+});
+
+Deno.test("grouping: a queued run with no jobs shows while fresh, is hidden once a ghost", () => {
+  const base = fixture<GhRunList>("deno-runs-queued.json").workflow_runs[0];
+  const at = (iso: string) => ({ ...base, status: "queued", created_at: iso, run_started_at: iso });
+  const created = Date.parse(base.created_at);
+  const runs = [{ repo: "Brainwires/deno", run: at(base.created_at) }];
+  // Fresh (just dispatched, jobs not expanded yet): "queued, no jobs yet".
+  const fresh = groupLanes(runs, new Map(), () => null, created + 5_000).queued;
+  assertEquals(fresh.length, 1);
+  assert(fresh[0].runs[0].pendingJobs);
+  // Still under 10 min: shown.
+  assertEquals(
+    groupLanes(runs, new Map(), () => null, created + GHOST_RUN_MS - 1).queued.length,
+    1,
+  );
+  // Past 10 min with no jobs: GitHub's stale status, left out of both lanes.
+  const ghost = groupLanes(runs, new Map(), () => null, created + GHOST_RUN_MS + 1);
+  assertEquals(ghost.queued, []);
+  assertEquals(ghost.running, []);
+  // An old run re-run just now (run_started_at fresh) still shows while its jobs appear.
+  const rerun = [{
+    repo: "Brainwires/deno",
+    run: { ...at(base.created_at), run_started_at: new Date(created + 60 * 60_000).toISOString() },
+  }];
+  assertEquals(groupLanes(rerun, new Map(), () => null, created + 61 * 60_000).queued.length, 1);
+  // An old queued run WITH jobs is never hidden.
+  const job = { ...fixture<GhJobList>("denext-ci-jobs.json").jobs[0], status: "queued" };
+  const withJobs = groupLanes(runs, new Map([[base.id, [job]]]), () => null, created + 99 * 60_000);
+  assertEquals(withJobs.queued[0].runs[0].jobs.length, 1);
+  assertFalse(isGhostRun(at(base.created_at), created + GHOST_RUN_MS));
 });
 
 // ---- health variable ----

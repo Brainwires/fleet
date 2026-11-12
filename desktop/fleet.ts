@@ -28,6 +28,7 @@ import { localPoolPaths, readLocalHealth, runProgram } from "../lib/deno-pools.t
 import {
   hooksAvailable,
   readHookSecret,
+  readSpoolSince,
   type Receiver,
   startReceiver,
   tailSpool,
@@ -69,6 +70,8 @@ function start(host: DesktopExtensionHost): void {
     saveAgentSnapshot: (snap) => saveAgentSnapshot(dir, snap),
     appendJournal: (events) => appendJournal(dir, events),
     journalLastSeq: () => journalLastSeq(dir),
+    // What happened while Fleet was closed: the receiver's spool, read once at startup.
+    readSpool: (since) => readSpoolSince(since),
     ...(pools ? { localHealth: readLocalHealth } : {}),
   });
   service.onChange(() => {
@@ -103,12 +106,19 @@ async function startHooks(s: FleetService): Promise<void> {
     onVerified: (_event, at) => s.hookVerified(at),
     onReject: (why) => console.warn(`fleet: hooks: rejected ${why}`),
   });
-  if (receiver) return s.setHooksEnabled(true, "listener");
-  // The port is held by the standalone receiver (`denext task hooks`): read its spool instead.
-  const stop = await tailSpool((d) => void s.applyHook(d));
-  if (stop) {
-    stopSpool = stop;
+  if (receiver) {
+    s.setHooksEnabled(true, "listener");
+    return void s.backfill();
+  }
+  // The port is held by the receiver (the launchd service, or `denext task hooks`): read its spool.
+  const tail = await tailSpool((d) => void s.applyHook(d));
+  if (tail) {
+    stopSpool = tail.stop;
+    // Start from the spool's newest delivery, not "no delivery yet": the receiver has been live
+    // all along, Fleet just started.
+    if (tail.lastDeliveryAt !== null) s.hookVerified(tail.lastDeliveryAt);
     s.setHooksEnabled(true, "spool");
+    void s.backfill();
   } else {
     console.warn("fleet: hooks: 127.0.0.1:8789 is taken and there is no spool; polling only");
     s.setHooksEnabled(false);

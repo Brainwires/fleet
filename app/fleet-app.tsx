@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from "denext";
 import { onDesktopEvent } from "denext/desktop/client";
 import { openExternal } from "denext/mobile";
-import { type FleetEvent, LOG_LIMIT } from "../lib/events.ts";
+import { type FleetEvent, LOG_LIMIT, mergeEvents } from "../lib/events.ts";
 import type { Snapshot } from "../lib/model.ts";
 import { CHANGED_EVENT, errorText, fleet } from "./fleet-client.ts";
 import { FleetView } from "./fleet-view.tsx";
@@ -63,7 +63,8 @@ export function FleetApp() {
       const reset = r.lastSeq < lastSeq.current ||
         (r.events.length > 0 && r.events[0].seq <= lastSeq.current);
       lastSeq.current = r.lastSeq;
-      setEvents((prev) => (reset ? r.events : [...prev, ...r.events]).slice(-LOG_LIMIT));
+      // By time: back-filled lines (from while Fleet was closed) land at their real times.
+      setEvents((prev) => mergeEvents(reset ? [] : prev, r.events).slice(-LOG_LIMIT));
     } catch {
       // The next snapshot tries again.
     } finally {

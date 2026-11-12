@@ -181,7 +181,7 @@ export function trayText(summary: Summary): string {
 
 /** Build the snapshot. */
 export function buildSnapshot(input: SnapshotInput): Snapshot {
-  const { running, queued } = groupLanes(input.runs, input.jobsByRun, input.usual);
+  const { running, queued } = groupLanes(input.runs, input.jobsByRun, input.usual, input.now);
   const runRows = rowsOf(running);
   const qRows = rowsOf(queued);
   const pools = poolCards(runRows, qRows, input.health, input.runners);

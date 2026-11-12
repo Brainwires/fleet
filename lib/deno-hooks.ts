@@ -10,6 +10,7 @@ import {
   type HookDelivery,
   readSpool,
   type SpoolCursor,
+  spoolLine,
 } from "./hooks.ts";
 
 /** The keychain item. */
@@ -108,15 +109,113 @@ function defaultLogDir(): string | null {
 }
 
 /**
+ * The spool's deliveries received after `sinceMs` (the rotated `.1` first, then the live file),
+ * oldest first, each id once: the back-fill's input. Lines are skipped by their leading
+ * `received_at` before any JSON parse (the spool holds tens of MB of payloads). `[]` without a
+ * spool.
+ */
+export async function readSpoolSince(
+  sinceMs: number,
+  dir = defaultLogDir(),
+): Promise<HookDelivery[]> {
+  if (!dir) return [];
+  const out: HookDelivery[] = [];
+  const seen = new Set<string>();
+  for (const path of [`${dir}/${HOOKS_LOG}.1`, `${dir}/${HOOKS_LOG}`]) {
+    let text: string;
+    try {
+      text = await Deno.readTextFile(path);
+    } catch {
+      continue;
+    }
+    for (const line of text.split("\n")) {
+      if (!line) continue;
+      const at = leadingReceivedAt(line);
+      if (at !== null && at <= sinceMs) continue;
+      const d = spoolLine(line);
+      if (!d || d.receivedAt <= sinceMs || seen.has(d.id)) continue;
+      seen.add(d.id);
+      out.push(d);
+    }
+  }
+  return out.sort((a, b) => a.receivedAt - b.receivedAt);
+}
+
+/** A spool line's `received_at` when it leads the line (as `appendHookLine` writes it). */
+function leadingReceivedAt(line: string): number | null {
+  const m = /^\{"received_at":"([^"]{1,40})"/.exec(line);
+  if (!m) return null;
+  const t = Date.parse(m[1]);
+  return Number.isFinite(t) ? t : null;
+}
+
+/**
+ * The newest delivery's time in the spool (its last complete line that parses, else the rotated
+ * file's), or `null`: the "last delivery" a tail starts with, so a restart during a quiet spell
+ * doesn't read as "no delivery yet".
+ */
+export async function lastSpoolDeliveryAt(dir = defaultLogDir()): Promise<number | null> {
+  if (!dir) return null;
+  for (const path of [`${dir}/${HOOKS_LOG}`, `${dir}/${HOOKS_LOG}.1`]) {
+    const at = await lastLineAt(path);
+    if (at !== null) return at;
+  }
+  return null;
+}
+
+/** The last parseable delivery line's time in one file, read backwards in 256 KB steps. */
+async function lastLineAt(path: string): Promise<number | null> {
+  let f: Deno.FsFile;
+  try {
+    f = await Deno.open(path, { read: true });
+  } catch {
+    return null;
+  }
+  try {
+    const size = (await f.stat()).size;
+    const step = 256 * 1024;
+    let end = size;
+    let tail = "";
+    while (end > 0) {
+      const start = Math.max(0, end - step);
+      const buf = new Uint8Array(end - start);
+      await f.seek(start, Deno.SeekMode.Start);
+      let n = 0;
+      while (n < buf.length) {
+        const r = await f.read(buf.subarray(n));
+        if (r === null || r === 0) break;
+        n += r;
+      }
+      tail = new TextDecoder().decode(buf.subarray(0, n)) + tail;
+      // The first line of the window may be cut (unless the window reaches the file's start).
+      const lines = tail.split("\n");
+      const complete = start === 0 ? lines : lines.slice(1);
+      for (let i = complete.length - 1; i >= 0; i--) {
+        const d = complete[i] ? spoolLine(complete[i]) : null;
+        if (d && d.receivedAt > 0) return d.receivedAt;
+      }
+      end = start;
+      if (size - end > 8 * step) break; // a spool of garbage: give up
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    f.close();
+  }
+}
+
+/**
  * Tail the receiver's spool (another process holds the port: `denext task hooks`, or a launchd
- * receiver): from its current end, every 2 s, rotation-aware. Returns the stop function, or `null`
- * when there is no spool.
+ * receiver): from its current end, every 2 s, rotation-aware. Returns the stop function and the
+ * newest delivery's time already in the spool (the "last delivery" to start from), or `null` when
+ * there is no spool.
  */
 export async function tailSpool(
   onDelivery: (d: HookDelivery) => void,
   dir = defaultLogDir(),
   everyMs = 2000,
-): Promise<(() => void) | null> {
+): Promise<{ stop: () => void; lastDeliveryAt: number | null } | null> {
   if (!dir) return null;
   const path = `${dir}/${HOOKS_LOG}`;
   let size: number;
@@ -156,8 +255,9 @@ export async function tailSpool(
       busy = false;
     }
   };
+  const lastDeliveryAt = await lastSpoolDeliveryAt(dir);
   const id = setInterval(() => void tick(), everyMs);
-  return () => clearInterval(id);
+  return { stop: () => clearInterval(id), lastDeliveryAt };
 }
 
 /** A running receiver. */

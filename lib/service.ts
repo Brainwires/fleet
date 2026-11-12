@@ -20,6 +20,7 @@ import { type PersistedState, Poller } from "./poller.ts";
 import { pollPlan } from "./budget.ts";
 import type { HealthState } from "./health.ts";
 import { type HookDelivery, HOOKS_STALE_MS, hooksState } from "./hooks.ts";
+import { backfillEvents, backfillFrom, dropLogged } from "./backfill.ts";
 import { AGENT_HEARTBEAT_MS, type AgentSnapshot, buildAgentSnapshot } from "./agent-snapshot.ts";
 /** A page that hasn't said it's visible for this long counts as hidden (it may be suspended). */
 export const VISIBLE_TTL_MS = 30_000;
@@ -52,6 +53,11 @@ export interface ServiceDeps {
   readonly saveAgentSnapshot?: (s: AgentSnapshot) => Promise<void>;
   /** Append newly logged events to the append-only journal (fleet-events.jsonl). */
   readonly appendJournal?: (events: readonly FleetEvent[]) => Promise<void>;
+  /**
+   * The webhook spool's deliveries received after `since` (ms): the back-fill of what happened
+   * while Fleet was closed. Absent (or `[]`) without a spool.
+   */
+  readonly readSpool?: (since: number) => Promise<HookDelivery[]>;
   /** The journal's last `seq`, so the log never numbers below it after a restart. */
   readonly journalLastSeq?: () => Promise<number>;
   /** The Mac mini's local pool health, merged over the variable's. */
@@ -89,6 +95,11 @@ export interface FleetService {
   hookVerified(at: number): void;
   /** Apply a verified workflow_job / workflow_run delivery; resolves once it's in the log. */
   applyHook(d: HookDelivery): Promise<void>;
+  /**
+   * Back-fill the log from the webhook spool: what happened while Fleet was closed, at its real
+   * times, never notified. Idempotent (de-duplicated against the log); resolves to the lines added.
+   */
+  backfill(): Promise<number>;
   /** The event log after `seq` (everything when `seq` is from before a restart of the log). */
   events(seq: number): { events: FleetEvent[]; lastSeq: number };
   /** Log something the user did (a control) to the event log. */
@@ -139,7 +150,10 @@ export function createFleetService(deps: ServiceDeps): FleetService {
   let polling: Promise<void> | null = null;
   let visibleUntil = -Infinity;
   let stopped = false;
-  let loaded = false;
+  let loading: Promise<void> | null = null;
+  /** The log's newest line's time as loaded (before this start): the back-fill starts after it. */
+  let logEndAt: number | null = null;
+  let backfilling: Promise<number> = Promise.resolve(0);
   let log = new EventLog();
   let tracker: TrackerState = restoreTracker(null, now());
   let prefs: FleetPrefs = {};
@@ -319,7 +333,8 @@ export function createFleetService(deps: ServiceDeps): FleetService {
 
   /** Diff the poller's state into the event log (after a poll or a webhook). */
   const recordEvents = async (p: Poller) => {
-    const added = log.append(diffObservation(tracker, p.observation()));
+    // A job line the back-fill already logged (at its real time) isn't logged again.
+    const added = log.append(dropLogged(diffObservation(tracker, p.observation()), log.after(0)));
     p.consumeFinished();
     await saveLog();
     await journal(added);
@@ -376,9 +391,8 @@ export function createFleetService(deps: ServiceDeps): FleetService {
     return polling;
   };
 
-  const loadState = async () => {
-    if (loaded) return;
-    loaded = true;
+  const loadState = () => loading ??= loadStateOnce();
+  const loadStateOnce = async () => {
     const s = await deps.load().catch(() => null);
     if (s) {
       durations = s.durations ?? {};
@@ -393,6 +407,26 @@ export function createFleetService(deps: ServiceDeps): FleetService {
     const journaled = await deps.journalLastSeq?.().catch(() => 0) ?? 0;
     if (journaled > log.lastSeq) log = EventLog.from({ ...log.toJSON(), seq: journaled });
     tracker = restoreTracker(l?.tracker ?? null, now());
+    const held = log.after(0);
+    logEndAt = held.length ? Math.max(...held.map((e) => e.at)) : null;
+  };
+
+  /** One back-fill at a time (startup and the spool's discovery may ask together). */
+  const backfill = (): Promise<number> => {
+    backfilling = backfilling.then(async () => {
+      if (!deps.readSpool) return 0;
+      await loadState();
+      const opts = { since: logEndAt, now: now() };
+      const deliveries = await deps.readSpool(backfillFrom(opts)).catch(() => []);
+      const lines = backfillEvents(deliveries, log.after(0), opts);
+      if (lines.length === 0) return 0;
+      const added = log.insert(lines);
+      await saveLog();
+      await journal(added);
+      emit();
+      return added.length;
+    }).catch(() => 0);
+    return backfilling;
   };
 
   const saveLog = async () => {
@@ -430,6 +464,7 @@ export function createFleetService(deps: ServiceDeps): FleetService {
   return {
     async start() {
       await loadState();
+      await backfill();
       if (!(await tryGh())) {
         const stored = await deps.secrets.get(TOKEN_KEY).catch(() => null);
         if (stored) use(stored, "stored");
@@ -510,6 +545,7 @@ export function createFleetService(deps: ServiceDeps): FleetService {
       }).catch(() => {});
       return hookChain;
     },
+    backfill,
     events: (seq) => ({ events: log.after(seq), lastSeq: log.lastSeq }),
     async logAction(e) {
       const added = log.append([{ ...e, at: now(), user: true }]);
