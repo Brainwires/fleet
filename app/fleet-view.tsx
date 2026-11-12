@@ -10,6 +10,7 @@ import { RATE_LOW, RATE_SLOW, slowText } from "../lib/budget.ts";
 import type { FleetEvent } from "../lib/events.ts";
 import { formatAgo, formatClock, formatCount, formatDuration, shortRepo } from "../lib/format.ts";
 import { EventLog } from "./event-log.tsx";
+import { type ControlHandlers, PoolControls, RunControls } from "./controls.tsx";
 import type { FinishedJob, JobRow, PoolCard, RepoGroup, RunGroup, Snapshot } from "../lib/model.ts";
 
 /** The view's props. */
@@ -22,6 +23,10 @@ export interface FleetViewProps {
   readonly refreshing?: boolean;
   /** The event log, oldest first. */
   readonly events?: readonly FleetEvent[];
+  /** Controls (cancel, re-run, dispatch; pools on the Mac mini). Absent: none shown. */
+  readonly controls?: ControlHandlers;
+  /** The dispatch panel, when open (rendered above the lanes). */
+  readonly dispatchPanel?: unknown;
 }
 
 /** A link that leaves the app: an anchor (copyable, focusable) whose click goes to `onOpen`. */
@@ -75,7 +80,9 @@ const STATE_TEXT: Record<PoolCard["state"], string> = {
   unknown: "no health",
 };
 
-function PoolCardView({ pool, now }: { pool: PoolCard; now: number }) {
+function PoolCardView(
+  { pool, now, onPool }: { pool: PoolCard; now: number; onPool?: ControlHandlers["onPool"] },
+) {
   const waited = pool.oldestQueuedSince === null ? null : now - pool.oldestQueuedSince;
   const lateQueue = waited !== null && waited > 15 * 60_000;
   return (
@@ -99,6 +106,9 @@ function PoolCardView({ pool, now }: { pool: PoolCard; now: number }) {
         )}
       </div>
       {pool.reason ? <div class="pool-reason" title={pool.reason}>{pool.reason}</div> : null}
+      {onPool && pool.id !== "github"
+        ? <PoolControls pool={pool.id} paused={pool.state === "paused"} onPool={onPool} />
+        : null}
     </li>
   );
 }
@@ -131,7 +141,12 @@ function JobLine({ job, now, onOpen }: { job: JobRow; now: number; onOpen: (u: s
 }
 
 function RunBlock(
-  { run, now, onOpen }: { run: RunGroup; now: number; onOpen: (u: string) => void },
+  { run, now, onOpen, controls }: {
+    run: RunGroup;
+    now: number;
+    onOpen: (u: string) => void;
+    controls?: ControlHandlers;
+  },
 ) {
   return (
     <section class={`run${run.defaultBranch ? " run-default" : ""}`}>
@@ -143,6 +158,7 @@ function RunBlock(
         </span>
         <span class="sha">{run.sha}</span>
         <span class="event">{run.event.replace(/_/g, " ")}</span>
+        {controls ? <RunControls repo={run.repo} runId={run.id} c={controls} /> : null}
       </header>
       {run.pendingJobs ? <p class="run-pending">queued, no jobs yet</p> : (
         <ul class="jobs">
@@ -160,6 +176,7 @@ function LaneView(
     now: number;
     onOpen: (u: string) => void;
     empty: string;
+    controls?: ControlHandlers;
   },
 ) {
   const count = props.groups.reduce((n, g) => n + g.runs.reduce((k, r) => k + r.jobs.length, 0), 0);
@@ -179,6 +196,7 @@ function LaneView(
                 run={r}
                 now={props.now}
                 onOpen={props.onOpen}
+                controls={props.controls}
               />
             ))}
           </div>
@@ -196,7 +214,12 @@ const CONCLUSION: Record<string, { glyph: string; cls: string }> = {
 };
 
 function FinishedLine(
-  { f, now, onOpen }: { f: FinishedJob; now: number; onOpen: (u: string) => void },
+  { f, now, onOpen, controls }: {
+    f: FinishedJob;
+    now: number;
+    onOpen: (u: string) => void;
+    controls?: ControlHandlers;
+  },
 ) {
   const c = CONCLUSION[f.conclusion] ?? { glyph: "•", cls: "dim" };
   return (
@@ -207,7 +230,26 @@ function FinishedLine(
         {shortRepo(f.repo)} · {f.defaultBranch ? "◆ " : ""}
         {f.branch}
       </span>
-      <span class="num done-when">{formatAgo(f.completedAt, now)}</span>
+      <span class="num done-when">
+        {formatAgo(f.completedAt, now)}
+        {controls && f.conclusion !== "success"
+          ? (
+            <button
+              type="button"
+              class="ctl"
+              onClick={() =>
+                controls.onControl({
+                  kind: "rerun-job",
+                  repo: f.repo,
+                  runId: f.runId,
+                  jobId: f.id,
+                })}
+            >
+              Re-run
+            </button>
+          )
+          : null}
+      </span>
     </li>
   );
 }
@@ -302,6 +344,13 @@ export function FleetView(props: FleetViewProps) {
         <div class="top-right">
           <StatusLine snapshot={s} now={now} />
           {s.auth === "public" ? <span class="chip chip-paused">public data only</span> : null}
+          {props.controls?.onDispatch
+            ? (
+              <button type="button" class="btn" onClick={props.controls.onDispatch}>
+                Dispatch…
+              </button>
+            )
+            : null}
           <button
             type="button"
             class="btn"
@@ -315,13 +364,47 @@ export function FleetView(props: FleetViewProps) {
 
       <section class="pools-wrap" aria-label="Runner pools">
         <ul class="pools">
-          {s.pools.map((p) => <PoolCardView key={p.id} pool={p} now={now} />)}
+          {s.pools.map((p) => (
+            <PoolCardView key={p.id} pool={p} now={now} onPool={props.controls?.onPool} />
+          ))}
         </ul>
+        {props.controls?.onPool
+          ? (
+            <p class="pool-fleet">
+              <span class="muted small">Runner scheduler (this machine):</span>
+              <button
+                type="button"
+                class="ctl"
+                onClick={() => props.controls!.onPool!({ kind: "restart-scheduler" })}
+              >
+                Restart scheduler
+              </button>
+              <button
+                type="button"
+                class="ctl"
+                onClick={() => props.controls!.onPool!({ kind: "watchdog-pass" })}
+              >
+                Run watchdog pass now
+              </button>
+            </p>
+          )
+          : null}
         {s.health.message
           ? <p class={`health-note health-${s.health.state}`}>{s.health.message}</p>
           : null}
       </section>
 
+      {props.controls?.message
+        ? (
+          <p
+            class={`banner ${props.controls.message.ok ? "banner-ok" : "banner-warn"}`}
+            role="status"
+          >
+            {props.controls.message.text}
+          </p>
+        )
+        : null}
+      {props.dispatchPanel as never}
       {s.poll.slow
         ? (
           <p class={`banner banner-${s.poll.slow === "budget" ? "warn" : "bad"}`} role="status">
@@ -336,6 +419,7 @@ export function FleetView(props: FleetViewProps) {
           now={now}
           onOpen={onOpen}
           empty="Nothing running."
+          controls={props.controls}
         />
         <LaneView
           title="Queued"
@@ -343,6 +427,7 @@ export function FleetView(props: FleetViewProps) {
           now={now}
           onOpen={onOpen}
           empty="Nothing queued."
+          controls={props.controls}
         />
         <aside class="side">
           <section>
@@ -381,6 +466,7 @@ export function FleetView(props: FleetViewProps) {
                       f={f}
                       now={now}
                       onOpen={onOpen}
+                      controls={props.controls}
                     />
                   ))}
                 </ul>

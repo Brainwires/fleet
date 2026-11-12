@@ -18,6 +18,7 @@ import { type FleetNotification, pendingNotifications, type SeenKeys } from "./n
 import { type PersistedState, Poller } from "./poller.ts";
 
 import { pollPlan } from "./budget.ts";
+import type { HealthState } from "./health.ts";
 import { type HookDelivery, HOOKS_STALE_MS, hooksState } from "./hooks.ts";
 /** A page that hasn't said it's visible for this long counts as hidden (it may be suspended). */
 export const VISIBLE_TTL_MS = 30_000;
@@ -46,6 +47,8 @@ export interface ServiceDeps {
   /** The event log and its tracker (`{ log, tracker }`), or `null`. */
   readonly loadLog?: () => Promise<unknown>;
   readonly saveLog?: (data: { log: unknown; tracker: TrackerState }) => Promise<void>;
+  /** The Mac mini's local pool health, merged over the variable's. */
+  readonly localHealth?: (variable: HealthState) => Promise<HealthState>;
   readonly setTimeout?: (fn: () => void, ms: number) => number;
   readonly clearTimeout?: (id: number) => void;
 }
@@ -89,6 +92,8 @@ export interface FleetService {
   /** Persisted app prefs (first launch, start-at-login defaulted). Loaded by `start()`. */
   prefs(): FleetPrefs;
   setPrefs(p: Partial<FleetPrefs>): Promise<void>;
+  /** The GitHub client and poller for controls (`null` without a token / before start). */
+  github(): { client: GitHubClient; poller: Poller; canWrite: boolean } | null;
   /** Stop the timers. */
   stop(): void;
 }
@@ -215,7 +220,14 @@ export function createFleetService(deps: ServiceDeps): FleetService {
   const use = (token: string | null, state: AuthState) => {
     client = createGitHubClient({ token, fetch: deps.fetch, now });
     if (poller) durations = poller.durations();
-    poller = new Poller({ client, auth: state, now, durations, publicOnly: token === null });
+    poller = new Poller({
+      client,
+      auth: state,
+      now,
+      durations,
+      publicOnly: token === null,
+      ...(deps.localHealth ? { localHealth: deps.localHealth } : {}),
+    });
     auth = state;
     lastPoll = -Infinity;
   };
@@ -437,6 +449,7 @@ export function createFleetService(deps: ServiceDeps): FleetService {
       prefs = { ...prefs, ...p };
       await persist();
     },
+    github: () => (client && poller ? { client, poller, canWrite: auth !== "public" } : null),
     stop() {
       stopped = true;
       if (timer !== null) clearT(timer);

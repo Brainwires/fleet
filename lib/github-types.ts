@@ -6,6 +6,7 @@ export interface GhRepo {
   readonly archived?: boolean;
   readonly disabled?: boolean;
   readonly pushed_at?: string | null;
+  readonly default_branch?: string;
 }
 
 /** A workflow run (`GET /repos/{repo}/actions/runs`). */

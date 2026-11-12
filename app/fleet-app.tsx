@@ -10,6 +10,8 @@ import { type FleetEvent, LOG_LIMIT } from "../lib/events.ts";
 import type { Snapshot } from "../lib/model.ts";
 import { CHANGED_EVENT, errorText, fleet } from "./fleet-client.ts";
 import { FleetView } from "./fleet-view.tsx";
+import { type ControlRequest, DispatchPanel, type PoolRequest } from "./controls.tsx";
+import type { ControlResult } from "../lib/control-runner.ts";
 import { TokenScreen } from "./token-screen.tsx";
 
 /** How often the page reads the (in-process) snapshot while visible. */
@@ -29,6 +31,26 @@ export function FleetApp() {
   const [now, setNow] = useState(() => Date.now());
   const [refreshing, setRefreshing] = useState(false);
   const [events, setEvents] = useState<FleetEvent[]>([]);
+  const [pools, setPools] = useState(false);
+  const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  const [dispatching, setDispatching] = useState(false);
+  const [repos, setRepos] = useState<string[]>([]);
+  const busy = useRef(false);
+
+  /** Run a control: the backend checks it and asks in a system dialog; show its outcome. */
+  const act = useCallback(async (call: () => Promise<ControlResult>) => {
+    if (busy.current) return;
+    busy.current = true;
+    try {
+      const r = await call();
+      // A dialog the user dismissed is no news.
+      if (!(r.ok === false && r.cancelled)) setMessage({ ok: r.ok, text: r.message });
+    } catch (err) {
+      setMessage({ ok: false, text: errorText(err) });
+    } finally {
+      busy.current = false;
+    }
+  }, []);
   const lastSeq = useRef(0);
   const fetching = useRef(false);
 
@@ -59,6 +81,10 @@ export function FleetApp() {
       setError(errorText(err));
     }
   }, [pullEvents]);
+
+  useEffect(() => {
+    void fleet.capabilities().then((c) => setPools(c.pools)).catch(() => {});
+  }, []);
 
   useEffect(() => {
     void read();
@@ -123,6 +149,27 @@ export function FleetApp() {
       onOpen={openUrl}
       refreshing={refreshing}
       events={events}
+      controls={{
+        onControl: (c: ControlRequest) => void act(() => fleet.control(c)),
+        ...(pools ? { onPool: (c: PoolRequest) => void act(() => fleet.poolControl(c)) } : {}),
+        onDispatch: () => {
+          setDispatching(true);
+          void fleet.repos().then(setRepos).catch(() => {});
+        },
+        message,
+      }}
+      dispatchPanel={dispatching
+        ? (
+          <DispatchPanel
+            api={{
+              repos,
+              workflows: (r) => fleet.workflows({ repo: r }),
+              submit: (c) => void act(() => fleet.control(c)),
+              close: () => setDispatching(false),
+            }}
+          />
+        )
+        : null}
       onRefresh={async () => {
         setRefreshing(true);
         try {

@@ -1,12 +1,24 @@
 import type { DenextConfig } from "denext/server";
 import { ALL_GH_PATHS } from "./lib/deno-host.ts";
 import { HOOKS_LOG_DIR, SECURITY_BIN } from "./lib/deno-hooks.ts";
+import { poolPaths, poolPrograms } from "./lib/controls.ts";
 import { INITIAL_MENU } from "./lib/tray-driver.ts";
 
 // Fleet: the Brainwires org's GitHub Actions jobs and our self-hosted runner pools, live. One
 // window plus a tray icon. The backend is the `fleet` desktop extension (desktop/fleet.ts), which
 // runs in the app's Deno process and is the only code that holds the GitHub token.
 const HOME = Deno.env.get("HOME");
+// The pool controls' exact programs, only when the build machine has the runner scheduler's ops
+// checkout (the Mac mini): pause-pool.sh, watchdog.sh, /bin/launchctl. Elsewhere none.
+const POOL_PROGRAMS = (() => {
+  if (!HOME) return [];
+  const paths = poolPaths(HOME);
+  try {
+    return Deno.statSync(paths.pausePool).isFile ? poolPrograms(paths) : [];
+  } catch {
+    return [];
+  }
+})();
 
 export default {
   desktop: {
@@ -57,7 +69,7 @@ export default {
       netConnect: ["api.github.com"],
       // `gh auth token`, and the webhook secret from the login keychain (the Mac mini only), by
       // absolute path only.
-      run: [...ALL_GH_PATHS, SECURITY_BIN],
+      run: [...ALL_GH_PATHS, SECURITY_BIN, ...POOL_PROGRAMS],
       // fleet-state.json (usual job lengths, notifications already posted): the app's own data
       // folder only ($DENO_DESKTOP_DATA on the pinned runtime). No token is ever written there.
       // The webhook log the runner scheduler reads (~/.denext-runners/hooks, the build machine's

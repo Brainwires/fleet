@@ -16,6 +16,13 @@ import { CHANGED_EVENT, type Snapshot } from "../lib/model.ts";
 import { createFleetService, type FleetService } from "../lib/service.ts";
 import type { WindowManager } from "../lib/tray-driver.ts";
 import {
+  type ControlDeps,
+  listWorkflows,
+  runControl,
+  runPoolControl,
+} from "../lib/control-runner.ts";
+import { localPoolPaths, readLocalHealth, runProgram } from "../lib/deno-pools.ts";
+import {
   hooksAvailable,
   readHookSecret,
   type Receiver,
@@ -24,6 +31,8 @@ import {
 } from "../lib/deno-hooks.ts";
 
 let service: FleetService | undefined;
+let extHost: DesktopExtensionHost | undefined;
+const pools = localPoolPaths();
 let windows: WindowManager | undefined;
 
 /** Hand the methods desktop.ts's window manager (the page's close button hides through it). */
@@ -35,6 +44,7 @@ const waiting: ((s: FleetService) => void)[] = [];
 /** Start the service once the extension's host (secure store, data folder) is known. */
 function start(host: DesktopExtensionHost): void {
   if (service) return;
+  extHost = host;
   const dir = host.appSupportDir;
   service = createFleetService({
     ghToken: () => ghToken(),
@@ -44,6 +54,7 @@ function start(host: DesktopExtensionHost): void {
     save: (s) => saveState(dir, s),
     loadLog: () => loadLog(dir),
     saveLog: (d) => saveLog(dir, d),
+    ...(pools ? { localHealth: readLocalHealth } : {}),
   });
   service.onChange(() => {
     try {
@@ -104,6 +115,23 @@ function svc(): FleetService {
   return service;
 }
 
+/** The controls' machine access: the token's client, the OS dialog, the event log, pool scripts. */
+function controlDeps(): ControlDeps {
+  const s = svc();
+  return {
+    github: () => s.github(),
+    confirm: async (o) => {
+      if (!extHost) throw new DesktopCapError("unavailable", "no desktop host");
+      // Never act without the OS's confirmation: a runtime without native message boxes refuses.
+      return await extHost.confirm(o);
+    },
+    log: (e) => s.logAction(e),
+    poolPaths: pools,
+    uid: Deno.uid() ?? -1,
+    runProgram,
+  };
+}
+
 function obj(raw: unknown): Record<string, unknown> {
   return typeof raw === "object" && raw !== null ? raw as Record<string, unknown> : {};
 }
@@ -156,6 +184,22 @@ export default defineDesktopExtension({
       handler: (raw: unknown) => svc().setToken(String(obj(raw).token ?? "")),
     },
     retryGh: { handler: () => svc().retryGh() },
+    /** What the page may offer: GitHub controls (always; a token is checked on confirm), pools here. */
+    capabilities: { handler: () => ({ pools: pools !== null }) },
+    /** The watched repos, for the dispatch form. */
+    repos: { handler: () => svc().github()?.poller.repoNames() ?? [] },
+    /** A repo's dispatchable workflows and their inputs (from the workflow YAML). */
+    workflows: {
+      timeoutMs: 60_000,
+      handler: (raw: unknown) => listWorkflows(controlDeps(), obj(raw).repo),
+    },
+    /** A GitHub control: guardrails, the OS confirm dialog, then the request. */
+    control: { timeoutMs: false, handler: (raw: unknown) => runControl(controlDeps(), raw) },
+    /** A pool control (the Mac mini only): guardrails, the OS confirm dialog, then the script. */
+    poolControl: {
+      timeoutMs: false,
+      handler: (raw: unknown) => runPoolControl(controlDeps(), raw),
+    },
     clearToken: {
       handler: async () => {
         await svc().clearToken();

@@ -50,6 +50,11 @@ export interface GitHubClient {
    * with a {@linkcode GitHubError}; `not-found` for 404.
    */
   get<T>(pathOrUrl: string): Promise<GetResult<T>>;
+  /**
+   * POST (a control: cancel, re-run, dispatch). No cache; not held back by the rate floor (the user
+   * confirmed it). Resolves the status; rejects with a {@linkcode GitHubError} on a failure.
+   */
+  post(path: string, body?: unknown): Promise<number>;
   /** The last rate limit seen. */
   rate(): RateInfo | null;
   /** While backing off: until when (epoch ms); else `null`. */
@@ -183,6 +188,48 @@ export function createGitHubClient(options: GitHubClientOptions): GitHubClient {
       failures = 0;
       backoff = null;
       return { body, cached: false, next };
+    },
+    async post(path: string, body?: unknown): Promise<number> {
+      if (!path.startsWith("/repos/")) throw new GitHubError("refusing that path", 0, "http");
+      const headers: Record<string, string> = {
+        accept: "application/vnd.github+json",
+        "x-github-api-version": "2022-11-28",
+        "content-type": "application/json",
+      };
+      if (token) headers.authorization = `Bearer ${token}`;
+      let res: Response;
+      requests++;
+      try {
+        res = await doFetch(API + path, {
+          method: "POST",
+          headers,
+          body: body === undefined ? undefined : JSON.stringify(body),
+        });
+      } catch (err) {
+        throw new GitHubError(
+          `network: ${err instanceof Error ? err.name : "error"}`,
+          0,
+          "network",
+        );
+      }
+      count();
+      readRate(res.headers);
+      let detail = "";
+      try {
+        const j = await res.json() as { message?: unknown };
+        if (typeof j?.message === "string") detail = j.message.slice(0, 200);
+      } catch {
+        // 202 / 204: no body.
+      }
+      if (res.status === 401) throw new GitHubError("the token was refused (401)", 401, "auth");
+      if (!res.ok) {
+        throw new GitHubError(
+          `HTTP ${res.status}${detail ? `: ${detail}` : ""}`,
+          res.status,
+          "http",
+        );
+      }
+      return res.status;
     },
     rate: () => rate,
     backoffUntil: () => (backoff !== null && now() < backoff ? backoff : null),

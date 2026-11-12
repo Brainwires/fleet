@@ -697,6 +697,100 @@ a:hover {
   font-size: 11px;
 }
 
+/* ---- controls ---- */
+
+.ctl-group {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 6px;
+  flex: none;
+}
+.ctl {
+  font: 500 10.5px/1 var(--sans);
+  padding: 3px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--text-2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ctl:hover {
+  color: var(--text);
+  border-color: var(--text-3);
+}
+.ctl-danger:hover {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+.ctl-dur {
+  padding: 3px 4px;
+  color: var(--text-3);
+}
+.ctl-dur.is-on {
+  color: var(--text);
+  border-color: var(--text-2);
+}
+.run-head .ctl-group {
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.run:hover .run-head .ctl-group,
+.run-head .ctl-group:focus-within {
+  opacity: 1;
+}
+.done-when .ctl {
+  margin-left: 6px;
+}
+.pool .ctl-group {
+  margin: 2px 0 0;
+  flex-wrap: wrap;
+}
+.pool-fleet {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin: 6px 0 0;
+}
+.banner-ok {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+.banner-ok::before {
+  content: "✓ ";
+}
+.dispatch {
+  padding: 10px 16px 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.dispatch-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.dispatch-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: end;
+  margin: 6px 0;
+}
+.dispatch-form .field {
+  flex: 0 1 200px;
+}
+.dispatch-form select,
+.dispatch-form input {
+  font: 400 12.5px/1 var(--sans);
+  padding: 6px 7px;
+  border-radius: 5px;
+  border: 1px solid var(--line-strong);
+  background: var(--bg);
+  color: var(--text);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
 /* ---- event log ---- */
 
 .log {

@@ -127,6 +127,29 @@ than three at once become one summary), a default-branch job fails (once per job
 after Fleet started). Posted keys are kept 48 h in `fleet-state.json` in the app's data folder, so a
 relaunch doesn't repeat them.
 
+## Controls
+
+GitHub, through the backend with the same token (never from page JS): per run Cancel, Re-run failed
+jobs, Re-run all (hover a run); Re-run on a finished job that didn't succeed; Dispatch… a workflow
+(repo → a workflow that declares `workflow_dispatch` → ref → its declared inputs, read from that
+block of the workflow YAML). Guardrails, as code in `lib/controls.ts` (unit-tested):
+
+- every control asks in the OS's own dialog, naming exactly what will happen ("Cancel run
+  43194560988, denext tests on rel/3.0.0-denext.21, 41 jobs?"); the safe button is the default;
+- Cancel is refused outright on `development-denext`, `development`, `main` or the repo's own
+  default branch, with the reason shown;
+- Dispatch is refused when the workflow already has a run on that commit SHA, unless it was
+  cancelled;
+- a re-run on `rel/*` warns that a failed attempt on a release commit blocks its tag;
+- every action (and every refusal) goes to the event log, marked YOU.
+
+Pool controls, only where `~/Source/Brainwires/denext-internal/ops/runners/pause-pool.sh` exists
+(the Mac mini): per pool Pause (60 / 120 / 180 s; the script's own expiry still applies) and Resume,
+and Restart scheduler (`launchctl kickstart -k gui/<uid>/com.brainwires.denext-runners`) and Run
+watchdog pass now. Exact programs and argv only (no shell); the same confirmation. Nothing restarts
+a VM or deletes anything. There the pool cards also use the watchdog's local
+`~/.denext-runners/health.json` when it is fresher than the org variable.
+
 ## Permissions (baked into the binary)
 
 `--allow-net=127.0.0.1,localhost,api.github.com` (split into connect / listen on the pinned runtime;

@@ -74,6 +74,7 @@ export interface PoolCard {
 /** A job that finished in the last 30 minutes. */
 export interface FinishedJob {
   readonly id: number;
+  readonly runId: number;
   readonly repo: string;
   readonly name: string;
   readonly workflow: string;

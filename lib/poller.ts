@@ -95,6 +95,8 @@ export interface PollerOptions {
   readonly durations?: Record<string, number[]>;
   /** Unauthenticated: only the core repos, no org endpoints. */
   readonly publicOnly?: boolean;
+  /** The Mac mini's local health (fresher than the variable), merged over it. */
+  readonly localHealth?: (variable: HealthState) => Promise<HealthState>;
 }
 
 /** Run `fn` over `items`, at most `n` at a time. */
@@ -116,6 +118,7 @@ export class Poller {
   readonly #client: GitHubClient;
   readonly #now: () => number;
   readonly #publicOnly: boolean;
+  readonly #localHealth?: (variable: HealthState) => Promise<HealthState>;
   #auth: AuthState;
   #repos: GhRepo[] = [];
   #reposAt = -Infinity;
@@ -146,6 +149,7 @@ export class Poller {
     this.#auth = options.auth;
     this.#now = options.now ?? Date.now;
     this.#publicOnly = options.publicOnly ?? false;
+    this.#localHealth = options.localHealth;
     for (const [k, v] of Object.entries(options.durations ?? {})) {
       if (Array.isArray(v)) this.#durations.set(k, v.filter((n) => typeof n === "number"));
     }
@@ -281,6 +285,7 @@ export class Poller {
       const runnerPool = j.runner_name ? poolFromRunnerName(j.runner_name) : null;
       this.#finished.set(j.id, {
         id: j.id,
+        runId: j.run_id,
         repo,
         name: j.name,
         workflow: run.name ?? "workflow",
@@ -363,6 +368,9 @@ export class Poller {
         this.#recordCompleted(a.repo, a.run, jobs);
       });
       await Promise.all([this.#readRunners(), this.#readHealth(), this.#readAnnotations()]);
+      if (this.#localHealth) {
+        this.#health = await this.#localHealth(this.#health).catch(() => this.#health);
+      }
       this.#prune();
       this.#ok = true;
       this.#lastError = "";
@@ -458,6 +466,22 @@ export class Poller {
     this.#jobs.set(job.run_id, jobs);
     if (job.status === "completed") this.#recordCompleted(repo, active.run, [job]);
     return true;
+  }
+
+  /** A tracked run and its jobs, or `undefined`. */
+  run(runId: number): { repo: string; run: GhRun; jobs: readonly GhJob[] } | undefined {
+    const a = this.#runs.get(runId);
+    return a ? { repo: a.repo, run: a.run, jobs: this.#jobs.get(runId) ?? [] } : undefined;
+  }
+
+  /** A repo's default branch from the org list, when known. */
+  defaultBranch(repo: string): string | null {
+    return this.#repos.find((r) => r.full_name === repo)?.default_branch ?? null;
+  }
+
+  /** The watched repos (core + the org's non-archived ones). */
+  repoNames(): string[] {
+    return [...new Set([...CORE_REPOS, ...this.#repos.map((r) => r.full_name)])];
   }
 
   /** Forget the finished runs once the event log has seen them. */
