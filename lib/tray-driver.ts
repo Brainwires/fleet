@@ -1,8 +1,9 @@
-// The tray-resident app, driven from the app's process (desktop.ts), never from a page: a hidden
-// window's page may be suspended (macOS), so it couldn't answer the tray. Like examples/hangar in
-// denext: an accessory app (no Dock icon) while only the tray runs, a regular one while the window
-// shows; a click on the icon toggles the window; the menu shows/hides it, shows the summary,
-// pauses notifications, toggles start at login, polls now and quits.
+// The tray-resident app, driven from the app's process (desktop.ts), never from a page: with no
+// window open there is no page to answer the tray. Like examples/hangar in denext: an accessory app
+// (no Dock icon) while only the tray runs, a regular one while Fleet's window is open; closing the
+// window destroys it (Fleet stays in the tray), and opening makes a fresh one. A click on the icon
+// opens / closes the window; the menu opens / closes it, shows the summary, pauses notifications,
+// toggles start at login, polls now and quits.
 //
 // No Deno or DOM APIs: it works over slices of denext's DesktopRuntime, so the tests use fakes.
 
@@ -37,7 +38,7 @@ export type TrayMenuItem =
 /** The tray menu for a state. */
 export function trayMenu(s: MenuState): TrayMenuItem[] {
   return [
-    { id: MENU.toggle, label: s.windowVisible ? "Hide Fleet" : "Show Fleet" },
+    { id: MENU.toggle, label: s.windowVisible ? "Close Fleet" : "Open Fleet" },
     { id: MENU.summary, label: s.summary, disabled: true },
     { separator: true },
     { id: MENU.pause, label: "Pause notifications", checked: s.notificationsPaused },
@@ -65,54 +66,108 @@ export function summaryLine(snap: Snapshot): string {
   return `${snap.summary.running} running · ${snap.summary.queued} queued`;
 }
 
-/** The main window, as `DesktopRuntime.windows.get("main")` hands it. */
+/**
+ * The key of Fleet's one window (`desktop.window.key` for the launch's main window, and
+ * `windows.open({ key })` for every window opened after it closed): `windows.byKey` finds whichever
+ * is open, and they share one saved frame (the window store's `windows.json`).
+ */
+export const WINDOW_KEY = "fleet";
+
+/** Fleet's window, as `DesktopRuntime.windows.byKey` / `.open` hand it. */
 export interface FleetWindow {
+  readonly id: string;
   readonly visible: boolean;
   show(): void;
-  hide(): void;
   focus(): void;
+  /** Close it for good (the app stays: `desktop.app.keepAlive`). */
+  close(): void;
+  onClosed(handler: () => void): () => void;
 }
 
 /** The slice of `DesktopRuntime` the window manager uses. */
 export interface WindowHost {
-  main(): FleetWindow | undefined;
+  /** The open Fleet window, if any (`windows.byKey(WINDOW_KEY)`). */
+  find(): FleetWindow | undefined;
+  /** Open a fresh Fleet window (`windows.open({ key: WINDOW_KEY, … })`); throws when it can't. */
+  open(): FleetWindow;
   setActivationPolicy(policy: "regular" | "accessory"): boolean;
 }
 
-/** Show / hide the main window, with the Dock icon following it (macOS). */
+/** What the window manager tells the app. */
+export interface WindowHooks {
+  /** A window opened, came to the front or closed (the tray menu follows). */
+  onChange?(): void;
+  /** Fleet's window closed: none is open now (the page stops reading; the backend polls hidden). */
+  onClosed?(): void;
+}
+
+/**
+ * Open / close Fleet's window, the Dock icon following it (macOS): "regular" just before a window
+ * opens or comes to the front, "accessory" once the last one closed. Closing destroys the window;
+ * the next open is a fresh window whose page rebuilds its state from the backend.
+ */
 export interface WindowManager {
+  /** Open a window, or bring the open one to the front (never a second). */
   show(): void;
-  hide(): void;
+  /** Close the open window, if any. */
+  close(): void;
+  /** Close when showing, else show. */
   toggle(): void;
+  /** Close the launch's window if it is still hidden (Fleet started in the tray). */
+  closeHidden(): void;
   readonly visible: boolean;
 }
 
 /** The window manager. */
-export function createWindowManager(
-  host: WindowHost,
-  onChange: () => void = () => {},
-): WindowManager {
-  const m = {
+export function createWindowManager(host: WindowHost, hooks: WindowHooks = {}): WindowManager {
+  /** The ids of the windows whose close is followed. */
+  const watched = new Set<string>();
+  const changed = () => hooks.onChange?.();
+  const watch = (w: FleetWindow) => {
+    if (watched.has(w.id)) return;
+    watched.add(w.id);
+    w.onClosed(() => {
+      watched.delete(w.id);
+      // The last one gone: no Dock icon while only the tray runs.
+      if (!host.find()) host.setActivationPolicy("accessory");
+      hooks.onClosed?.();
+      changed();
+    });
+  };
+  const m: WindowManager = {
     show() {
-      const w = host.main();
-      if (!w) return;
       // Regular first: a Dock icon, and the app comes to the front.
       host.setActivationPolicy("regular");
+      let w = host.find();
+      if (!w) {
+        try {
+          w = host.open();
+        } catch (err) {
+          host.setActivationPolicy("accessory");
+          throw err;
+        }
+      }
+      watch(w);
       w.show();
       w.focus();
-      onChange();
+      changed();
     },
-    hide() {
-      host.main()?.hide();
-      host.setActivationPolicy("accessory");
-      onChange();
+    close() {
+      const w = host.find();
+      if (!w) return;
+      watch(w);
+      w.close();
     },
     toggle() {
-      if (m.visible) m.hide();
+      if (m.visible) m.close();
       else m.show();
     },
+    closeHidden() {
+      const w = host.find();
+      if (w && !w.visible) m.close();
+    },
     get visible() {
-      return host.main()?.visible === true;
+      return host.find()?.visible === true;
     },
   };
   return m;
@@ -154,7 +209,7 @@ export function trayAlert(snap: Snapshot): boolean {
 export interface TrayDriver {
   /** Follow a snapshot (tooltip, icon, menu). */
   update(snap: Snapshot): void;
-  /** Rebuild the menu now (the window was shown or hidden elsewhere). */
+  /** Rebuild the menu now (the window was opened or closed elsewhere). */
   refreshMenu(): void;
   /** The start-at-login state the menu shows. */
   startAtLogin: boolean | null;
@@ -196,13 +251,21 @@ export function driveTray(
       push({ menu });
     }
   };
+  /** Open / close the window; a window that can't open is reported, the tray carries on. */
+  const toggle = () => {
+    try {
+      windows.toggle();
+    } catch (err) {
+      onError(err);
+    }
+  };
   const offs = [
     tray.onClick(() => {
-      windows.toggle();
+      toggle();
       syncMenu();
     }),
     tray.onMenuItem((id) => {
-      if (id === MENU.toggle) windows.toggle();
+      if (id === MENU.toggle) toggle();
       else if (id === MENU.refresh) void actions.refresh().catch(onError);
       else if (id === MENU.pause) {
         void actions.setNotificationsPaused(!(last?.notificationsPaused ?? false)).catch(onError);
@@ -239,14 +302,6 @@ export function driveTray(
     },
   };
   return driver;
-}
-
-/**
- * The close guard's answer: `true` lets the close go through (a real quit: Cmd+Q, the tray's
- * Quit, logout), `false` keeps the app and hides the window instead (the close button).
- */
-export function allowClose(reason: string): boolean {
-  return reason === "quit";
 }
 
 /** The OS's start-at-login switch (`Deno.desktop.launchAtLogin`), as the backend uses it. */

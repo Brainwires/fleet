@@ -17,7 +17,6 @@ import {
 } from "../lib/deno-host.ts";
 import { CHANGED_EVENT, type Snapshot } from "../lib/model.ts";
 import { createFleetService, type FleetService } from "../lib/service.ts";
-import type { WindowManager } from "../lib/tray-driver.ts";
 import {
   type ControlDeps,
   listWorkflows,
@@ -45,12 +44,6 @@ const DRY_RUN = (() => {
     return false;
   }
 })();
-let windows: WindowManager | undefined;
-
-/** Hand the methods desktop.ts's window manager (the page's close button hides through it). */
-export function setFleetWindows(manager: WindowManager): void {
-  windows = manager;
-}
 const waiting: ((s: FleetService) => void)[] = [];
 
 /** Start the service once the extension's host (secure store, data folder) is known. */
@@ -181,15 +174,6 @@ export default defineDesktopExtension({
       handler: (raw: unknown) => {
         const after = Number(obj(raw).after);
         return svc().events(Number.isFinite(after) && after >= 0 ? after : 0);
-      },
-    },
-    /** Hide the main window to the tray (its close button); the Dock icon goes with it. */
-    hide: {
-      handler: () => {
-        if (!windows) throw new DesktopCapError("unavailable", "no window manager in this launch");
-        service?.visibility(false);
-        windows.hide();
-        return null;
       },
     },
     visibility: {

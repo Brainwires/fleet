@@ -37,14 +37,17 @@ export default {
       // opens leaves the window for the user's browser.
       origin: "fleet://app",
       singleInstance: true,
-      // Closing the window leaves Fleet in the tray.
+      // Closing the window (it closes for good) leaves Fleet running in the tray.
       keepAlive: true,
       // A tray app: no Dock icon or menu bar while only the tray runs, from the first frame
-      // (desktop.ts switches to "regular" while the window shows, as examples/hangar does).
+      // (desktop.ts switches to "regular" while a window is open, as examples/hangar does).
       activationPolicy: "accessory",
     },
-    // Hidden at launch: desktop.ts shows it on the first launch or when a token is needed.
-    window: { width: 1320, height: 860, title: "Fleet", show: false },
+    // Hidden at launch: desktop.ts shows it on the first launch or when a token is needed, else
+    // closes it. Keyed like every window desktop.ts opens later (lib/tray-driver.ts WINDOW_KEY), so
+    // they are found by key and share one remembered frame.
+    // The default size gives way to the remembered one.
+    window: { defaultWidth: 1320, defaultHeight: 860, title: "Fleet", show: false, key: "fleet" },
     minSize: { width: 860, height: 560 },
     tray: {
       // The macOS template until desktop.ts sets the art for the OS (lib/icons.ts trayIcons).

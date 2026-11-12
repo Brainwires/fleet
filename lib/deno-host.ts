@@ -186,6 +186,39 @@ function nativeNotifications(): NativeNotifications | undefined {
 
 let permissionAsked: Promise<unknown> | null = null;
 
+/** The runtime tag of every notification Fleet posts: `fleet-<key>`. */
+export const NOTIFICATION_TAG_PREFIX = "fleet-";
+
+/** A click on a notification, as `Deno.desktop`'s `"notificationresponse"` reports it. */
+interface NotificationResponse {
+  readonly tag?: unknown;
+}
+
+/** Whether a notification response is a click on one of Fleet's own notifications. */
+export function isFleetNotificationClick(r: NotificationResponse | null | undefined): boolean {
+  return typeof r?.tag === "string" && r.tag.startsWith(NOTIFICATION_TAG_PREFIX);
+}
+
+/**
+ * Call `fn` for every click on one of Fleet's notifications: the click that launched the app
+ * (`Deno.desktop.launchNotificationResponses`) and every later one (`"notificationresponse"`).
+ * Outside denext's desktop runtime it does nothing.
+ */
+export function onNotificationClick(fn: () => void): void {
+  const desktop = (Deno as unknown as {
+    desktop?: {
+      launchNotificationResponses?: readonly NotificationResponse[];
+      addEventListener?(type: string, listener: (e: Event) => void): void;
+    };
+  }).desktop;
+  if (!desktop) return;
+  const launched = desktop.launchNotificationResponses;
+  if (Array.isArray(launched) && launched.some(isFleetNotificationClick)) fn();
+  desktop.addEventListener?.("notificationresponse", (e) => {
+    if (isFleetNotificationClick((e as CustomEvent<NotificationResponse>).detail)) fn();
+  });
+}
+
 /**
  * Post a notification now, from the app's process (it must work while every window is hidden, when
  * a page may be suspended). Tagged by its key, so the OS replaces rather than stacks a repeat.
@@ -196,6 +229,6 @@ export async function postNotification(n: FleetNotification): Promise<void> {
   if (!api) return;
   permissionAsked ??= api.requestPermission?.().catch(() => null) ?? Promise.resolve(null);
   await permissionAsked;
-  const tag = `fleet-${n.key.replace(/[^A-Za-z0-9:_-]/g, "_").slice(0, 120)}`;
+  const tag = `${NOTIFICATION_TAG_PREFIX}${n.key.replace(/[^A-Za-z0-9:_-]/g, "_").slice(0, 120)}`;
   await api.schedule({ title: n.title, body: n.body, at: Date.now(), tag });
 }

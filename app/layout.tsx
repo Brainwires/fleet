@@ -1,6 +1,6 @@
-// Root layout: denext supplies <html>/<head>/<body>. Closing the window hides it to the tray.
+// Root layout: denext supplies <html>/<head>/<body>. Closing the window closes it (Fleet stays in
+// the tray; desktop.ts).
 import type { LayoutProps } from "denext/server";
-import { CloseToTray } from "./close-to-tray.tsx";
 
 export const metadata = {
   title: "Fleet",
@@ -11,10 +11,5 @@ export const metadata = {
 };
 
 export default function RootLayout({ children }: LayoutProps) {
-  return (
-    <>
-      <CloseToTray />
-      {children}
-    </>
-  );
+  return <>{children}</>;
 }

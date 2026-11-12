@@ -1,12 +1,11 @@
-// The tray-resident behaviour with fakes: the close guard's reasons, the window manager (Dock icon
-// follows the window), the menu and its wiring (toggle, summary, pause, start at login, quit), the
-// tooltip and red icon, and start at login defaulting on once.
+// The tray-resident behaviour with fakes: the window manager (a closed window is gone, a fresh one
+// opens, the Dock icon follows), the menu and its wiring (open / close, summary, pause, start at
+// login, quit), the tooltip and red icon, and start at login defaulting on once.
 
 import { assert, assertEquals, assertFalse } from "@std/assert";
 import type { Snapshot } from "../lib/model.ts";
 import { trayText } from "../lib/snapshot.ts";
 import {
-  allowClose,
   createWindowManager,
   driveTray,
   ensureLoginDefault,
@@ -15,6 +14,7 @@ import {
   MENU,
   summaryLine,
   trayMenu,
+  WINDOW_KEY,
 } from "../lib/tray-driver.ts";
 import { NOW } from "./helpers.ts";
 
@@ -46,27 +46,56 @@ function snap(over: Partial<Snapshot> = {}): Snapshot {
   };
 }
 
-function fakeApp() {
+/**
+ * The runtime's windows as the window manager sees them: `byKey(WINDOW_KEY)` finds the open one
+ * (`launch` starts with the launch's hidden main window), `open` makes a fresh one, `close` runs
+ * its close handlers and drops it (as the registry does), and every call is logged.
+ */
+function fakeApp(opts: { launch?: boolean; openFails?: boolean } = {}) {
   const log: string[] = [];
-  const win = {
-    visible: false,
-    show() {
-      this.visible = true;
-      log.push("show");
-    },
-    hide() {
-      this.visible = false;
-      log.push("hide");
-    },
-    focus() {
-      log.push("focus");
-    },
-  };
+  let n = 0;
+  type Win = ReturnType<typeof makeWin>;
+  let open: Win | undefined;
+  function makeWin(id: string, visible: boolean) {
+    const handlers = new Set<() => void>();
+    const w = {
+      id,
+      key: WINDOW_KEY,
+      visible,
+      show() {
+        w.visible = true;
+        log.push(`show:${id}`);
+      },
+      focus() {
+        log.push(`focus:${id}`);
+      },
+      close() {
+        log.push(`close:${id}`);
+        if (open === w) open = undefined;
+        for (const h of [...handlers]) h();
+        handlers.clear();
+      },
+      onClosed(h: () => void) {
+        handlers.add(h);
+        return () => handlers.delete(h);
+      },
+      handlers,
+    };
+    return w;
+  }
+  if (opts.launch) open = makeWin("main", false);
   const host = {
-    main: () => win,
+    find: () => open,
+    open: () => {
+      if (opts.openFails) throw new Error("too many windows");
+      const w = makeWin(`window-${++n}`, true);
+      log.push(`open:${w.id}`);
+      open = w;
+      return w;
+    },
     setActivationPolicy: (p: "regular" | "accessory") => (log.push(`policy:${p}`), true),
   };
-  return { win, host, log };
+  return { host, log, current: () => open };
 }
 
 function fakeTray() {
@@ -90,26 +119,101 @@ const ICONS = {
   alert: { icon: new Uint8Array([3]), iconDark: null },
 };
 
-Deno.test("close guard: the close button hides, a real quit goes through", () => {
-  assertEquals(allowClose("close"), false);
-  assertEquals(allowClose("quit"), true);
-  assertEquals(allowClose("anything else"), false);
-});
-
-Deno.test("window manager: regular while shown, accessory while hidden; toggle", () => {
-  const { host, log, win } = fakeApp();
+Deno.test("window manager: regular before a fresh window opens, accessory once it closed", () => {
+  const { host, log, current } = fakeApp();
   let changes = 0;
-  const w = createWindowManager(host, () => changes++);
-  w.toggle();
-  assert(win.visible);
-  assertEquals(log, ["policy:regular", "show", "focus"]);
-  w.toggle();
-  assertFalse(win.visible);
-  assertEquals(log.slice(3), ["hide", "policy:accessory"]);
-  assertEquals(changes, 2);
+  let closes = 0;
+  const w = createWindowManager(host, { onChange: () => changes++, onClosed: () => closes++ });
+  assertFalse(w.visible);
+  w.show();
+  assert(w.visible);
+  assertEquals(log, ["policy:regular", "open:window-1", "show:window-1", "focus:window-1"]);
+  // The close button (or close()) destroys it: the runtime's close handlers run.
+  log.length = 0;
+  current()!.close();
+  assertFalse(w.visible);
+  assertEquals(current(), undefined);
+  assertEquals(log, ["close:window-1", "policy:accessory"]);
+  assertEquals(closes, 1);
+  // Reopening is a fresh window, with its own close tracking.
+  log.length = 0;
+  w.show();
+  assertEquals(log, ["policy:regular", "open:window-2", "show:window-2", "focus:window-2"]);
+  w.close();
+  assertEquals(log.slice(4), ["close:window-2", "policy:accessory"]);
+  assertEquals(closes, 2);
+  assertEquals(changes, 4);
 });
 
-Deno.test("tray menu: show/hide, the summary as a disabled item, toggles, quit", () => {
+Deno.test("window manager: a repeated open focuses the open window, never a second", () => {
+  const { host, log, current } = fakeApp();
+  const w = createWindowManager(host);
+  w.show();
+  w.show();
+  w.show();
+  assertEquals(log.filter((l) => l.startsWith("open:")), ["open:window-1"]);
+  assertEquals(log.slice(4), [
+    "policy:regular",
+    "show:window-1",
+    "focus:window-1",
+    "policy:regular",
+    "show:window-1",
+    "focus:window-1",
+  ]);
+  // One close handler, however often it was shown.
+  assertEquals(current()!.handlers.size, 1);
+});
+
+Deno.test("window manager: the launch's hidden window is shown, or closed when Fleet stays in the tray", () => {
+  // Shown (first launch, token needed): the main window itself, no second one.
+  {
+    const { host, log } = fakeApp({ launch: true });
+    const w = createWindowManager(host);
+    w.show();
+    assertEquals(log, ["policy:regular", "show:main", "focus:main"]);
+    // closeHidden leaves a showing window alone.
+    w.closeHidden();
+    assertEquals(log.length, 3);
+    w.toggle();
+    assertEquals(log.slice(3), ["close:main", "policy:accessory"]);
+  }
+  // Not shown: closed, so no hidden window lingers; the next open is fresh.
+  {
+    const { host, log, current } = fakeApp({ launch: true });
+    const w = createWindowManager(host);
+    w.closeHidden();
+    assertEquals(current(), undefined);
+    assertEquals(log, ["close:main", "policy:accessory"]);
+    w.toggle();
+    assertEquals(log.slice(2), [
+      "policy:regular",
+      "open:window-1",
+      "show:window-1",
+      "focus:window-1",
+    ]);
+    // Nothing open: close and closeHidden do nothing.
+    current()!.close();
+    log.length = 0;
+    w.close();
+    w.closeHidden();
+    assertEquals(log, []);
+  }
+});
+
+Deno.test("window manager: a window that can't open puts the Dock icon back and throws", () => {
+  const { host, log } = fakeApp({ openFails: true });
+  const w = createWindowManager(host);
+  let threw = false;
+  try {
+    w.show();
+  } catch {
+    threw = true;
+  }
+  assert(threw);
+  assertEquals(log, ["policy:regular", "policy:accessory"]);
+});
+
+Deno.test("tray menu: open/close, the summary as a disabled item, toggles, quit", () => {
   const m = trayMenu({
     windowVisible: false,
     summary: "2 running · 1 queued",
@@ -117,7 +221,7 @@ Deno.test("tray menu: show/hide, the summary as a disabled item, toggles, quit",
     startAtLogin: true,
   });
   assertEquals(m, [
-    { id: MENU.toggle, label: "Show Fleet" },
+    { id: MENU.toggle, label: "Open Fleet" },
     { id: MENU.summary, label: "2 running · 1 queued", disabled: true },
     { separator: true },
     { id: MENU.pause, label: "Pause notifications", checked: true },
@@ -138,15 +242,15 @@ Deno.test("tray menu: show/hide, the summary as a disabled item, toggles, quit",
       notificationsPaused: false,
       startAtLogin: null,
     })[0] as { label: string }).label,
-    "Hide Fleet",
+    "Close Fleet",
   );
   assertEquals(INITIAL_MENU[1], { id: MENU.summary, label: "Starting…", disabled: true });
   assertEquals(summaryLine(snap({ auth: "needs-token" })), "Sign in to GitHub");
   assertEquals(summaryLine(snap()), "2 running · 1 queued");
 });
 
-Deno.test("tray: click toggles the window; menu items reach their actions; the menu follows", async () => {
-  const { host, win } = fakeApp();
+Deno.test("tray: click opens / closes the window; menu items reach their actions; the menu follows", async () => {
+  const { host, current } = fakeApp();
   const t = fakeTray();
   const calls: string[] = [];
   let paused = false;
@@ -169,13 +273,20 @@ Deno.test("tray: click toggles the window; menu items reach their actions; the m
       label?: string;
       checked?: boolean;
     }[];
-  assertEquals(menuOf()[0].label, "Show Fleet");
+  assertEquals(menuOf()[0].label, "Open Fleet");
   assertEquals(menuOf()[1].label, "2 running · 1 queued");
   t.click();
-  assert(win.visible);
-  assertEquals(menuOf()[0].label, "Hide Fleet");
+  assert(current()?.visible);
+  assertEquals(menuOf()[0].label, "Close Fleet");
   t.choose(MENU.toggle);
-  assertFalse(win.visible);
+  assertEquals(current(), undefined, "closed, not hidden");
+  assertEquals(menuOf()[0].label, "Open Fleet");
+  // The window closed by its own close button: the menu follows through the manager's onChange.
+  t.choose(MENU.toggle);
+  assertEquals(menuOf()[0].label, "Close Fleet");
+  current()!.close();
+  d.refreshMenu();
+  assertEquals(menuOf()[0].label, "Open Fleet");
   t.choose(MENU.refresh);
   t.choose(MENU.pause);
   t.choose(MENU.login);
@@ -271,4 +382,34 @@ Deno.test("tray art: the macOS template is black + alpha only, 36 px; Windows ha
     }
   }
   assert(coloured, "the Windows art has a colour pip");
+});
+
+Deno.test("tray: a window that can't open is reported, the tray carries on", () => {
+  const { host } = fakeApp({ openFails: true });
+  const t = fakeTray();
+  const errors: unknown[] = [];
+  const calls: string[] = [];
+  driveTray(t.tray, ICONS, createWindowManager(host), {
+    refresh: () => Promise.resolve(void calls.push("refresh")),
+    setNotificationsPaused: () => Promise.resolve(),
+    setStartAtLogin: () => Promise.resolve(null),
+    quit: () => {},
+  }, (err) => errors.push(err));
+  t.click();
+  t.choose(MENU.toggle);
+  assertEquals(errors.length, 2);
+  t.choose(MENU.refresh);
+  assertEquals(calls, ["refresh"]);
+});
+
+Deno.test("notification clicks: only Fleet's own notifications open the window", async () => {
+  const { isFleetNotificationClick, NOTIFICATION_TAG_PREFIX } = await import(
+    "../lib/deno-host.ts"
+  );
+  assertEquals(NOTIFICATION_TAG_PREFIX, "fleet-");
+  assert(isFleetNotificationClick({ tag: "fleet-pool:mac-arm" }));
+  assertFalse(isFleetNotificationClick({ tag: "denext-web-1" }));
+  assertFalse(isFleetNotificationClick({ tag: 3 }));
+  assertFalse(isFleetNotificationClick({}));
+  assertFalse(isFleetNotificationClick(null));
 });

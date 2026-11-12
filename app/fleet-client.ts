@@ -14,7 +14,6 @@ export interface FleetClient {
   snapshot(args: { visible: boolean }): Promise<Snapshot>;
   events(args: { after: number }): Promise<{ events: FleetEvent[]; lastSeq: number }>;
   visibility(args: { visible: boolean }): Promise<null>;
-  hide(args?: Record<never, never>): Promise<null>;
   capabilities(args?: Record<never, never>): Promise<{ pools: boolean }>;
   repos(args?: Record<never, never>): Promise<string[]>;
   workflows(args: { repo: string }): Promise<DispatchWorkflow[]>;

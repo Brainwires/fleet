@@ -20,8 +20,8 @@ macOS (the normal way):
    refuses the first launch; open it once with right-click → Open (or System Settings → Privacy &
    Security → Open Anyway).
 
-The first launch shows the window and turns on start at login; after that Fleet starts hidden, in
-the tray.
+The first launch shows the window and turns on start at login; after that Fleet starts in the tray,
+with no window.
 
 From source, without installing:
 
@@ -58,21 +58,28 @@ The token is never logged, rendered, written to a file, or returned to the page.
 
 ## Tray behaviour
 
-- **No Dock icon** while only the tray runs (`activationPolicy: "accessory"` from the first frame);
-  Fleet becomes a regular app, with a Dock icon, while its window shows.
-- **Close to tray**: the window's close button hides it. Polling, the event log and notifications go
-  on while hidden (at the hidden poll rate).
+- **No Dock icon** while no window is open (`activationPolicy: "accessory"` from the first frame);
+  Fleet becomes a regular app, with a Dock icon, just before its window opens, and an accessory one
+  again once it closes.
+- **Closing the window closes it**: the window is destroyed, not hidden, and Fleet keeps running in
+  the tray (`desktop.app.keepAlive`). Polling, the webhook listener, the MCP files, the event log
+  and notifications go on with no window (at the hidden poll rate). Opening Fleet again makes a
+  fresh window that rebuilds everything from the backend's snapshot and log, at the size and place
+  the last one had (`desktop.window.key` / `windows.open({ key: "fleet" })`, saved in the app's
+  `windows.json`). Opening while a window is open brings that one to the front, never a second.
+- **What opens it**: the tray (a click, or Open Fleet), a Dock click while the icon shows, launching
+  Fleet again (single instance), or a click on one of Fleet's notifications (also the click that
+  launched it).
 - **Quit** only through a real quit: Cmd+Q, the tray's Quit Fleet, or logging out.
-- **Single instance**: launching Fleet again shows the window.
 - **The icon**: a macOS template icon (status by shape) or colour art on Windows / Linux; red when a
   pool is unhealthy or a job has been queued over 15 min (a wait on a pool with every slot busy
   doesn't count, see Queued lanes). The tooltip is "N running · M queued" plus the reasons. A click
-  toggles the window.
-- **The menu**: Show / Hide Fleet, the summary (disabled), Pause notifications, Start at login,
+  opens the window, or closes it while it shows.
+- **The menu**: Open / Close Fleet, the summary (disabled), Pause notifications, Start at login,
   Refresh now, Quit Fleet.
 - **Start at login** is turned on at the first run; turning it off in the menu sticks.
 - With no tray host (stock GNOME without an AppIndicator extension) the window shows instead and is
-  the only way in.
+  the only way in; closing it quits.
 
 ## The window
 
@@ -139,7 +146,7 @@ notified (`lib/backfill.ts`).
 
 ## Notifications
 
-Native, posted from the backend so they arrive while the window is hidden:
+Native, posted from the backend so they arrive with no window open (a click opens the window):
 
 - a pool goes unhealthy (once per outage);
 - a job passes 15 min queued (once per job; more than three at once become one summary; none for a
@@ -378,7 +385,7 @@ file in this repo.
 | `lib/agent-snapshot.ts`                | The agents' `snapshot.json`, built from the poller's state                                               |
 | `lib/agent-files.ts`                   | The agent files' names, shared with the MCP server                                                       |
 | `lib/deno-host.ts`                     | gh, the data files, native notifications                                                                 |
-| `lib/tray-driver.ts`                   | Tray, window manager, close guard, start at login                                                        |
+| `lib/tray-driver.ts`                   | Tray, window manager (open / close, Dock icon), start at login                                           |
 | `lib/icons.ts`, `png.ts`               | The tray and app icons, drawn in code (`denext task icons`)                                              |
 | `mcp/fleet-mcp.ts`, `mcp/queries.ts`   | The read-only MCP server for agents (stdio) and its tools' answers                                       |
 | `app/`                                 | The page: `fleet-app.tsx` (state), `fleet-view.tsx`, `event-log.tsx`, `controls.tsx`, `token-screen.tsx` |

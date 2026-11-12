@@ -23,10 +23,11 @@
       "activationPolicy": "accessory"
     },
     "window": {
-      "width": 1320,
-      "height": 860,
+      "defaultWidth": 1320,
+      "defaultHeight": 860,
       "title": "Fleet",
-      "show": false
+      "show": false,
+      "key": "fleet"
     },
     "minSize": {
       "width": 860,
@@ -38,7 +39,7 @@
       "menu": [
         {
           "id": "toggle",
-          "label": "Show Fleet"
+          "label": "Open Fleet"
         },
         {
           "id": "summary",
