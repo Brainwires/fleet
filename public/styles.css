@@ -735,18 +735,25 @@ a:hover {
   color: var(--text);
   border-color: var(--text-2);
 }
-.run-head .ctl-group {
-  display: none;
-  flex-basis: 100%;
-  margin-left: 0;
+/* The run's controls overlay the header's right end on hover / focus: hidden by opacity (still in
+   the accessibility tree and reachable by Tab), never squeezing the workflow name. */
+.run-head {
+  position: relative;
 }
-.run:hover .run-head .ctl-group,
-.run-head .ctl-group:focus-within {
-  display: inline-flex;
+.run-head .ctl-group {
+  position: absolute;
+  right: 0;
+  top: -2px;
+  padding-left: 12px;
+  background: linear-gradient(to right, transparent, var(--surface) 12px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s;
 }
 .run:hover .run-head .ctl-group,
 .run-head .ctl-group:focus-within {
   opacity: 1;
+  pointer-events: auto;
 }
 .done-when .ctl {
   margin-left: 6px;
