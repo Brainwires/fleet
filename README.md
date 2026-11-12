@@ -198,39 +198,28 @@ admin read on runners, say) is retried every 10 min.
 
 ## Webhooks
 
-On the Mac mini, GitHub's org webhook reaches Fleet through a Cloudflare tunnel
-(`com.brainwires.denext-ci-hooks-tunnel`), so most changes arrive in seconds and polling only
-reconciles.
+Optional. With GitHub's `workflow_job` / `workflow_run` webhook delivered to this machine, most
+changes arrive in seconds and polling only reconciles every 5 min; with no delivery for 10 min while
+runs are active, polling goes back to its normal rate, so a missed delivery or a dead tunnel costs
+freshness, not correctness. Without webhooks Fleet polls (`hooks: off`).
 
-- **The receiver service**, `com.brainwires.denext-ci-hooks-receiver` (a launchd agent, always on),
-  runs `hooks-only.ts` on `127.0.0.1:8789`: only `POST /github/hooks` (anything else 404),
-  `content-type: application/json` (else 415), at most 1 MiB (else 413; a large Content-Length is
-  refused unread), then `X-Hub-Signature-256` checked with a constant-time compare against the
-  keychain secret (item `denext-ci-hooks` / `github-webhook-secret`, at least 32 characters, else
-  the receiver stays off) before anything is parsed (else 401). `ping` → 200; `workflow_job` /
-  `workflow_run` → 202, de-duplicated on `X-GitHub-Delivery` (the last 10,000, rebuilt from the
-  spool at start, so a restart doesn't forget them). A replay is dropped too (202 `stale`, not
-  spooled): a delivery whose newest timestamp (a job's created / started / completed, a run's
-  `updated_at`) is over 10 min old. Payloads are data only: nothing in one is run or fetched.
-- **`events.jsonl`**: every verified delivery is appended to `~/.denext-runners/hooks/events.jsonl`
-  (0600, in a 0700 folder; rotated to `events.jsonl.1` at 20 MB), which the runner scheduler reads
-  too.
-- **Fleet** finds the port taken by the receiver and tails that spool every 2 s instead
-  (`hooks: live (via receiver)`), applying each delivery to the same state and event log as polling:
-  only when it is newer than what Fleet holds (a run's later `updated_at`, a job's later status),
-  and never one over 10 min old on GitHub's clock. The last delivery starts at the spool's newest
-  line, so a restart in a quiet spell isn't "no delivery yet". Without the receiver running, Fleet
-  listens on 8789 itself, with the same checks. A machine without the tunnel's launchd job and the
-  keychain secret has no webhooks: `hooks: off`.
-- **Polling as the fallback**: with deliveries arriving, polling only reconciles every 5 min; with
-  no delivery for 10 min while runs are active it goes back to the normal rate, so a missed delivery
-  or a dead tunnel costs freshness, not correctness.
+- **The receiver** listens on `127.0.0.1:8789` (loopback only) and accepts only
+  `POST /github/hooks`: `application/json` (else 415), at most 1 MiB (else 413), and a valid
+  `X-Hub-Signature-256` HMAC under the webhook secret, checked before anything is parsed (else 401).
+  `ping` → 200; `workflow_job` / `workflow_run` → 202, de-duplicated on `X-GitHub-Delivery` (the
+  last 10,000, kept across restarts) and dropped as a replay (202 `stale`) when the event's newest
+  timestamp is over 10 min old. Payloads are data only.
+- **Fleet or `hooks-only.ts`.** Fleet listens itself (`hooks: live`), unless the standalone receiver
+  (`denext task hooks`, or the same as a background service) already holds the port; then Fleet
+  tails its spool every 2 s (`hooks: live (via receiver)`). Port taken and no spool: polling only.
+- **The spool**, `~/.denext-runners/hooks/events.jsonl` (0600 in a 0700 folder, rotated to `.1` at
+  20 MB), records every verified delivery; Fleet back-fills its event log from it at start.
+- **Today** webhooks turn on only on macOS, with the secret in the login keychain (service
+  `denext-ci-hooks`, account `github-webhook-secret`, at least 32 characters) and the public
+  endpoint's launchd job file present (`TUNNEL_LABEL` in `lib/deno-hooks.ts`). Linux and Windows are
+  planned.
 
-`denext task hooks` runs the same receiver in a terminal, for an end-to-end check of the tunnel and
-the org webhook: one summary line per delivery (event, action, repo, job or run name), never the
-secret, headers or a body. Stop the launchd receiver first
-(`launchctl bootout gui/$(id -u)/com.brainwires.denext-ci-hooks-receiver`): only one process can
-hold the port.
+**Setup, verification, troubleshooting and removal:** [docs/webhooks.md](docs/webhooks.md).
 
 ## Controls
 
@@ -429,7 +418,8 @@ this repo.
 - The macOS `.dmg` itself is unsigned (the app inside is signed and notarized).
 - Windows: the build packages and launches, but the tray menu and Quit Fleet have not been verified
   by automation; check them by hand after a change there.
-- Webhooks exist only on the Mac mini (tunnel + keychain secret); everywhere else Fleet polls.
+- Webhooks work only on macOS for now (tunnel launchd job + keychain secret; see
+  [docs/webhooks.md](docs/webhooks.md)); everywhere else Fleet polls.
 - Pool controls exist only where the ops checkout is (the Mac mini).
 - Runs that finished over 2 h ago are not in the agents' snapshot; older history is GitHub's.
 
