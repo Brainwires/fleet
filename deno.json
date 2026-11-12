@@ -1,13 +1,13 @@
 {
   "version": "0.1.0",
   "tasks": {
-    "dev": "deno run -A ../../../denext/cli.ts dev .",
-    "export": "deno run -A ../../../denext/cli.ts export .",
-    "desktop": "deno run -A ../../../denext/cli.ts desktop run .",
-    "desktop:build": "deno run -A ../../../denext/cli.ts desktop build .",
-    "desktop:package": "deno run -A scripts/package-macos.ts",
-    "desktop:package:windows": "deno run -A scripts/package-windows.ts",
-    "test": "deno run -A ../../../denext/cli.ts test",
+    "dev": "deno run -A jsr:@denext/denext@^4.16.0/cli dev .",
+    "export": "deno run -A jsr:@denext/denext@^4.16.0/cli export .",
+    "desktop": "deno run -A jsr:@denext/denext@^4.16.0/cli desktop run .",
+    "desktop:build": "deno run -A jsr:@denext/denext@^4.16.0/cli desktop build .",
+    "desktop:package": "deno run -A jsr:@denext/denext@^4.16.0/cli desktop package .",
+    "desktop:package:windows": "deno run -A jsr:@denext/denext@^4.16.0/cli run -A scripts/package-windows.ts --arch x86_64",
+    "test": "deno run -A jsr:@denext/denext@^4.16.0/cli test",
     "check": "deno fmt --check && deno lint && deno task test",
     "icons": "deno run --allow-write=icons,public tools/make-icons.ts",
     "hooks": "deno run --allow-net=127.0.0.1:8789 --allow-run=/usr/bin/security --allow-env=HOME --allow-read=$HOME/Library/LaunchAgents/com.brainwires.denext-ci-hooks-tunnel.plist,/Library/LaunchDaemons/com.brainwires.denext-ci-hooks-tunnel.plist,/Library/LaunchAgents/com.brainwires.denext-ci-hooks-tunnel.plist,$HOME/.denext-runners/hooks --allow-write=$HOME/.denext-runners/hooks hooks-only.ts"
@@ -32,21 +32,21 @@
     ]
   },
   "imports": {
-    "denext": "../../../denext/mod.ts",
-    "denext/jsx-runtime": "../../../denext/src/jsx/jsx-runtime.ts",
-    "denext/jsx-dev-runtime": "../../../denext/src/jsx/jsx-runtime.ts",
-    "denext/server": "../../../denext/src/server/mod.ts",
-    "denext/client": "../../../denext/src/client/mod.ts",
-    "denext/testing": "../../../denext/src/testing/mod.ts",
-    "denext/mobile": "../../../denext/src/mobile/mod.ts",
-    "denext/desktop": "../../../denext/src/build/desktop.ts",
-    "denext/desktop/client": "../../../denext/src/desktop/client.ts",
-    "denext/desktop/window": "../../../denext/src/desktop/window.ts",
+    "denext": "jsr:@denext/denext@^4.16.0",
+    "denext/jsx-runtime": "jsr:@denext/denext@^4.16.0/jsx-runtime",
+    "denext/jsx-dev-runtime": "jsr:@denext/denext@^4.16.0/jsx-dev-runtime",
+    "denext/server": "jsr:@denext/denext@^4.16.0/server",
+    "denext/client": "jsr:@denext/denext@^4.16.0/client",
+    "denext/testing": "jsr:@denext/denext@^4.16.0/testing",
+    "denext/mobile": "jsr:@denext/denext@^4.16.0/mobile",
+    "denext/desktop": "jsr:@denext/denext@^4.16.0/desktop",
+    "denext/desktop/client": "jsr:@denext/denext@^4.16.0/desktop/client",
+    "denext/desktop/window": "jsr:@denext/denext@^4.16.0/desktop/window",
     "@std/assert": "jsr:@std/assert@^1"
   },
   "lint": {
     "plugins": [
-      "../../../denext/src/lint/denext-plugin.ts"
+      "jsr:@denext/denext@^4.16.0/lint-plugin"
     ]
   },
   "fmt": {

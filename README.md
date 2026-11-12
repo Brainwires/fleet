@@ -14,7 +14,7 @@ denext task desktop            # export + open the window (denext's pinned Deno 
 denext task test               # data layer, view and route tests (no network, no gh, no keychain)
 denext task check              # fmt --check, lint, tests
 denext task desktop:package    # macOS: dist/Fleet.app + dist/Fleet.dmg (see Signing)
-denext desktop package --target-os windows .   # Windows: dist/*.msi + .zip, from any host
+denext task desktop:package:windows   # Windows x86_64: dist/Fleet-x64-windows.zip, from any host
 ```
 
 `deno task …` runs the same tasks with Deno installed. Never run the GUI on the Mac mini.
