@@ -33,6 +33,14 @@ import {
 let service: FleetService | undefined;
 let extHost: DesktopExtensionHost | undefined;
 const pools = localPoolPaths();
+/** Test builds: controls show their dialogs and send nothing (set in the environment at launch). */
+const DRY_RUN = (() => {
+  try {
+    return Deno.env.get("FLEET_CONTROLS_DRY_RUN") === "1";
+  } catch {
+    return false;
+  }
+})();
 let windows: WindowManager | undefined;
 
 /** Hand the methods desktop.ts's window manager (the page's close button hides through it). */
@@ -129,6 +137,7 @@ function controlDeps(): ControlDeps {
     poolPaths: pools,
     uid: Deno.uid() ?? -1,
     runProgram,
+    dryRun: DRY_RUN,
   };
 }
 

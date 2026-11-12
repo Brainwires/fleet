@@ -87,7 +87,10 @@
         "/usr/bin/gh",
         "/usr/local/bin/gh",
         "C:\\Program Files\\GitHub CLI\\gh.exe",
-        "/usr/bin/security"
+        "/usr/bin/security",
+        "/Users/nightness/Source/Brainwires/denext-internal/ops/runners/pause-pool.sh",
+        "/Users/nightness/Source/Brainwires/denext-internal/ops/runners/watchdog.sh",
+        "/bin/launchctl"
       ],
       "write": [
         "$APPDATA",

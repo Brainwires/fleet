@@ -44,7 +44,15 @@ export interface ControlDeps {
   uid?: number;
   /** Run an exact program with argv (no shell); its exit code and first output lines. */
   runProgram?: (program: string, args: readonly string[]) => Promise<{ code: number; out: string }>;
+  /**
+   * Test builds only (FLEET_CONTROLS_DRY_RUN=1 in the app's environment at launch): every control
+   * still runs its guardrails and shows its dialog, then sends nothing, whatever is pressed.
+   */
+  dryRun?: boolean;
 }
+
+const DRY_RUN = "Dry run (test build): nothing will be sent, whichever button you press.";
+const DRY_DONE = "Dry run: nothing was sent.";
 
 /** A control's outcome, for the page. */
 export type ControlResult =
@@ -63,7 +71,7 @@ const int = (v: unknown) => (typeof v === "number" && Number.isSafeInteger(v) &&
 
 /** Ask, with the safe choice as the default and as Escape. */
 async function ask(deps: ControlDeps, check: ControlCheck, extra: string[]): Promise<boolean> {
-  const detail = [...check.warnings, ...extra].join("\n\n");
+  const detail = [...check.warnings, ...extra, ...(deps.dryRun ? [DRY_RUN] : [])].join("\n\n");
   const answer = await deps.confirm({
     title: "Fleet",
     message: check.message,
@@ -162,6 +170,7 @@ async function runAction(
   if (!(await ask(deps, check, gh.canWrite ? [] : [NO_TOKEN]))) {
     return { ok: false, cancelled: true, message: "Not done." };
   }
+  if (deps.dryRun) return { ok: false, message: DRY_DONE };
   if (!gh.canWrite) return { ok: false, message: NO_TOKEN };
   const req = controlRequest(c);
   try {
@@ -273,6 +282,7 @@ async function dispatch(
   if (!(await ask(deps, check, gh.canWrite ? [] : [NO_TOKEN]))) {
     return { ok: false, cancelled: true, message: "Not done." };
   }
+  if (deps.dryRun) return { ok: false, message: DRY_DONE };
   if (!gh.canWrite) return { ok: false, message: NO_TOKEN };
   const req = controlRequest(control);
   try {
@@ -325,12 +335,14 @@ export async function runPoolControl(deps: ControlDeps, raw: unknown): Promise<C
   const yes = await deps.confirm({
     title: "Fleet",
     message: cmd.message,
+    ...(deps.dryRun ? { detail: DRY_RUN } : {}),
     buttons: [cmd.confirmLabel, "Don't"],
     defaultId: 1,
     cancelId: 1,
     kind: "warning",
   });
   if (yes !== 0) return { ok: false, cancelled: true, message: "Not done." };
+  if (deps.dryRun) return { ok: false, message: DRY_DONE };
   const r = await deps.runProgram(cmd.program, cmd.args);
   const first = r.out.split("\n").map((l) => l.trim()).filter(Boolean)[0]?.slice(0, 200) ?? "";
   const where = "pool" in c ? `pool ${c.pool}` : "fleet";

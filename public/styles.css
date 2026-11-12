@@ -511,12 +511,16 @@ a:hover {
 }
 .run-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
-  gap: 8px;
+  column-gap: 8px;
+  row-gap: 3px;
   min-width: 0;
   margin-bottom: 3px;
 }
 .run-name {
+  flex: 0 1 auto;
+  min-width: 9ch;
   font-weight: 500;
   white-space: nowrap;
   overflow: hidden;
@@ -732,8 +736,13 @@ a:hover {
   border-color: var(--text-2);
 }
 .run-head .ctl-group {
-  opacity: 0;
-  transition: opacity 0.12s;
+  display: none;
+  flex-basis: 100%;
+  margin-left: 0;
+}
+.run:hover .run-head .ctl-group,
+.run-head .ctl-group:focus-within {
+  display: inline-flex;
 }
 .run:hover .run-head .ctl-group,
 .run-head .ctl-group:focus-within {

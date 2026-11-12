@@ -209,3 +209,28 @@ Deno.test("pool control: only on the scheduler's machine; confirmed first; exact
   await runPoolControl(d, { kind: "restart-scheduler" });
   assertEquals(ran.length, 1);
 });
+
+Deno.test("dry run: the dialog shows and says so; nothing is sent even when confirmed", async () => {
+  const s = await setup({ answer: 0 });
+  const deps = { ...s.deps, dryRun: true };
+  const r = await runControl(deps, {
+    kind: "rerun-all",
+    repo: "Brainwires/denext",
+    runId: ciRunId(),
+  });
+  assertEquals(r, { ok: false, message: "Dry run: nothing was sent." });
+  assertStringIncludes(s.asked[0], "Dry run (test build)");
+  assertEquals(s.posted, []);
+  const ran: string[] = [];
+  const pool = await runPoolControl(
+    {
+      ...deps,
+      poolPaths: poolPaths("/Users/me"),
+      uid: 501,
+      runProgram: (p) => (ran.push(p), Promise.resolve({ code: 0, out: "" })),
+    },
+    { kind: "watchdog-pass" },
+  );
+  assertEquals(pool.ok, false);
+  assertEquals(ran, []);
+});

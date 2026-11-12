@@ -147,7 +147,9 @@ Pool controls, only where `~/Source/Brainwires/denext-internal/ops/runners/pause
 (the Mac mini): per pool Pause (60 / 120 / 180 s; the script's own expiry still applies) and Resume,
 and Restart scheduler (`launchctl kickstart -k gui/<uid>/com.brainwires.denext-runners`) and Run
 watchdog pass now. Exact programs and argv only (no shell); the same confirmation. Nothing restarts
-a VM or deletes anything. There the pool cards also use the watchdog's local
+a VM or deletes anything. For GUI tests, launching the app with `FLEET_CONTROLS_DRY_RUN=1` in its
+environment makes every control show its dialog (saying it's a dry run) and send nothing, whichever
+button is pressed. There the pool cards also use the watchdog's local
 `~/.denext-runners/health.json` when it is fresher than the org variable.
 
 ## Permissions (baked into the binary)
