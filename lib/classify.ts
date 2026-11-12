@@ -1,7 +1,7 @@
 // Job classification, queue ages, warnings and the lanes' grouping. Pure: no clock, no I/O.
 
 import type { GhJob, GhRun } from "./github-types.ts";
-import type { JobRow, JobTarget, Lane, RepoGroup, RunGroup } from "./model.ts";
+import type { JobRow, JobTarget, Lane, PoolCard, RepoGroup, RunGroup } from "./model.ts";
 import {
   CORE_REPOS,
   DEFAULT_BRANCHES,
@@ -100,16 +100,28 @@ export function jobAge(since: number, now: number): number {
   return Math.max(0, now - since);
 }
 
-/** A row's warning at `now`. */
-export type JobWarning = "queued-long" | "over-usual" | null;
+/** A self-hosted pool that is ok with every slot busy: its queue is waiting for capacity. */
+export function poolIsFull(p: Pick<PoolCard, "id" | "state" | "slots" | "busy">): boolean {
+  return p.id !== GITHUB_POOL && p.state === "ok" && p.slots !== null && p.slots > 0 &&
+    p.busy >= p.slots;
+}
 
-/** Whether a row is late: queued > 15 min, or running past its usual length. */
+/** A row's warning at `now`. */
+export type JobWarning = "queued-long" | "queued-capacity" | "over-usual" | null;
+
+/**
+ * Whether a row is late: queued > 15 min (`queued-capacity` when its pool is full, which is just a
+ * wait for a free slot), or running past its usual length.
+ */
 export function jobWarning(
-  row: Pick<JobRow, "lane" | "since" | "usualMs">,
+  row: Pick<JobRow, "lane" | "since" | "usualMs" | "capacityWait">,
   now: number,
 ): JobWarning {
   const age = jobAge(row.since, now);
-  if (row.lane === "queued") return age > QUEUED_WARN_MS ? "queued-long" : null;
+  if (row.lane === "queued") {
+    if (age <= QUEUED_WARN_MS) return null;
+    return row.capacityWait ? "queued-capacity" : "queued-long";
+  }
   if (row.usualMs !== null && row.usualMs > 0) {
     const limit = Math.max(row.usualMs * OVER_USUAL_FACTOR, row.usualMs + OVER_USUAL_SLACK_MS);
     if (age > limit) return "over-usual";

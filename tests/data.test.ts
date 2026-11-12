@@ -13,6 +13,7 @@ import {
   jobSince,
   jobWarning,
   median,
+  poolIsFull,
   QUEUED_WARN_MS,
 } from "../lib/classify.ts";
 import { createGitHubClient, GitHubError, nextLink } from "../lib/github.ts";
@@ -24,7 +25,8 @@ import { Poller } from "../lib/poller.ts";
 import { poolFromLabels, poolFromRunnerName } from "../lib/pools.ts";
 import { cleanToken, createFleetService, TOKEN_KEY } from "../lib/service.ts";
 import { encodePng } from "../lib/png.ts";
-import type { Snapshot } from "../lib/model.ts";
+import type { PoolCard, Snapshot } from "../lib/model.ts";
+import { markCapacityWaits, summarize } from "../lib/snapshot.ts";
 import { ciRunId, fakeFetch, fixture, NOW, standardRoutes } from "./helpers.ts";
 
 const job = (over: Partial<GhJob>): GhJob => ({
@@ -483,7 +485,8 @@ Deno.test("notifications: pool unhealthy, queued over 15 min, default-branch fai
   const first = pendingNotifications(p.snapshot(), seen, startedAt);
   const titles = first.map((n) => n.title);
   assert(titles.includes("Pool win-x64 is unhealthy"));
-  assertEquals(titles.filter((t) => t === "Job queued over 15 min").length, 3);
+  // linux-x64 has every slot busy in the fixture: its long waits are capacity waits, no notice.
+  assertEquals(titles.filter((t) => t === "Job queued over 15 min").length, 0);
   assert(titles.includes("denext development: job failed"));
   // macos-tests failed at 16:49, before Fleet started: no notice.
   assertFalse(first.some((n) => n.body.includes("macos-tests")));
@@ -753,4 +756,71 @@ Deno.test("cleanToken: trims and rejects junk", () => {
   assertEquals(cleanToken("short"), null);
   assertEquals(cleanToken("ghp_ with spaces " + "a".repeat(30)), null);
   assertEquals(cleanToken(42), null);
+});
+
+// ---- capacity waits: a long queue on a full pool is not a fault ----
+
+const card = (over: Partial<PoolCard>): PoolCard => ({
+  id: "mac-x64",
+  title: "mac-x64",
+  label: "denext-macos-x64",
+  slots: 1,
+  busy: 1,
+  running: 1,
+  queued: 1,
+  state: "ok",
+  reason: "",
+  since: null,
+  oldestQueuedSince: NOW - 48 * 60_000,
+  ...over,
+});
+
+function capacityCase(pool: PoolCard) {
+  const row = {
+    id: 9,
+    name: "cli / x86_64-apple-darwin",
+    url: null,
+    lane: "queued" as const,
+    target: "pool" as const,
+    pool: "mac-x64",
+    runner: null,
+    since: NOW - 48 * 60_000,
+    usualMs: null,
+  };
+  const groups = markCapacityWaits(
+    [{ repo: "Brainwires/denext", runs: [{ ...runGroup(), jobs: [row] }] }],
+    [pool],
+  );
+  const rows = groups.flatMap((g) => g.runs.flatMap((r) => r.jobs));
+  const summary = summarize([], rows, [pool], NOW, { pollOk: true, healthStale: false });
+  return { rows, summary, snap: { ...emptySnap(), pools: [pool], queued: groups } };
+}
+
+Deno.test("capacity wait: a long queue on a full pool is a capacity wait, not a fault", () => {
+  const { rows, summary, snap } = capacityCase(card({}));
+  assert(poolIsFull(card({})));
+  assertEquals(jobWarning(rows[0], NOW), "queued-capacity");
+  assertEquals(summary.severity, "ok");
+  assertEquals(summary.reasons, ["1 waiting for capacity"]);
+  // No "queued over 15 min" notification for it.
+  assertEquals(pendingNotifications(snap, new Map(), NOW), []);
+});
+
+Deno.test("capacity wait: a free slot is still a fault", () => {
+  const { rows, summary, snap } = capacityCase(card({ busy: 0 }));
+  assertFalse(poolIsFull(card({ busy: 0 })));
+  assertEquals(jobWarning(rows[0], NOW), "queued-long");
+  assertEquals(summary.severity, "alert");
+  assertEquals(summary.reasons, ["1 job queued over 15 min"]);
+  assertEquals(pendingNotifications(snap, new Map(), NOW).map((n) => n.title), [
+    "Job queued over 15 min",
+  ]);
+});
+
+Deno.test("capacity wait: a paused, unhealthy or unknown pool is still a fault", () => {
+  for (const state of ["paused", "unhealthy", "unknown"] as const) {
+    const { rows, summary } = capacityCase(card({ state }));
+    assertEquals(jobWarning(rows[0], NOW), "queued-long", state);
+    assertEquals(summary.severity, "alert", state);
+  }
 });

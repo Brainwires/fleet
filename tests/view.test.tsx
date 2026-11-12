@@ -90,9 +90,14 @@ Deno.test("view: counts, pools, lanes, alerts and finished jobs from the fixture
   assertStringIncludes(lanes[0].textContent ?? "", "linux-x64-docker");
   assertStringIncludes(lanes[0].textContent ?? "", "45m 39s");
   assertStringIncludes(lanes[0].textContent ?? "", "train/4.17");
-  // Queued: deno's two runs waiting for jobs, and denext's late jobs flagged.
+  // Queued: deno's two runs waiting for jobs, and denext's late jobs flagged. linux-x64 has every
+  // slot busy, so its long waits are capacity waits (amber), not faults.
   assertStringIncludes(lanes[1].textContent ?? "", "queued, no jobs yet");
-  assertEquals(all(lanes[1], ".job-queued-long").length, 3);
+  assertEquals(all(lanes[1], ".job-queued-long").length, 0);
+  assertEquals(all(lanes[1], ".job-queued-capacity").length, 3);
+  assertStringIncludes(lanes[1].textContent ?? "", "waiting for a free slot (pool full)");
+  assertEquals(all(linux, ".is-capacity").length, 1);
+  assertEquals(all(linux, ".is-late").length, 0);
   // Not a default branch: no marker.
   assertFalse(html.includes("run-default"));
   // Side: alerts and finished.

@@ -65,8 +65,9 @@ The token is never logged, rendered, written to a file, or returned to the page.
 - **Quit** only through a real quit: Cmd+Q, the tray's Quit Fleet, or logging out.
 - **Single instance**: launching Fleet again shows the window.
 - **The icon**: a macOS template icon (status by shape) or colour art on Windows / Linux; red when a
-  pool is unhealthy or a job has been queued over 15 min. The tooltip is "N running · M queued" plus
-  the reasons. A click toggles the window.
+  pool is unhealthy or a job has been queued over 15 min (a wait on a pool with every slot busy
+  doesn't count, see Queued lanes). The tooltip is "N running · M queued" plus the reasons. A click
+  toggles the window.
 - **The menu**: Show / Hide Fleet, the summary (disabled), Pause notifications, Start at login,
   Refresh now, Quit Fleet.
 - **Start at login** is turned on at the first run; turning it off in the menu sticks.
@@ -86,16 +87,19 @@ The token is never logged, rendered, written to a file, or returned to the page.
   runners. The built-in list in `lib/pools.ts` is only the first render's, before any data arrives;
   a host that leaves the data leaves the cards. Each card: slots as pips (filled = busy), a state
   chip (ok / paused / unhealthy / no health) with its reason, and the oldest queued wait, red past
-  15 min. Hosts that share a runs-on label (`win-x64` and `win-x64-brain` on `denext-windows-x64`)
-  each show their own numbers; a running job is placed by its runner's name, and a queued job of a
-  shared label sits on that label's first card (its label can't say which host will take it).
+  15 min (amber when every slot is busy: the jobs are waiting for capacity, not faulting). Hosts
+  that share a runs-on label (`win-x64` and `win-x64-brain` on `denext-windows-x64`) each show their
+  own numbers; a running job is placed by its runner's name, and a queued job of a shared label sits
+  on that label's first card (its label can't say which host will take it).
 - **Running / Queued lanes**: repo → run (workflow, branch, short SHA, event) → job (name, pool
   chip, runner, elapsed or waited, ticking each second; `/ ~usual` once three successful runs of
   that job were seen). A default branch (`development-denext`, `development`, `main`) gets a violet
-  left rule and a ◆ branch chip. A job queued over 15 min turns red; one running past 1.5× its usual
-  length (and at least 3 min over) turns amber. A queued run GitHub hasn't expanded into jobs shows
-  "queued, no jobs yet" for its first 10 min; past that it is GitHub's stale status (the jobs list
-  never fills) and is left out.
+  left rule and a ◆ branch chip. A job queued over 15 min turns red, unless its pool is ok with
+  every slot busy: that is a capacity wait, shown amber as "waiting for a free slot (pool full)" and
+  counted in the header as "N waiting for capacity" (a free slot, a paused, unhealthy or no-health
+  pool stay red); one running past 1.5× its usual length (and at least 3 min over) turns amber. A
+  queued run GitHub hasn't expanded into jobs shows "queued, no jobs yet" for its first 10 min; past
+  that it is GitHub's stale status (the jobs list never fills) and is left out.
 - **Side**: the health variable's recent alerts, and jobs finished in the last 30 min with ✓ / ✕ /
   ⊘.
 - A click on a run or job opens it on github.com in the system browser.
@@ -105,9 +109,10 @@ The token is never logged, rendered, written to a file, or returned to the page.
 The bottom pane: one line per event, newest at the bottom, following new lines unless you scrolled
 up. Events: job queued / started (pool, runner) / finished (conclusion; for a failure the failed
 step and the first failure annotation), STALLED (running past 75 min) and QUEUED-LONG (queued past
-25 min with no runner), each repeated every 30 min while it lasts, run completed, a burst of
-cancelled jobs from one run as one line ("run N cancelled (14 jobs)"), pool health changes, the
-health variable's alerts, and every control you used or that was refused (marked "you").
+25 min with no runner; logged as info and marked "capacity wait" when its pool is full), each
+repeated every 30 min while it lasts, run completed, a burst of cancelled jobs from one run as one
+line ("run N cancelled (14 jobs)"), pool health changes, the health variable's alerts, and every
+control you used or that was refused (marked "you").
 
 Each line: local time, a severity glyph (✓ ✕ ▲ • ⊘, coloured too), repo, workflow / job, the text, a
 link. Filters: all / problems, repo, search. The first poll only records the state (no flood). The
@@ -122,7 +127,8 @@ and never notified (`lib/backfill.ts`).
 Native, posted from the backend so they arrive while the window is hidden:
 
 - a pool goes unhealthy (once per outage);
-- a job passes 15 min queued (once per job; more than three at once become one summary);
+- a job passes 15 min queued (once per job; more than three at once become one summary; none for a
+  wait on a full pool);
 - a default-branch job fails (once per job, only failures after Fleet started).
 
 Posted keys are kept for 48 h in `fleet-state.json`, so a relaunch doesn't repeat them. Pause

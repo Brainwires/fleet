@@ -1,7 +1,13 @@
 // Build the page's Snapshot from the poller's state: pool cards (health variable + our jobs), the
 // lanes, the summary (tray text and severity). Pure.
 
-import { type ActiveRun, groupLanes, jobWarning, type UsualLookup } from "./classify.ts";
+import {
+  type ActiveRun,
+  groupLanes,
+  jobWarning,
+  poolIsFull,
+  type UsualLookup,
+} from "./classify.ts";
 import type { GhJob, GhRunner } from "./github-types.ts";
 import type { HealthState } from "./health.ts";
 import type {
@@ -42,6 +48,22 @@ export interface SnapshotInput {
 /** Every job row of a lane. */
 export function rowsOf(groups: readonly RepoGroup[]): JobRow[] {
   return groups.flatMap((g) => g.runs.flatMap((r) => r.jobs));
+}
+
+/** The queued groups with `capacityWait` set on every row whose pool is full. */
+export function markCapacityWaits(
+  groups: readonly RepoGroup[],
+  pools: readonly PoolCard[],
+): RepoGroup[] {
+  const full = new Set(pools.filter(poolIsFull).map((p) => p.id));
+  if (full.size === 0) return [...groups];
+  return groups.map((g) => ({
+    ...g,
+    runs: g.runs.map((r) => ({
+      ...r,
+      jobs: r.jobs.map((j) => (full.has(j.pool) ? { ...j, capacityWait: true } : j)),
+    })),
+  }));
 }
 
 /**
@@ -128,7 +150,8 @@ export function poolCards(
 
 /**
  * The summary: `N running · M queued`, red (`alert`) when a pool is unhealthy or a job has been
- * queued over 15 min, amber (`warn`) for a paused pool, a job over its usual length, stale health
+ * queued over 15 min (a wait for a free slot on a full pool is only noted: "N waiting for
+ * capacity", no severity), amber (`warn`) for a paused pool, a job over its usual length, stale health
  * or a failing poll.
  */
 export function summarize(
@@ -157,6 +180,8 @@ export function summarize(
     raise("alert");
     reasons.push(`${late} job${late === 1 ? "" : "s"} queued over 15 min`);
   }
+  const waiting = queued.filter((r) => jobWarning(r, now) === "queued-capacity").length;
+  if (waiting) reasons.push(`${waiting} waiting for capacity`);
   const slow = running.filter((r) => jobWarning(r, now) === "over-usual").length;
   if (slow) {
     raise("warn");
@@ -181,10 +206,16 @@ export function trayText(summary: Summary): string {
 
 /** Build the snapshot. */
 export function buildSnapshot(input: SnapshotInput): Snapshot {
-  const { running, queued } = groupLanes(input.runs, input.jobsByRun, input.usual, input.now);
+  const { running, queued: queuedRaw } = groupLanes(
+    input.runs,
+    input.jobsByRun,
+    input.usual,
+    input.now,
+  );
   const runRows = rowsOf(running);
+  const pools = poolCards(runRows, rowsOf(queuedRaw), input.health, input.runners);
+  const queued = markCapacityWaits(queuedRaw, pools);
   const qRows = rowsOf(queued);
-  const pools = poolCards(runRows, qRows, input.health, input.runners);
   const h = input.health;
   const doc = h.state === "ok" || h.state === "stale" ? h.doc : null;
   const alerts: AlertRow[] = doc ? doc.alerts.map((a) => ({ ...a })) : [];

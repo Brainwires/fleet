@@ -12,10 +12,11 @@
 // The first observation (and the first after a restart with state older than RESEED_MS) only
 // records: no flood of "queued" / "started" lines for everything already in flight.
 
-import { classifyJob, time } from "./classify.ts";
+import { classifyJob, poolIsFull, time } from "./classify.ts";
 import type { GhJob, GhRun } from "./github-types.ts";
+import type { HealthState } from "./health.ts";
 import type { Observation } from "./poller.ts";
-import { GITHUB_POOL, poolIdOfLabel } from "./pools.ts";
+import { currentPools, GITHUB_POOL, poolIdOfLabel } from "./pools.ts";
 
 /** A line's severity: drawn as a colour AND a glyph. */
 export type EventSeverity = "info" | "ok" | "warn" | "bad" | "muted";
@@ -204,10 +205,10 @@ export function diffObservation(state: TrackerState, obs: Observation): NewEvent
         tracked.warnedAt = undefined;
       }
       // Timers: STALLED and QUEUED-LONG, then every REPEAT_MS.
-      const late = lateNow(job, now);
+      const late = lateNow(job, now, obs.health);
       if (late && (tracked.warnedAt === undefined || now - tracked.warnedAt >= REPEAT_MS)) {
         tracked.warnedAt = now;
-        lines.push(ev("warn", late.kind, late.text));
+        lines.push(ev(late.capacity ? "info" : "warn", late.kind, late.text));
       }
       state.jobs[key] = tracked;
     }
@@ -278,11 +279,28 @@ function runBase(repo: string, run: GhRun) {
   return { repo, workflow: run.name ?? "workflow", branch: run.head_branch ?? "", run_id: run.id };
 }
 
+/** Whether the job's pool is ok with every slot busy, by the fresh health variable. */
+function jobPoolFull(job: GhJob, health: HealthState): boolean {
+  if (health.state !== "ok") return false;
+  const c = classifyJob({ ...job, status: "queued" });
+  if (!c || c.pool === GITHUB_POOL) return false;
+  const label = currentPools().find((p) => p.id === c.pool)?.label ?? c.pool;
+  const h = health.doc.hosts?.[c.pool] ?? health.doc.pools[label];
+  if (!h) return false;
+  return poolIsFull({
+    id: c.pool,
+    state: !h.ok ? "unhealthy" : h.paused ? "paused" : "ok",
+    slots: h.slots,
+    busy: h.busy ?? 0,
+  });
+}
+
 /** A job late right now: running past STALL_MS, or queued with no runner past QUEUE_LONG_MS. */
 function lateNow(
   job: GhJob,
   now: number,
-): { kind: "stalled" | "queued-long"; text: string } | null {
+  health?: HealthState,
+): { kind: "stalled" | "queued-long"; text: string; capacity?: boolean } | null {
   if (job.status === "in_progress") {
     const started = time(job.started_at) ?? time(job.created_at);
     if (started !== null && now - started > STALL_MS) {
@@ -298,7 +316,8 @@ function lateNow(
         kind: "queued-long",
         text: `QUEUED-LONG: ${Math.floor((now - created) / 60_000)} min with no runner (${
           poolText(job)
-        })`,
+        }${health && jobPoolFull(job, health) ? "; pool full, capacity wait" : ""})`,
+        capacity: !!health && jobPoolFull(job, health),
       };
     }
   }

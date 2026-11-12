@@ -22,6 +22,11 @@ export interface JobRow {
   readonly since: number;
   /** The median length of this job's recent successful runs, when known. */
   readonly usualMs: number | null;
+  /**
+   * Queued on a self-hosted pool that is ok with every slot busy: a long wait there is a capacity
+   * wait, not a fault. Set when the snapshot is built (it needs the pool cards).
+   */
+  readonly capacityWait?: boolean;
 }
 
 /** One workflow run with its active jobs. */

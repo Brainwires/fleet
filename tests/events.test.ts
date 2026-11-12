@@ -368,3 +368,26 @@ Deno.test("service: the log seeds silently, records a finished run, and survives
   assertEquals(again.events(n - 1).events.map((e) => e.text), ["test action"]);
   again.stop();
 });
+
+Deno.test("events: QUEUED-LONG on a full pool is logged as a capacity wait (info)", () => {
+  const health = (busy: number) =>
+    parsePoolHealth(
+      JSON.stringify({
+        v: 1,
+        checked_at: NOW / 1000,
+        pools: {
+          "denext-linux-x64": { ok: true, reason: "", since: 1, slots: 3, busy, paused: false },
+        },
+      }),
+      NOW,
+    );
+  const waiting = job(2, { created_at: new Date(NOW - QUEUE_LONG_MS + 60_000).toISOString() });
+  for (const [busy, sev, capacity] of [[3, "info", true], [1, "warn", false]] as const) {
+    const t = newTracker();
+    const o = (at: number) => ({ ...obs(at, [{ jobs: [waiting] }]), health: health(busy) });
+    diffObservation(t, o(NOW));
+    const ev = diffObservation(t, o(NOW + 2 * 60_000));
+    assertEquals(ev.map((e) => [e.kind, e.sev]), [["queued-long", sev]]);
+    assertEquals(ev[0].text.includes("capacity wait"), capacity);
+  }
+});

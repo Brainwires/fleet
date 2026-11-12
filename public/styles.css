@@ -428,6 +428,10 @@ a:hover {
   color: var(--bad);
   font-weight: 500;
 }
+.pool-wait.is-capacity {
+  color: var(--warn);
+  font-weight: 500;
+}
 .pool-reason {
   font-size: 13px;
   color: var(--bad);
@@ -625,6 +629,14 @@ a:hover {
 .job-queued-long .job-time,
 .job-queued-long .warn-tag {
   color: var(--bad);
+}
+.job-queued-capacity {
+  border-left-color: var(--warn);
+  background: var(--warn-soft);
+}
+.job-queued-capacity .job-time,
+.job-queued-capacity .warn-tag {
+  color: var(--warn);
 }
 .job-over-usual {
   border-left-color: var(--warn);

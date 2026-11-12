@@ -5,7 +5,7 @@
 // fixture data.
 
 import type { ReactNode } from "denext";
-import { jobWarning } from "../lib/classify.ts";
+import { jobWarning, poolIsFull } from "../lib/classify.ts";
 import { RATE_LOW, RATE_SLOW, slowText } from "../lib/budget.ts";
 import type { FleetEvent } from "../lib/events.ts";
 import { formatAgo, formatClock, formatCount, formatDuration, shortRepo } from "../lib/format.ts";
@@ -85,6 +85,7 @@ function PoolCardView(
 ) {
   const waited = pool.oldestQueuedSince === null ? null : now - pool.oldestQueuedSince;
   const lateQueue = waited !== null && waited > 15 * 60_000;
+  const lateClass = lateQueue ? (poolIsFull(pool) ? " is-capacity" : " is-late") : "";
   return (
     <li class={`pool pool-${pool.state}${pool.id === "github" ? " pool-github" : ""}`}>
       <div class="pool-head">
@@ -97,7 +98,7 @@ function PoolCardView(
           {pool.slots === null ? "" : `${pool.busy}/${pool.slots}`}
         </span>
       </div>
-      <div class={`pool-wait${lateQueue ? " is-late" : ""}`}>
+      <div class={`pool-wait${lateClass}`}>
         {waited === null ? <span class="muted">nothing queued</span> : (
           <>
             <span class="num">{pool.queued}</span> queued · oldest{" "}
@@ -132,7 +133,11 @@ function JobLine({ job, now, onOpen }: { job: JobRow; now: number; onOpen: (u: s
       {warn
         ? (
           <span class="warn-tag">
-            {warn === "queued-long" ? "queued > 15m" : "over usual"}
+            {warn === "queued-long"
+              ? "queued > 15m"
+              : warn === "queued-capacity"
+              ? "waiting for a free slot (pool full)"
+              : "over usual"}
           </span>
         )
         : null}
