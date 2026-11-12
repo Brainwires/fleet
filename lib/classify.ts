@@ -6,8 +6,12 @@ import {
   CORE_REPOS,
   DEFAULT_BRANCHES,
   GITHUB_POOL,
+  hostRuleOfRunner,
+  hostSlot,
   poolFromLabels,
   poolFromRunnerName,
+  runnerHostRule,
+  runnerIsSlot,
 } from "./pools.ts";
 
 /** A job queued longer than this is late (15 min). */
@@ -62,7 +66,7 @@ export function classifyJob(job: GhJob): JobClass | null {
   const labelPool = poolFromLabels(labels);
   if (lane === "running") {
     const runner = job.runner_name ?? "";
-    if (runner.startsWith("denext-")) {
+    if (runner.startsWith("denext-") || hostRuleOfRunner(runner)) {
       return {
         lane,
         target: "pool",
@@ -119,9 +123,11 @@ export type JobWarning = "queued-long" | "queued-capacity" | "over-usual" | null
  * wait for a free slot), or running past its usual length.
  */
 export function jobWarning(
-  row: Pick<JobRow, "lane" | "since" | "usualMs" | "capacityWait">,
+  row: Pick<JobRow, "lane" | "since" | "usualMs" | "capacityWait"> & { hosting?: string },
   now: number,
 ): JobWarning {
+  // A runner host is long-lived by design.
+  if (row.lane === "running" && row.hosting !== undefined) return null;
   const age = jobAge(row.since, now);
   if (row.lane === "queued") {
     if (age <= QUEUED_WARN_MS) return null;
@@ -180,6 +186,34 @@ export function repoOrder(a: string, b: string): number {
   return a.localeCompare(b);
 }
 
+interface RunnerJob {
+  readonly repo: string;
+  readonly workflow: string;
+  readonly job: GhJob;
+}
+
+/**
+ * What a runner-host job hosts: `hosting gh-intel-helper-1 · idle`, or `… · running <repo> ·
+ * <workflow> · <job>` once a running job's runner is the one of its slot (`helper (1)` ↔
+ * `gh-intel-helper-1-…`). Without a registered runner yet the slot's prefix stands in.
+ */
+function hostingText(
+  rule: ReturnType<typeof runnerHostRule> & object,
+  host: GhJob,
+  runnerJobs: readonly RunnerJob[],
+): string {
+  const slot = hostSlot(host.name);
+  const base = slot ? `${rule.runnerPrefix}${slot}` : rule.runnerPrefix.replace(/-$/, "");
+  const work = slot
+    ? runnerJobs.find((r) =>
+      r.job.id !== host.id && r.job.runner_name && runnerIsSlot(r.job.runner_name, rule, slot)
+    )
+    : undefined;
+  if (!work) return `hosting ${base} · idle`;
+  const repo = work.repo.split("/").pop() ?? work.repo;
+  return `hosting ${base} · running ${repo} · ${work.workflow} · ${work.job.name}`;
+}
+
 /**
  * Group the active runs' jobs into the Running and Queued lanes: repo → run → job. A run appears
  * in each lane it has jobs in; a queued run GitHub hasn't expanded into jobs yet appears in Queued
@@ -198,10 +232,19 @@ export function groupLanes(
   now: number,
 ): { running: RepoGroup[]; queued: RepoGroup[] } {
   const lanes: Record<Lane, Map<string, RunGroup[]>> = { running: new Map(), queued: new Map() };
+  const runnerJobs: RunnerJob[] = [];
+  for (const a of runs) {
+    for (const job of jobsByRun.get(a.run.id) ?? []) {
+      if (job.status === "in_progress" && job.runner_name) {
+        runnerJobs.push({ repo: a.repo, workflow: a.run.name ?? "workflow", job });
+      }
+    }
+  }
   for (const a of runs) {
     const header = runHeader(a);
     const jobs = jobsByRun.get(a.run.id) ?? [];
     const rows: Record<Lane, JobRow[]> = { running: [], queued: [] };
+    const hostRule = runnerHostRule(a.repo, header.workflow);
     for (const job of jobs) {
       const c = classifyJob(job);
       if (!c) continue;
@@ -216,6 +259,10 @@ export function groupLanes(
         image: c.target === "github" ? githubImage(job.labels) : null,
         since: jobSince(job, c.lane),
         usualMs: usual(a.repo, header.workflow, job.name),
+        ...(c.lane === "running" && hostRule
+          ? { hosting: hostingText(hostRule, job, runnerJobs) }
+          : {}),
+        ...(job.runner_name && hostRuleOfRunner(job.runner_name) ? { helper: true } : {}),
       });
     }
     const runStatus = laneOf(a.run.status ?? "queued");

@@ -32,6 +32,13 @@ export interface JobRow {
    * wait, not a fault. Set when the snapshot is built (it needs the pool cards).
    */
   readonly capacityWait?: boolean;
+  /**
+   * A runner-host job (a GitHub-hosted job that only hosts a self-hosted runner): what it hosts,
+   * `hosting gh-intel-helper-1 · idle`. Present means never late.
+   */
+  readonly hosting?: string;
+  /** Running on a runner a GitHub-hosted helper registered (pool is still the runner's pool). */
+  readonly helper?: boolean;
 }
 
 /** One workflow run with its active jobs. */

@@ -16,7 +16,7 @@ import { classifyJob, poolIsFull, time } from "./classify.ts";
 import type { GhJob, GhRun } from "./github-types.ts";
 import type { HealthState } from "./health.ts";
 import type { Observation } from "./poller.ts";
-import { currentPools, GITHUB_POOL, poolIdOfLabel } from "./pools.ts";
+import { currentPools, GITHUB_POOL, poolIdOfLabel, runnerHostRule } from "./pools.ts";
 
 /** A line's severity: drawn as a colour AND a glyph. */
 export type EventSeverity = "info" | "ok" | "warn" | "bad" | "muted";
@@ -157,6 +157,7 @@ export function diffObservation(state: TrackerState, obs: Observation): NewEvent
 
   for (const { repo, run, jobs } of obs.runs) {
     const base = runBase(repo, run);
+    const host = runnerHostRule(repo, run.name ?? "workflow") !== undefined;
     const cancelled: GhJob[] = [];
     const lines: NewEvent[] = [];
     for (const job of jobs) {
@@ -167,7 +168,7 @@ export function diffObservation(state: TrackerState, obs: Observation): NewEvent
       if (seeding) {
         // Recorded as is; a job already late gets its first warning a full period from now.
         tracked.status = job.status;
-        if (lateNow(job, now)) tracked.warnedAt = now;
+        if (!host && lateNow(job, now)) tracked.warnedAt = now;
         state.jobs[key] = tracked;
         continue;
       }
@@ -205,7 +206,7 @@ export function diffObservation(state: TrackerState, obs: Observation): NewEvent
         tracked.warnedAt = undefined;
       }
       // Timers: STALLED and QUEUED-LONG, then every REPEAT_MS.
-      const late = lateNow(job, now, obs.health);
+      const late = host ? null : lateNow(job, now, obs.health);
       if (late && (tracked.warnedAt === undefined || now - tracked.warnedAt >= REPEAT_MS)) {
         tracked.warnedAt = now;
         lines.push(ev(late.capacity ? "info" : "warn", late.kind, late.text));

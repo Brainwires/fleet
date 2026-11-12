@@ -394,3 +394,15 @@ file in this repo.
 - Webhooks exist only on the Mac mini (tunnel + keychain secret); everywhere else Fleet polls.
 - Pool controls exist only where the ops checkout is (the Mac mini).
 - Runs that finished over 2 h ago are not in the agents' snapshot; older history is GitHub's.
+
+## Runner-host jobs
+
+Some GitHub-hosted jobs exist only to host a self-hosted runner for a while, such as
+`intel helper / helper (N)` in Brainwires/deno (`ops/intel-helper`): a GitHub-hosted Intel Mac that
+registers an ephemeral runner `gh-intel-helper-<slot>-<ts>` and waits for one fleet job. They are
+long-lived by design, so Fleet never raises STALLED, "over usual" or a notification for them. The
+lanes and the GitHub-hosted panel show `hosting gh-intel-helper-1 · idle`, or
+`hosting gh-intel-helper-1 · running <repo> · <workflow> · <job>` when a running job's runner is the
+one of that slot (`helper (1)` ↔ `gh-intel-helper-1-…`). A job on such a runner counts in the
+`mac-x64` pool, marked "(GitHub helper)". The rules are `RUNNER_HOSTS` in `lib/pools.ts`
+(`{ repo, workflow, runnerPrefix, pool }`); add an entry for another workflow of this kind.

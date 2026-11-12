@@ -123,14 +123,16 @@ function RunnerRow(
   const warn = jobWarning(job, now);
   const id = job.runner ? shortRunner(job.runner) : null;
   const label = job.image ?? id ?? "assigning…";
-  const where = `${shortRepo(r.repo)} · ${r.workflow} · ${job.name}`;
+  const where = job.hosting ?? `${shortRepo(r.repo)} · ${r.workflow} · ${job.name}`;
   return (
     <li class={`runner${warn ? " runner-warn" : ""}`}>
       <span class="runner-name" title={job.runner ?? label}>
         {label}
         {job.image && id ? <span class="runner-id">{id}</span> : null}
       </span>
-      <span class="runner-state">{warn ? "over usual" : "running"}</span>
+      <span class="runner-state">
+        {warn ? "over usual" : job.hosting !== undefined ? "hosting" : "running"}
+      </span>
       <span class="runner-time num" title="elapsed">{formatDuration(now - job.since)}</span>
       <Out href={job.url} onOpen={onOpen} class="runner-job" title={where}>{where}</Out>
     </li>
@@ -233,9 +235,10 @@ function JobLine({ job, now, onOpen }: { job: JobRow; now: number; onOpen: (u: s
         title={job.image ?? job.pool}
       >
         {job.pool === "github" ? "GitHub" : job.pool}
+        {job.helper ? " (GitHub helper)" : ""}
       </span>
-      <span class="job-runner" title={job.runner ?? ""}>
-        {job.runner ? shortRunner(job.runner) : ""}
+      <span class="job-runner" title={job.hosting ?? job.runner ?? ""}>
+        {job.hosting ?? (job.runner ? shortRunner(job.runner) : "")}
       </span>
       <span class="job-time num" title={job.lane === "running" ? "elapsed" : "waited"}>
         {formatDuration(age)}

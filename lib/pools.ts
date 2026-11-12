@@ -48,6 +48,51 @@ export const POOLS: readonly PoolDef[] = [
   },
 ];
 
+/**
+ * A workflow whose GitHub-hosted job only hosts a self-hosted runner for a while ("runner host"):
+ * long-lived by design, so it never warns (no STALLED, over usual). Its real work shows up as
+ * another job whose runner name starts with `runnerPrefix` + the slot. Add a rule here to teach
+ * Fleet another such workflow (documented in the README).
+ */
+export interface RunnerHostRule {
+  readonly repo: string;
+  readonly workflow: string;
+  /** The runner-name prefix it registers (`gh-intel-helper-`, then `<slot>-<ts>`). */
+  readonly runnerPrefix: string;
+  /** The pool its runners serve. */
+  readonly pool: string;
+}
+
+/** The runner-host workflows. */
+export const RUNNER_HOSTS: readonly RunnerHostRule[] = [
+  {
+    repo: "Brainwires/deno",
+    workflow: "intel helper",
+    runnerPrefix: "gh-intel-helper-",
+    pool: "mac-x64",
+  },
+];
+
+/** The rule for a run's repo and workflow name, or `undefined` when it isn't a runner host. */
+export function runnerHostRule(repo: string, workflow: string): RunnerHostRule | undefined {
+  return RUNNER_HOSTS.find((r) => r.repo === repo && r.workflow === workflow);
+}
+
+/** The slot number in a matrix job name (`helper (1)` → `1`), or `null`. */
+export function hostSlot(jobName: string): string | null {
+  return /\((\d+)\)\s*$/.exec(jobName)?.[1] ?? null;
+}
+
+/** The rule whose runner prefix a runner name carries (`gh-intel-helper-1-…`), or `undefined`. */
+export function hostRuleOfRunner(name: string): RunnerHostRule | undefined {
+  return RUNNER_HOSTS.find((r) => name.startsWith(r.runnerPrefix));
+}
+
+/** The runner of rule `rule` for `slot`, true when `name` is `<prefix><slot>-…`. */
+export function runnerIsSlot(name: string, rule: RunnerHostRule, slot: string): boolean {
+  return name.startsWith(`${rule.runnerPrefix}${slot}-`);
+}
+
 /** The pseudo-pool for GitHub-hosted runners. */
 export const GITHUB_POOL = "github";
 
@@ -186,6 +231,8 @@ export function poolFromLabels(labels: readonly string[]): string | null {
  * prefix winning, or `null`.
  */
 export function poolFromRunnerName(name: string): string | null {
+  const host = hostRuleOfRunner(name);
+  if (host) return host.pool;
   let best: PoolDef | undefined;
   for (const p of current) {
     if (
