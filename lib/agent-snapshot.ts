@@ -4,6 +4,14 @@
 // scheduler shares). Plain JSON, snake_case like GitHub's own; times are ISO strings. Never a token,
 // header or secret: only what the page's snapshot shows plus the runs' and jobs' public fields.
 // Pure: the clock and the poller's state come in as values.
+//
+// Run, job, step and branch names, titles and annotations are CI output: text whoever pushed or
+// opened a PR chose, and data to an agent, never instructions. Every free-text string is capped
+// (names 120, annotations 300) and stripped of control characters; for a fork or
+// `pull_request_target` run (`untrusted: true`) the title, step names, failed step and annotation
+// are wrapped as `{ untrusted: "<text>" }`, so no agent reads them as plain prose.
+
+import { runProvenance } from "./classify.ts";
 
 import { classifyJob } from "./classify.ts";
 import { failedStep } from "./events.ts";
@@ -17,9 +25,40 @@ export const AGENT_FINISHED_KEEP_MS = 2 * 60 * 60_000;
 /** The backend rewrites the file at least this often (bumping `written_at`) while it runs. */
 export const AGENT_HEARTBEAT_MS = 60_000;
 
+/** Names (runs, jobs, steps, branches, workflows) are at most this long in the file. */
+export const AGENT_NAME_MAX = 120;
+/** Annotations and other longer free text are at most this long. */
+export const AGENT_NOTE_MAX = 300;
+
+/** Text from a fork / pull_request_target run: someone else's, wrapped so it can't pass as prose. */
+export interface UntrustedText {
+  readonly untrusted: string;
+}
+
+/** A free-text field: plain (capped), or wrapped when the run is untrusted. */
+export type AgentText = string | UntrustedText;
+
+/**
+ * Free text fit for an agent: control characters (newlines included) and bidi overrides become
+ * spaces, runs of space collapse, capped at `max` with "…".
+ */
+export function capText(text: string, max: number): string {
+  const t = text
+    .replace(/[\p{Cc}\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+}
+
+/** Capped text, wrapped when `untrusted`. */
+export function agentText(text: string, max: number, untrusted: boolean): AgentText {
+  const t = capText(text, max);
+  return untrusted ? { untrusted: t } : t;
+}
+
 /** One step of a job. */
 export interface AgentStep {
-  readonly name: string;
+  readonly name: AgentText;
   readonly status: string;
   readonly conclusion: string | null;
 }
@@ -29,10 +68,21 @@ export interface AgentRun {
   readonly repo: string;
   readonly run_id: number;
   readonly workflow: string;
-  readonly title: string;
+  /** The run's title (a commit message or PR title): wrapped for an untrusted run. */
+  readonly title: AgentText;
   readonly branch: string;
   readonly sha: string;
   readonly event: string;
+  // The provenance fields are always written; optional only because a file from an older Fleet
+  // build lacks them.
+  /** Who started this attempt, when GitHub reports it. */
+  readonly actor?: string | null;
+  /** The repo the head commit came from (`owner/name`), when reported. */
+  readonly head_repository?: string | null;
+  /** The head repo isn't this repo: a fork PR. */
+  readonly fork?: boolean;
+  /** A fork or pull_request_target run: its free text is someone else's (wrapped). */
+  readonly untrusted?: boolean;
   readonly status: string;
   readonly conclusion: string | null;
   readonly attempt: number | null;
@@ -52,6 +102,12 @@ export interface AgentJob {
   readonly workflow: string;
   readonly branch: string;
   readonly sha: string;
+  /** The run's event, actor and provenance (see AgentRun; always written by this build). */
+  readonly event?: string;
+  readonly actor?: string | null;
+  readonly head_repository?: string | null;
+  readonly fork?: boolean;
+  readonly untrusted?: boolean;
   readonly status: string;
   readonly conclusion: string | null;
   readonly created_at: string | null;
@@ -64,9 +120,9 @@ export interface AgentJob {
   readonly pool: string | null;
   readonly steps: readonly AgentStep[];
   /** For a failed job: the step that failed, when the job lists its steps. */
-  readonly failed_step: string | null;
-  /** For a failed job: the first failure annotation's first line, when Fleet read it. */
-  readonly failure_annotation: string | null;
+  readonly failed_step: AgentText | null;
+  /** For a failed job: the first failure annotation's first line (≤ 300), when Fleet read it. */
+  readonly failure_annotation: AgentText | null;
 }
 
 /** One pool card, as the window shows it. */
@@ -131,6 +187,8 @@ export interface AgentSnapshot {
   readonly alerts: readonly { readonly at: string; readonly pool: string; readonly msg: string }[];
   /** The event log's last `seq` when this was written. */
   readonly event_seq: number;
+  /** GitHub's clock minus this machine's (ms): add it to now before aging a GitHub timestamp. */
+  readonly clock_offset_ms?: number;
   readonly runs: readonly AgentRun[];
   readonly jobs: readonly AgentJob[];
 }
@@ -169,16 +227,31 @@ function jobPool(job: GhJob): string | null {
   return job.runner_name ? GITHUB_POOL : null;
 }
 
+const name = (s: string) => capText(s, AGENT_NAME_MAX);
+
+/** A run's provenance fields, shared by the run and its jobs. */
+function provenanceOf(repo: string, run: GhRun) {
+  const p = runProvenance(repo, run);
+  return {
+    event: capText(p.event, 40),
+    actor: p.actor === null ? null : name(p.actor),
+    head_repository: p.headRepo === null ? null : name(p.headRepo),
+    fork: p.fork,
+    untrusted: p.untrusted,
+  };
+}
+
 function agentRun(repo: string, run: GhRun): AgentRun {
   const done = run.status === "completed";
+  const prov = provenanceOf(repo, run);
   return {
     repo,
     run_id: run.id,
-    workflow: run.name ?? "workflow",
-    title: run.display_title ?? "",
-    branch: run.head_branch ?? "",
+    workflow: name(run.name ?? "workflow"),
+    title: agentText(run.display_title ?? "", AGENT_NAME_MAX, prov.untrusted),
+    branch: name(run.head_branch ?? ""),
     sha: run.head_sha ?? "",
-    event: run.event ?? "",
+    ...prov,
     status: run.status ?? "unknown",
     conclusion: run.conclusion ?? null,
     attempt: run.run_attempt ?? null,
@@ -196,30 +269,34 @@ function agentJob(
   annotations: ReadonlyMap<number, string>,
 ): AgentJob {
   const failed = job.status === "completed" && FAILED.has(job.conclusion ?? "");
+  const prov = provenanceOf(repo, run);
+  const step = failed ? failedStep(job) : null;
+  const note = failed ? annotations.get(job.id) ?? null : null;
   return {
     repo,
     run_id: job.run_id,
     job_id: job.id,
-    name: job.name,
-    workflow: job.workflow_name ?? run.name ?? "workflow",
-    branch: job.head_branch ?? run.head_branch ?? "",
+    name: name(job.name),
+    workflow: name(job.workflow_name ?? run.name ?? "workflow"),
+    branch: name(job.head_branch ?? run.head_branch ?? ""),
     sha: run.head_sha ?? "",
+    ...prov,
     status: job.status,
     conclusion: job.conclusion ?? null,
     created_at: job.created_at ?? null,
     started_at: job.started_at ?? null,
     completed_at: job.completed_at ?? null,
     html_url: job.html_url ?? null,
-    labels: [...(job.labels ?? [])],
-    runner_name: job.runner_name ?? null,
+    labels: (job.labels ?? []).map(name),
+    runner_name: job.runner_name ? name(job.runner_name) : null,
     pool: jobPool(job),
     steps: (job.steps ?? []).map((s) => ({
-      name: s.name,
+      name: agentText(s.name, AGENT_NAME_MAX, prov.untrusted),
       status: s.status,
       conclusion: s.conclusion ?? null,
     })),
-    failed_step: failed ? failedStep(job) : null,
-    failure_annotation: failed ? annotations.get(job.id) ?? null : null,
+    failed_step: step === null ? null : agentText(step, AGENT_NAME_MAX, prov.untrusted),
+    failure_annotation: note === null ? null : agentText(note, AGENT_NOTE_MAX, prov.untrusted),
   };
 }
 
@@ -237,7 +314,7 @@ export function buildAgentSnapshot(input: AgentSnapshotInput): AgentSnapshot {
     auth: s.auth,
     poll: {
       ok: s.poll.ok,
-      message: s.poll.message,
+      message: capText(s.poll.message, AGENT_NOTE_MAX),
       last_success_at: iso(s.poll.lastSuccessAt),
       interval_ms: s.poll.intervalMs,
       slow: s.poll.slow,
@@ -249,19 +326,19 @@ export function buildAgentSnapshot(input: AgentSnapshotInput): AgentSnapshot {
     health: {
       state: s.health.state,
       checked_at: iso(s.health.checkedAt),
-      message: s.health.message,
+      message: capText(s.health.message, AGENT_NOTE_MAX),
     },
     summary: {
       running: s.summary.running,
       queued: s.summary.queued,
       severity: s.summary.severity,
-      reasons: [...s.summary.reasons],
+      reasons: s.summary.reasons.map((r) => capText(r, AGENT_NOTE_MAX)),
     },
     pools: s.pools.map((p) => ({
       id: p.id,
       label: p.label,
       state: p.state,
-      reason: p.reason,
+      reason: capText(p.reason, AGENT_NOTE_MAX),
       slots: p.slots,
       busy: p.busy,
       running: p.running,
@@ -274,13 +351,18 @@ export function buildAgentSnapshot(input: AgentSnapshotInput): AgentSnapshot {
       label: h.label,
       ok: h.ok,
       paused: h.paused,
-      reason: h.reason,
+      reason: capText(h.reason, AGENT_NOTE_MAX),
       slots: h.slots,
       busy: h.busy,
       since: iso(h.since),
     })),
-    alerts: s.alerts.map((a) => ({ at: iso(a.at) ?? "", pool: a.pool, msg: a.msg })),
+    alerts: s.alerts.map((a) => ({
+      at: iso(a.at) ?? "",
+      pool: name(a.pool),
+      msg: capText(a.msg, AGENT_NOTE_MAX),
+    })),
     event_seq: s.eventSeq,
+    clock_offset_ms: s.clockOffsetMs ?? 0,
     runs: runs.map((r) => agentRun(r.repo, r.run)),
     jobs: runs.flatMap((r) => r.jobs.map((j) => agentJob(r.repo, r.run, j, input.annotations))),
   };

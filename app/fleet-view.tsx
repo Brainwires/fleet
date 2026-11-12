@@ -279,6 +279,13 @@ function RunBlock(
           {run.defaultBranch ? <span class="diamond" aria-label="default branch">◆</span> : null}
           {run.branch}
         </span>
+        {run.forkOwner !== undefined
+          ? (
+            <span class="fork-chip" title={`fork PR from ${run.forkOwner}`}>
+              fork PR from {run.forkOwner}
+            </span>
+          )
+          : null}
         <span class="sha">{run.sha}</span>
         <span class="event">{run.event.replace(/_/g, " ")}</span>
         {controls ? <RunControls repo={run.repo} runId={run.id} c={controls} /> : null}
@@ -464,9 +471,15 @@ function StatusLine({ snapshot, now }: { snapshot: Snapshot; now: number }) {
   );
 }
 
+/** A stable empty list, so the memoized log isn't re-rendered by a fresh `[]` each tick. */
+const NO_EVENTS: readonly FleetEvent[] = [];
+
 /** The screen. */
 export function FleetView(props: FleetViewProps) {
-  const { snapshot: s, now, onOpen } = props;
+  const { snapshot: s, now: localNow, onOpen } = props;
+  // Job, queue and "finished" ages are of GitHub's timestamps: aged on GitHub's clock. The status
+  // line (last poll, back-off, last delivery) is this machine's.
+  const now = localNow + (s.clockOffsetMs ?? 0);
   const sum = s.summary;
   const busy = runnersByPool(s.running);
   const github = s.pools.find((p) => p.id === "github");
@@ -491,7 +504,7 @@ export function FleetView(props: FleetViewProps) {
             : <span class="reasons muted">all clear</span>}
         </div>
         <div class="top-right">
-          <StatusLine snapshot={s} now={now} />
+          <StatusLine snapshot={s} now={localNow} />
           {s.auth === "public" ? <span class="chip chip-paused">public data only</span> : null}
           {props.controls?.onDispatch
             ? (
@@ -637,7 +650,7 @@ export function FleetView(props: FleetViewProps) {
           </section>
         </aside>
       </main>
-      <EventLog events={props.events ?? []} onOpen={onOpen} />
+      <EventLog events={props.events ?? NO_EVENTS} onOpen={onOpen} />
     </div>
   );
 }

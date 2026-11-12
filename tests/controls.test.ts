@@ -29,7 +29,10 @@ const RUN = {
 Deno.test("cancel: the dialog names exactly what will happen", () => {
   const c = checkRunControl({ kind: "cancel-run", repo: "Brainwires/deno", runId: RUN.id }, RUN);
   assert(c.allowed);
-  assertEquals(c.message, "Cancel run 43194560988, denext tests on rel/3.0.0-denext.21, 41 jobs?");
+  assertEquals(
+    c.message,
+    'Cancel run 43194560988 in Brainwires/deno: "denext tests" on "rel/3.0.0-denext.21", 41 jobs?',
+  );
 });
 
 Deno.test("cancel: refused outright on a default branch, or the repo's own default_branch", () => {
@@ -71,7 +74,7 @@ Deno.test("re-run on rel/* warns that a failed attempt blocks the tag", () => {
   );
   assertEquals(
     job.message,
-    'Re-run job "unit (macos)" of run 43194560988, denext tests on rel/3.0.0-denext.21?',
+    'Re-run job "unit (macos)" of run 43194560988 in Brainwires/deno: "denext tests" on "rel/3.0.0-denext.21"?',
   );
   assertStringIncludes(job.warnings[0], "blocks its tag");
   assertEquals(
@@ -111,7 +114,10 @@ Deno.test("dispatch: refused on a SHA that already has a run, unless it was canc
   assert(cancelled.allowed);
   assertStringIncludes(cancelled.warnings[0], "run 97, cancelled");
   const fresh = checkDispatch(c, { ...base, sameShaRuns: [] });
-  assertEquals(fresh.message, "Dispatch e2e on development (abcdef0) with job=e2e?");
+  assertEquals(
+    fresh.message,
+    'Dispatch "e2e" in Brainwires/denext on "development" (abcdef0) with job="e2e"?',
+  );
   assertEquals(controlRequest(c), {
     path: "/repos/Brainwires/denext/actions/workflows/5/dispatches",
     body: { ref: "development", inputs: { job: "e2e" } },

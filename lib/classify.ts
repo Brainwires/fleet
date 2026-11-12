@@ -153,6 +153,61 @@ export function median(values: readonly number[]): number | null {
   return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
 }
 
+/** Events whose head commit can come from outside the repo (a PR, possibly from a fork). */
+export const PR_EVENTS: ReadonlySet<string> = new Set(["pull_request", "pull_request_target"]);
+
+/** Where a run came from, for the guardrails, notifications and the agents' feed. */
+export interface RunProvenance {
+  readonly event: string;
+  /** Who started this attempt (`triggering_actor`, else `actor`), or `null` when not reported. */
+  readonly actor: string | null;
+  /** The head repo's full name, or `null` when not reported (or a deleted fork). */
+  readonly headRepo: string | null;
+  /** The head commit came from another repo (a fork PR; also a PR whose fork was deleted). */
+  readonly fork: boolean;
+  /** The fork's owner (`evil` of `evil/denext`), when it is one and known. */
+  readonly forkOwner: string | null;
+  /**
+   * Its names, step names and annotations are someone else's text: a fork's, or a
+   * `pull_request_target` run's (which acts on a PR's content with the base repo's rights).
+   */
+  readonly untrusted: boolean;
+  /**
+   * The run is ON a default branch: a protected name, the head commit from this very repo, and not
+   * a PR event (a fork's branch named `main` is not our `main`).
+   */
+  readonly defaultBranch: boolean;
+}
+
+/** A run's provenance. `repo` is the full name it was polled under. */
+export function runProvenance(
+  repo: string,
+  run: GhRun,
+  repoDefault?: string | null,
+): RunProvenance {
+  const event = run.event ?? "";
+  const own = run.repository?.full_name ?? repo;
+  const head = run.head_repository;
+  const headRepo = typeof head?.full_name === "string" ? head.full_name : null;
+  const fork = (headRepo !== null && headRepo.toLowerCase() !== own.toLowerCase()) ||
+    (head === null && PR_EVENTS.has(event));
+  const forkOwner = fork
+    ? (typeof head?.owner?.login === "string" ? head.owner.login : headRepo?.split("/")[0] ?? null)
+    : null;
+  const login = run.triggering_actor?.login ?? run.actor?.login;
+  const branch = run.head_branch ?? "";
+  const protectedName = DEFAULT_BRANCHES.has(branch) || (!!repoDefault && branch === repoDefault);
+  return {
+    event,
+    actor: typeof login === "string" ? login : null,
+    headRepo,
+    fork,
+    forkOwner,
+    untrusted: fork || event === "pull_request_target",
+    defaultBranch: protectedName && !fork && !PR_EVENTS.has(event),
+  };
+}
+
 /** A run being watched, with its repo. */
 export interface ActiveRun {
   readonly repo: string;
@@ -165,6 +220,7 @@ export type UsualLookup = (repo: string, workflow: string, job: string) => numbe
 /** A run's group header. */
 function runHeader(a: ActiveRun): Omit<RunGroup, "jobs" | "pendingJobs"> {
   const branch = a.run.head_branch ?? "";
+  const p = runProvenance(a.repo, a.run);
   return {
     id: a.run.id,
     repo: a.repo,
@@ -174,7 +230,8 @@ function runHeader(a: ActiveRun): Omit<RunGroup, "jobs" | "pendingJobs"> {
     sha: a.run.head_sha.slice(0, 7),
     event: a.run.event,
     url: a.run.html_url,
-    defaultBranch: DEFAULT_BRANCHES.has(branch),
+    defaultBranch: p.defaultBranch,
+    ...(p.fork ? { forkOwner: p.forkOwner ?? "unknown" } : {}),
   };
 }
 

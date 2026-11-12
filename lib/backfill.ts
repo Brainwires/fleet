@@ -10,6 +10,7 @@
 import { failedStep, type FleetEvent, type NewEvent, poolText } from "./events.ts";
 import { type HookDelivery, payloadRepo } from "./hooks.ts";
 import { asJob, asRun } from "./poller.ts";
+import { runProvenance } from "./classify.ts";
 
 /** Back-fill at most this far back (24 h)… */
 export const BACKFILL_WINDOW_MS = 24 * 60 * 60_000;
@@ -108,6 +109,15 @@ export function backfillEvents(
     }
   }
   const grouped = (runId: number) => (cancelledByRun.get(runId)?.size ?? 0) >= 2;
+  // Fork / pull_request_target runs, as their workflow_run deliveries say (a workflow_job payload
+  // doesn't name the head repo): their jobs' step names stay out of the text.
+  const untrusted = new Set<number>();
+  for (const d of ds) {
+    if (d.event !== "workflow_run") continue;
+    const repo = payloadRepo(d.payload);
+    const run = asRun(d.payload.workflow_run);
+    if (repo && run && runProvenance(repo, run).untrusted) untrusted.add(run.id);
+  }
 
   const out: NewEvent[] = [];
   const push = (e: NewEvent) => {
@@ -139,6 +149,7 @@ export function backfillEvents(
         text: `run ${run.id} completed: ${run.conclusion ?? "unknown"}`,
         url: run.html_url,
         backfill: true,
+        ...(untrusted.has(run.id) ? { untrusted: true } : {}),
       });
       continue;
     }
@@ -158,6 +169,7 @@ export function backfillEvents(
       text,
       url: job.html_url ?? runUrl,
       backfill: true,
+      ...(untrusted.has(job.run_id) ? { untrusted: true } : {}),
     });
     if (job.status === "completed") {
       const c = job.conclusion ?? null;
@@ -173,7 +185,7 @@ export function backfillEvents(
       }
       if (c === "skipped" && !known.has(job.id)) continue;
       let text = `finished: ${c ?? "unknown"}`;
-      if (c && FAILED.has(c)) {
+      if (c && FAILED.has(c) && !untrusted.has(job.run_id)) {
         const step = failedStep(job);
         if (step) text += ` at step "${step}"`;
       }

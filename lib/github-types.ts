@@ -25,6 +25,17 @@ export interface GhRun {
   readonly run_started_at?: string | null;
   readonly updated_at?: string | null;
   readonly run_attempt?: number;
+  /** The repo the run belongs to. */
+  readonly repository?: { readonly full_name?: string } | null;
+  /** The repo the head commit came from: another one for a fork PR (`null`: a deleted fork). */
+  readonly head_repository?: {
+    readonly full_name?: string;
+    readonly owner?: { readonly login?: string } | null;
+  } | null;
+  /** Who started the run (the first attempt). */
+  readonly actor?: { readonly login?: string } | null;
+  /** Who started this attempt (a re-run's). */
+  readonly triggering_actor?: { readonly login?: string } | null;
 }
 
 /** `GET /repos/{repo}/actions/runs` body. */

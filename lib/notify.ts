@@ -38,6 +38,9 @@ export function pendingNotifications(
   startedAt: number,
 ): FleetNotification[] {
   const now = snap.at;
+  // Queue ages and completion times are GitHub's: compared on GitHub's clock.
+  const offset = snap.clockOffsetMs ?? 0;
+  const ghNow = now + offset;
   for (const [k, t] of seen) if (now - t > SEEN_TTL_MS) seen.delete(k);
   const out: FleetNotification[] = [];
   const add = (n: FleetNotification) => {
@@ -59,7 +62,7 @@ export function pendingNotifications(
   }
 
   const late = rowsOf(snap.queued).filter((r) =>
-    jobWarning(r, now) === "queued-long" && !seen.has(`queued:${r.id}`)
+    jobWarning(r, ghNow) === "queued-long" && !seen.has(`queued:${r.id}`)
   );
   if (late.length > MAX_QUEUED_NOTICES) {
     for (const r of late) seen.set(`queued:${r.id}`, now);
@@ -80,9 +83,9 @@ export function pendingNotifications(
   }
 
   for (const f of snap.finished) {
-    if (!f.defaultBranch || !FAILED.has(f.conclusion) || f.completedAt < startedAt - 60_000) {
-      continue;
-    }
+    // A default-branch failure only: by provenance (a fork PR's branch named `main` isn't ours).
+    if (!f.defaultBranch || f.fork || !FAILED.has(f.conclusion)) continue;
+    if (f.completedAt - offset < startedAt - 60_000) continue;
     add({
       key: `fail:${f.id}`,
       title: `${f.repo.split("/")[1]} ${f.branch}: job failed`,

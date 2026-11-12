@@ -5,6 +5,7 @@
 
 import {
   createHookHandler,
+  DEDUPE_KEEP,
   HOOK_HOST,
   HOOK_PORT,
   type HookDelivery,
@@ -25,6 +26,24 @@ export const HOOKS_LOG_DIR = ".denext-runners/hooks";
 export const HOOKS_LOG = "events.jsonl";
 /** Rotate at this size, keeping this many files (events.jsonl and events.jsonl.1). */
 export const ROTATE_BYTES = 20 * 1024 * 1024;
+/** The shortest webhook secret accepted (GitHub's HMAC key; a short one is guessable offline). */
+export const MIN_SECRET_LENGTH = 32;
+/** The spool's folder mode: the owner only. */
+export const HOOKS_DIR_MODE = 0o700;
+
+/** Create the spool folder owner-only (and tighten one made earlier). */
+async function ensureDir(dir: string): Promise<void> {
+  await Deno.mkdir(dir, { recursive: true, mode: HOOKS_DIR_MODE });
+  if (Deno.build.os === "windows") return;
+  try {
+    const st = await Deno.stat(dir);
+    if (st.mode !== null && (st.mode & 0o777) !== HOOKS_DIR_MODE) {
+      await Deno.chmod(dir, HOOKS_DIR_MODE);
+    }
+  } catch {
+    // Best effort: the files inside are 0600 anyway.
+  }
+}
 
 function home(): string | null {
   try {
@@ -66,7 +85,13 @@ export async function hooksAvailable(): Promise<boolean> {
   }
 }
 
-/** The webhook secret, into memory only; `null` when it can't be read. */
+/** A secret as read from the keychain, if it is long enough to use (never logged either way). */
+export function usableSecret(raw: string): string | null {
+  const s = raw.replace(/\r?\n$/, "");
+  return s.length >= MIN_SECRET_LENGTH ? s : null;
+}
+
+/** The webhook secret, into memory only; `null` when it can't be read or is too short. */
 export async function readHookSecret(): Promise<string | null> {
   try {
     const r = await new Deno.Command(SECURITY_BIN, {
@@ -76,8 +101,7 @@ export async function readHookSecret(): Promise<string | null> {
       stderr: "null",
     }).output();
     if (!r.success) return null;
-    const s = new TextDecoder().decode(r.stdout).replace(/\r?\n$/, "");
-    return s.length >= 8 ? s : null;
+    return usableSecret(new TextDecoder().decode(r.stdout));
   } catch {
     return null;
   }
@@ -86,7 +110,7 @@ export async function readHookSecret(): Promise<string | null> {
 /** Append one verified delivery to ~/.denext-runners/hooks/events.jsonl, rotating at 20 MB. */
 export async function appendHookLine(d: HookDelivery, dir = defaultLogDir()): Promise<void> {
   if (!dir) return;
-  await Deno.mkdir(dir, { recursive: true });
+  await ensureDir(dir);
   const path = `${dir}/${HOOKS_LOG}`;
   const line = JSON.stringify({
     received_at: new Date(d.receivedAt).toISOString(),
@@ -139,6 +163,30 @@ export async function readSpoolSince(
     }
   }
   return out.sort((a, b) => a.receivedAt - b.receivedAt);
+}
+
+/**
+ * The delivery ids of the spool's newest lines (the rotated file, then the live one), at most
+ * `max`: the receiver's de-duplication set after a restart, so a replayed delivery id isn't
+ * accepted twice. Ids are read with a pattern from each line's head (no JSON parse); `[]` without a
+ * spool.
+ */
+export async function recentSpoolIds(dir = defaultLogDir(), max = DEDUPE_KEEP): Promise<string[]> {
+  if (!dir) return [];
+  const ids: string[] = [];
+  for (const path of [`${dir}/${HOOKS_LOG}.1`, `${dir}/${HOOKS_LOG}`]) {
+    let text: string;
+    try {
+      text = await Deno.readTextFile(path);
+    } catch {
+      continue;
+    }
+    for (const line of text.split("\n")) {
+      const m = /^\{"received_at":"[^"]{1,40}","delivery":"([^"\\]{1,100})"/.exec(line);
+      if (m) ids.push(m[1]);
+    }
+  }
+  return ids.slice(-max);
 }
 
 /** A spool line's `received_at` when it leads the line (as `appendHookLine` writes it). */
@@ -215,6 +263,7 @@ export async function tailSpool(
   onDelivery: (d: HookDelivery) => void,
   dir = defaultLogDir(),
   everyMs = 2000,
+  seen: Iterable<string> = [],
 ): Promise<{ stop: () => void; lastDeliveryAt: number | null } | null> {
   if (!dir) return null;
   const path = `${dir}/${HOOKS_LOG}`;
@@ -224,7 +273,7 @@ export async function tailSpool(
   } catch {
     return null;
   }
-  const cursor: SpoolCursor = { offset: size, partial: "", seen: new Set() };
+  const cursor: SpoolCursor = { offset: size, partial: "", seen: new Set(seen) };
   let busy = false;
   const tick = async () => {
     if (busy) return;
@@ -273,6 +322,15 @@ export interface ReceiverHooks {
   onReject?(why: string): void;
 }
 
+/** The receiver's options. */
+export interface ReceiverOptions {
+  readonly port?: number;
+  /** Delivery ids already in the spool ({@linkcode recentSpoolIds}): never accepted again. */
+  readonly seen?: Iterable<string>;
+  /** GitHub's clock minus ours (ms), for the replay window. */
+  readonly clockOffset?: () => number;
+}
+
 /**
  * Start the receiver on 127.0.0.1:8789 (loopback only), or `null` when the port is taken or the
  * listen is refused.
@@ -280,10 +338,13 @@ export interface ReceiverHooks {
 export function startReceiver(
   secret: string,
   hooks: ReceiverHooks,
-  port = HOOK_PORT,
+  options: ReceiverOptions = {},
 ): Receiver | null {
+  const port = options.port ?? HOOK_PORT;
   const handler = createHookHandler({
     secret,
+    ...(options.seen ? { seen: options.seen } : {}),
+    ...(options.clockOffset ? { clockOffset: options.clockOffset } : {}),
     onDelivery: (d) => {
       hooks.onDelivery(d);
       appendHookLine(d).catch(() => hooks.onReject?.("log-write"));

@@ -10,7 +10,9 @@
 // 4. `X-Hub-Signature-256` is the HMAC-SHA256 of the raw body under the secret (constant-time
 //    compare), else 401 "rejected signature" and nothing else is read or logged;
 // 5. then: `ping` → 200; `workflow_job` / `workflow_run` → 202 and queued (a delivery id seen
-//    before is acknowledged and dropped); any other event → 202, ignored.
+//    before is acknowledged and dropped, and so is a replay: a delivery whose newest timestamp is
+//    over 10 min old); any other event → 202, ignored. The seen ids survive a restart: the receiver
+//    starts with the spool's last 10,000.
 //
 // Payloads are data: nothing in one is executed, fetched or handed to a shell. Processing happens
 // after the response (GitHub's timeout is 10 s; this answers in well under 1 s).
@@ -24,6 +26,8 @@ export const HOOK_PORT = 8789;
 export const MAX_BODY = 1024 * 1024;
 /** Delivery ids remembered for de-duplication. */
 export const DEDUPE_KEEP = 10_000;
+/** A delivery whose newest timestamp is older than this is a replay (or hopelessly late): dropped. */
+export const HOOK_MAX_AGE_MS = 10 * 60_000;
 
 /** The events Fleet uses. */
 export type HookEventName = "workflow_job" | "workflow_run";
@@ -47,9 +51,46 @@ export interface HookHandlerOptions {
   readonly onVerified?: (event: string, at: number) => void;
   readonly now?: () => number;
   /** Where a refusal is noted (only its kind, never the body or headers). */
-  readonly onReject?: (why: "signature" | "size" | "type" | "route" | "json") => void;
+  readonly onReject?: (why: "signature" | "size" | "type" | "route" | "json" | "stale") => void;
   /** Defer processing past the response (default: a macrotask). */
   readonly defer?: (fn: () => void) => void;
+  /** GitHub's clock minus ours (ms), for the replay window; 0 when unknown. */
+  readonly clockOffset?: () => number;
+  /** Delivery ids already seen (the spool's, at startup): duplicates of them are dropped. */
+  readonly seen?: Iterable<string>;
+}
+
+/** The newest of a delivery's own timestamps (ms), or `null` when it has none. */
+export function deliveryTime(event: string, payload: Record<string, unknown>): number | null {
+  const item = (event === "workflow_job" ? payload.workflow_job : payload.workflow_run) as
+    | Record<string, unknown>
+    | null
+    | undefined;
+  if (!item || typeof item !== "object") return null;
+  const keys = event === "workflow_job"
+    ? ["created_at", "started_at", "completed_at"]
+    : ["updated_at", "created_at", "run_started_at"];
+  let best: number | null = null;
+  for (const k of keys) {
+    const v = item[k];
+    const t = typeof v === "string" ? Date.parse(v) : NaN;
+    if (Number.isFinite(t) && (best === null || t > best)) best = t;
+  }
+  return best;
+}
+
+/**
+ * A replayed (or hopelessly late) delivery: its newest timestamp (a job's created / started /
+ * completed, a run's updated_at) is over {@linkcode HOOK_MAX_AGE_MS} before `ghNow` (GitHub's
+ * clock). One with no timestamp isn't judged here (the payload checks refuse it later).
+ */
+export function isStaleDelivery(
+  event: string,
+  payload: Record<string, unknown>,
+  ghNow: number,
+): boolean {
+  const t = deliveryTime(event, payload);
+  return t !== null && ghNow - t > HOOK_MAX_AGE_MS;
 }
 
 const enc = new TextEncoder();
@@ -118,6 +159,12 @@ export function createHookHandler(o: HookHandlerOptions): (req: Request) => Prom
   const defer = o.defer ?? ((fn) => setTimeout(fn, 0));
   const seen = new Set<string>();
   const order: string[] = [];
+  for (const id of o.seen ?? []) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    order.push(id);
+  }
+  while (order.length > DEDUPE_KEEP) seen.delete(order.shift()!);
   const remember = (id: string) => {
     seen.add(id);
     order.push(id);
@@ -168,6 +215,11 @@ export function createHookHandler(o: HookHandlerOptions): (req: Request) => Prom
       return text(400, "bad json");
     }
     remember(id);
+    const ghNow = at + (o.clockOffset?.() ?? 0);
+    if (isStaleDelivery(event, payload as Record<string, unknown>, ghNow)) {
+      o.onReject?.("stale");
+      return text(202, "stale");
+    }
     const d: HookDelivery = {
       id,
       event,

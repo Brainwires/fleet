@@ -18,6 +18,7 @@ import {
   validRef,
   validRepo,
 } from "./controls.ts";
+import { runProvenance } from "./classify.ts";
 import type { NewEvent } from "./events.ts";
 import type { GitHubClient } from "./github.ts";
 import type { GhJobList, GhRun } from "./github-types.ts";
@@ -71,7 +72,12 @@ const int = (v: unknown) => (typeof v === "number" && Number.isSafeInteger(v) &&
 
 /** Ask, with the safe choice as the default and as Escape. */
 async function ask(deps: ControlDeps, check: ControlCheck, extra: string[]): Promise<boolean> {
-  const detail = [...check.warnings, ...extra, ...(deps.dryRun ? [DRY_RUN] : [])].join("\n\n");
+  const detail = [
+    ...(check.facts ? [check.facts] : []),
+    ...check.warnings,
+    ...extra,
+    ...(deps.dryRun ? [DRY_RUN] : []),
+  ].join("\n\n");
   const answer = await deps.confirm({
     title: "Fleet",
     message: check.message,
@@ -147,6 +153,7 @@ async function runAction(
   const { run, jobs } = tracked;
   const job = c.kind === "rerun-job" ? jobs.find((j) => j.id === c.jobId) : undefined;
   if (c.kind === "rerun-job" && !job) return { ok: false, message: "That job isn't in the run." };
+  const prov = runProvenance(c.repo, run);
   const check = checkRunControl(c, {
     id: run.id,
     workflow: run.name ?? "workflow",
@@ -155,6 +162,10 @@ async function runAction(
     jobs: jobs.length,
     repoDefaultBranch: gh.poller.defaultBranch(c.repo),
     ...(job ? { jobName: job.name } : {}),
+    ...(prov.event ? { event: prov.event } : {}),
+    actor: prov.actor,
+    fork: prov.fork,
+    forkOwner: prov.forkOwner,
   });
   const base = {
     repo: c.repo,

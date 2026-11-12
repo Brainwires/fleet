@@ -12,7 +12,7 @@
 // The first observation (and the first after a restart with state older than RESEED_MS) only
 // records: no flood of "queued" / "started" lines for everything already in flight.
 
-import { classifyJob, poolIsFull, time } from "./classify.ts";
+import { classifyJob, poolIsFull, runProvenance, time } from "./classify.ts";
 import type { GhJob, GhRun } from "./github-types.ts";
 import type { HealthState } from "./health.ts";
 import type { Observation } from "./poller.ts";
@@ -59,6 +59,11 @@ export interface FleetEvent {
    * the delivery's real time (no notification is ever posted for it).
    */
   readonly backfill?: boolean;
+  /**
+   * About a fork or `pull_request_target` run: its names are someone else's text, and its failed
+   * step and annotation are left out of `text`.
+   */
+  readonly untrusted?: boolean;
 }
 
 /** An event before the log numbers it. */
@@ -150,6 +155,8 @@ export function failedStep(job: GhJob): string | null {
  */
 export function diffObservation(state: TrackerState, obs: Observation): NewEvent[] {
   const now = obs.now;
+  /** GitHub's now: job ages compare GitHub's timestamps with it. */
+  const ghNow = now + (obs.clockOffsetMs ?? 0);
   const out: NewEvent[] = [];
   const seeding = !state.seeded;
   const seenJobs = new Set<string>();
@@ -168,7 +175,7 @@ export function diffObservation(state: TrackerState, obs: Observation): NewEvent
       if (seeding) {
         // Recorded as is; a job already late gets its first warning a full period from now.
         tracked.status = job.status;
-        if (!host && lateNow(job, now)) tracked.warnedAt = now;
+        if (!host && lateNow(job, ghNow)) tracked.warnedAt = now;
         state.jobs[key] = tracked;
         continue;
       }
@@ -188,7 +195,7 @@ export function diffObservation(state: TrackerState, obs: Observation): NewEvent
           if (job.conclusion === "cancelled") cancelled.push(job);
           else if (job.conclusion !== "skipped" || was !== null) {
             let text = `finished: ${job.conclusion ?? "unknown"}`;
-            if (FAILED.has(job.conclusion ?? "")) {
+            if (FAILED.has(job.conclusion ?? "") && !base.untrusted) {
               const step = failedStep(job);
               if (step) text += ` at step "${step}"`;
               const note = obs.annotations.get(job.id);
@@ -206,7 +213,7 @@ export function diffObservation(state: TrackerState, obs: Observation): NewEvent
         tracked.warnedAt = undefined;
       }
       // Timers: STALLED and QUEUED-LONG, then every REPEAT_MS.
-      const late = host ? null : lateNow(job, now, obs.health);
+      const late = host ? null : lateNow(job, ghNow, obs.health);
       if (late && (tracked.warnedAt === undefined || now - tracked.warnedAt >= REPEAT_MS)) {
         tracked.warnedAt = now;
         lines.push(ev(late.capacity ? "info" : "warn", late.kind, late.text));
@@ -277,7 +284,14 @@ export function diffObservation(state: TrackerState, obs: Observation): NewEvent
 }
 
 function runBase(repo: string, run: GhRun) {
-  return { repo, workflow: run.name ?? "workflow", branch: run.head_branch ?? "", run_id: run.id };
+  const untrusted = runProvenance(repo, run).untrusted;
+  return {
+    repo,
+    workflow: run.name ?? "workflow",
+    branch: run.head_branch ?? "",
+    run_id: run.id,
+    ...(untrusted ? { untrusted: true } : {}),
+  };
 }
 
 /** Whether the job's pool is ok with every slot busy, by the fresh health variable. */

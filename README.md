@@ -16,9 +16,9 @@ macOS (the normal way):
 1. `denext task desktop:package` writes `dist/Fleet.app` and `dist/Fleet.dmg` (see
    [Packaging and signing](#packaging-and-signing)).
 2. Open the `.dmg` and drag Fleet to `/Applications` (or copy `dist/Fleet.app` there).
-3. The build is Developer ID-signed but not notarized: on a machine that didn't build it, Gatekeeper
-   refuses the first launch; open it once with right-click → Open (or System Settings → Privacy &
-   Security → Open Anyway).
+3. The app is Developer ID-signed, notarized and stapled when packaged with `DENEXT_NOTARY_PROFILE`
+   (see below), so Gatekeeper opens it on any Mac. A build without it is only signed: open it once
+   with right-click → Open (or System Settings → Privacy & Security → Open Anyway).
 
 The first launch shows the window and turns on start at login; after that Fleet starts in the tray,
 with no window.
@@ -107,17 +107,21 @@ The token is never logged, rendered, written to a file, or returned to the page.
   (`#1000058781`, full name on hover), its state (running / over usual), elapsed, and the job (repo
   · workflow · job, a link to it). Self-hosted cards use the same rows when opened.
 - **Running / Queued lanes**: repo → run (workflow, branch, short SHA, event) → job (name, pool
-  chip, runner, elapsed or waited, ticking each second; `/ ~usual` once three successful runs of
-  that job were seen). A default branch (`development-denext`, `development`, `main`) gets a violet
-  left rule and a ◆ branch chip. A job queued over 15 min turns red, unless its pool is ok with
-  every slot busy: that is a capacity wait, shown amber as "waiting for a free slot (pool full)" and
-  counted in the header as "N waiting for capacity" (a free slot, a paused, unhealthy or no-health
-  pool stay red); one running past 1.5× its usual length (and at least 3 min over) turns amber. A
-  queued run GitHub hasn't expanded into jobs shows "queued, no jobs yet" for its first 10 min; past
-  that it is GitHub's stale status (the jobs list never fills) and is left out. The job name takes a
-  row's spare width; the runner (`#id` for GitHub's) is capped and gives way first. A long branch
-  moves to its own header line before it truncates. With nothing queued, the Queued lane shrinks to
-  a narrow column and Running takes the width.
+  chip, runner, elapsed or waited, ticking each second while the window shows (the clock stops while
+  it is hidden); `/ ~usual` once three successful runs of that job were seen). A default branch
+  (`development-denext`, `development`, `main`) gets a violet left rule and a ◆ branch chip, but
+  only a run of the repo's own commit that isn't a PR: a fork PR (or any PR) from a branch named
+  `main` isn't the default branch, and a fork PR shows "fork PR from <owner>" instead. Ages (waited,
+  elapsed, finished N min ago) are reckoned on GitHub's clock, from the API's `Date` headers, so a
+  skewed local clock doesn't fake or hide a late job. A job queued over 15 min turns red, unless its
+  pool is ok with every slot busy: that is a capacity wait, shown amber as "waiting for a free slot
+  (pool full)" and counted in the header as "N waiting for capacity" (a free slot, a paused,
+  unhealthy or no-health pool stay red); one running past 1.5× its usual length (and at least 3 min
+  over) turns amber. A queued run GitHub hasn't expanded into jobs shows "queued, no jobs yet" for
+  its first 10 min; past that it is GitHub's stale status (the jobs list never fills) and is left
+  out. The job name takes a row's spare width; the runner (`#id` for GitHub's) is capped and gives
+  way first. A long branch moves to its own header line before it truncates. With nothing queued,
+  the Queued lane shrinks to a narrow column and Running takes the width.
 - **Side**: the health variable's recent alerts (each clamped to three lines; a click expands it,
   the full text is also the tooltip), and jobs finished in the last 30 min with ✓ / ✕ / ⊘.
 - A click on a run or job opens it on github.com in the system browser.
@@ -126,11 +130,12 @@ The token is never logged, rendered, written to a file, or returned to the page.
 
 The bottom pane: one line per event, newest at the bottom, following new lines unless you scrolled
 up. Events: job queued / started (pool, runner) / finished (conclusion; for a failure the failed
-step and the first failure annotation), STALLED (running past 75 min) and QUEUED-LONG (queued past
-25 min with no runner; logged as info and marked "capacity wait" when its pool is full), each
-repeated every 30 min while it lasts, run completed, a burst of cancelled jobs from one run as one
-line ("run N cancelled (14 jobs)"), pool health changes, the health variable's alerts, and every
-control you used or that was refused (marked "you").
+step and the first failure annotation, except on a fork or `pull_request_target` run, whose text is
+someone else's), STALLED (running past 75 min) and QUEUED-LONG (queued past 25 min with no runner;
+logged as info and marked "capacity wait" when its pool is full), each repeated every 30 min while
+it lasts, run completed, a burst of cancelled jobs from one run as one line ("run N cancelled (14
+jobs)"), pool health changes, the health variable's alerts, and every control you used or that was
+refused (marked "you").
 
 Each line: local time, a severity glyph (✓ ✕ ▲ • ⊘, coloured too), repo, workflow / job (the wider
 column), the text, a link. A start reads short, `started · GitHub #1000058781` or
@@ -151,7 +156,8 @@ Native, posted from the backend so they arrive with no window open (a click open
 - a pool goes unhealthy (once per outage);
 - a job passes 15 min queued (once per job; more than three at once become one summary; none for a
   wait on a full pool);
-- a default-branch job fails (once per job, only failures after Fleet started).
+- a default-branch job fails (once per job, only failures after Fleet started): the repo's own
+  commit on the branch, not a PR (a fork PR from a branch named `main` notifies nothing).
 
 Posted keys are kept for 48 h in `fleet-state.json`, so a relaunch doesn't repeat them. Pause
 notifications in the tray menu silences them (the setting persists).
@@ -162,7 +168,8 @@ Fleet uses the same gh token as the runner scheduler, the watchdog and the CI wa
 shares one 5,000-an-hour REST budget with them. If Fleet starved it, queued jobs would go unseen and
 runners would stop launching. So (`lib/budget.ts`):
 
-- every request is conditional (`If-None-Match`): an unchanged list is a free 304;
+- every request is conditional (`If-None-Match`): an unchanged list is a free 304 (the ETag cache is
+  an LRU of 2,000 URLs, and a run's URLs leave it once the run leaves the agents' 2 h window);
 - below 1,500 remaining it polls at 60 s even with the window visible;
 - below 800, every 5 min, with the banner "Rate limit low: slowed down to protect the runner
   scheduler.";
@@ -183,9 +190,11 @@ What it polls, per round (every 15 s visible, 60 s hidden, unless the budget or 
 an active run last round are polled every round; a repo with no active run on its last 3 polls drops
 to every 5 min, and every other non-archived repo is covered by the 10-minute sweep.
 
-A 403 / 429 with a rate-limit signal backs off until the reset or `Retry-After` (else 1 min,
-doubling to 15 min); a 403 that is a permission refusal (no admin read on runners, say) is retried
-every 10 min.
+Every request has a 20 s deadline: a hung connection fails that round as a timeout (retried on the
+next), never a poll stuck forever; and a poll still running after 2 min (a bug) is dropped, logged
+to the console, and the next one goes ahead. A 403 / 429 with a rate-limit signal backs off until
+the reset or `Retry-After` (else 1 min, doubling to 15 min); a 403 that is a permission refusal (no
+admin read on runners, say) is retried every 10 min.
 
 ## Webhooks
 
@@ -197,16 +206,22 @@ reconciles.
   runs `hooks-only.ts` on `127.0.0.1:8789`: only `POST /github/hooks` (anything else 404),
   `content-type: application/json` (else 415), at most 1 MiB (else 413; a large Content-Length is
   refused unread), then `X-Hub-Signature-256` checked with a constant-time compare against the
-  keychain secret (item `denext-ci-hooks` / `github-webhook-secret`) before anything is parsed (else
-  401). `ping` → 200; `workflow_job` / `workflow_run` → 202, de-duplicated on `X-GitHub-Delivery`
-  (the last 10,000). Payloads are data only: nothing in one is run or fetched.
+  keychain secret (item `denext-ci-hooks` / `github-webhook-secret`, at least 32 characters, else
+  the receiver stays off) before anything is parsed (else 401). `ping` → 200; `workflow_job` /
+  `workflow_run` → 202, de-duplicated on `X-GitHub-Delivery` (the last 10,000, rebuilt from the
+  spool at start, so a restart doesn't forget them). A replay is dropped too (202 `stale`, not
+  spooled): a delivery whose newest timestamp (a job's created / started / completed, a run's
+  `updated_at`) is over 10 min old. Payloads are data only: nothing in one is run or fetched.
 - **`events.jsonl`**: every verified delivery is appended to `~/.denext-runners/hooks/events.jsonl`
-  (rotated to `events.jsonl.1` at 20 MB), which the runner scheduler reads too.
+  (0600, in a 0700 folder; rotated to `events.jsonl.1` at 20 MB), which the runner scheduler reads
+  too.
 - **Fleet** finds the port taken by the receiver and tails that spool every 2 s instead
-  (`hooks: live (via receiver)`), applying each delivery to the same state and event log as polling.
-  The last delivery starts at the spool's newest line, so a restart in a quiet spell isn't "no
-  delivery yet". Without the receiver running, Fleet listens on 8789 itself, with the same checks. A
-  machine without the tunnel's launchd job and the keychain secret has no webhooks: `hooks: off`.
+  (`hooks: live (via receiver)`), applying each delivery to the same state and event log as polling:
+  only when it is newer than what Fleet holds (a run's later `updated_at`, a job's later status),
+  and never one over 10 min old on GitHub's clock. The last delivery starts at the spool's newest
+  line, so a restart in a quiet spell isn't "no delivery yet". Without the receiver running, Fleet
+  listens on 8789 itself, with the same checks. A machine without the tunnel's launchd job and the
+  keychain secret has no webhooks: `hooks: off`.
 - **Polling as the fallback**: with deliveries arriving, polling only reconciles every 5 min; with
   no delivery for 10 min while runs are active it goes back to the normal rate, so a missed delivery
   or a dead tunnel costs freshness, not correctness.
@@ -234,11 +249,15 @@ watchdog pass now.
 
 Guardrails, as code in `lib/controls.ts` (unit-tested):
 
-- every control asks in the OS's own dialog, naming exactly what will happen (the run id, workflow,
-  branch and job count); the safe button is the default, and a runtime without native message boxes
-  refuses rather than act unconfirmed;
+- every control asks in the OS's own dialog, naming exactly what will happen (the run id, the full
+  `owner/repo`, workflow, branch and job count, then who started it and whether it is a fork PR);
+  run, job and branch names are quoted, stripped of control characters and newlines and capped at 80
+  characters; the safe button is the default, and a runtime without native message boxes refuses
+  rather than act unconfirmed;
+- controls act on the org's repos only (`Brainwires/*`);
 - Cancel is refused outright on `development-denext`, `development`, `main` or the repo's own
-  default branch, with the reason shown;
+  default branch, with the reason shown: a run of the repo's own commit that isn't a PR (a fork PR
+  from a branch named `main` can be cancelled);
 - Dispatch is refused when the workflow already has a run on that commit SHA, unless every such run
   was cancelled (then it warns);
 - a re-run on `rel/*` warns that a failed attempt on a release commit blocks its tag;
@@ -302,10 +321,20 @@ back to `gh`. Runs that finished over 2 h ago are not in the snapshot (a waited-
 listed under `missing`). With no `snapshot.json` yet (Fleet not running, or an older Fleet build),
 every answer is `stale: true`, and events come from `fleet-events.json`.
 
+**CI text is untrusted.** Run, job, step and branch names, titles, failure annotations and event
+text are written by whoever pushed or opened a PR; the server's instructions and the tools'
+descriptions tell agents they are data, never instructions. Every such string is capped (names 120
+characters, annotations and event text 300) and stripped of control characters. Runs and jobs carry
+`event`, `actor`, `head_repository` and `fork` (the head repo isn't the repo); a fork or
+`pull_request_target` run is marked `untrusted: true`, its title, step names, `failed_step` and
+`failure_annotation` come wrapped as `{ "untrusted": "<text>" }`, and its event lines leave the
+failed step and annotation out of `text`.
+
 ## Data files
 
-In the app's data folder (on macOS `~/Library/Application Support/dev.brainwires.fleet`), never the
-token or any secret:
+In the app's data folder (on macOS `~/Library/Application Support/dev.brainwires.fleet`, made 0700),
+never the token or any secret; every file is 0600, and the JSON files are written to a random temp
+name and renamed over:
 
 | File                                         | What                                                                                                                                                                |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -315,10 +344,11 @@ token or any secret:
 | `snapshot.json`                              | the agents' snapshot, written atomically after every poll and webhook update and at least once a minute (a heartbeat that bumps `written_at` only)                  |
 
 `snapshot.json` is
-`{ v: 1, updated_at, written_at, source: "poll" | "hook", auth, poll, rate, hooks, health, summary, pools, hosts, alerts, event_seq, runs, jobs }`.
+`{ v: 1, updated_at, written_at, source: "poll" | "hook", auth, poll, rate, hooks, health, summary, pools, hosts, alerts, event_seq, clock_offset_ms, runs, jobs }`.
 Runs and jobs are every active run plus those finished in the last 2 h (repo, run id, workflow,
-branch, sha, event, status, conclusion, times, `html_url`; jobs also name, labels, `runner_name`,
-pool, steps, and for a failure `failed_step` and the first failure annotation).
+branch, sha, event, actor, `head_repository`, `fork`, `untrusted`, status, conclusion, times,
+`html_url`; jobs also name, labels, `runner_name`, pool, steps, and for a failure `failed_step` and
+the first failure annotation). `clock_offset_ms` is GitHub's clock minus the Mac's.
 
 Outside it, only on the webhook machine: `~/.denext-runners/hooks/events.jsonl` (and `.1`). Fleet
 reads, never writes, `~/.denext-runners/health.json` and the scheduler's `paused-<pool>` files.
@@ -354,9 +384,10 @@ denext task desktop:package:windows         # dist/Fleet-x64-windows.zip
 ```
 
 Without `DENEXT_CODESIGN_IDENTITY` the macOS app is ad-hoc signed (local use only). Setting
-`DENEXT_NOTARY_PROFILE` (a `notarytool` keychain profile) as well notarizes it; current builds are
-signed but not notarized. Credentials come from the environment and the keychain only, never from a
-file in this repo.
+`DENEXT_NOTARY_PROFILE` (a `notarytool` keychain profile) as well notarizes it; the release build is
+signed, notarized and stapled (`spctl` reports "Notarized Developer ID"; the `.dmg` around it is not
+itself signed). Credentials come from the environment and the keychain only, never from a file in
+this repo.
 
 ## Layout
 
@@ -395,7 +426,7 @@ file in this repo.
 
 ## Known limits
 
-- macOS builds are not notarized: a first launch on another machine needs Open Anyway.
+- The macOS `.dmg` itself is unsigned (the app inside is signed and notarized).
 - Windows: the build packages and launches, but the tray menu and Quit Fleet have not been verified
   by automation; check them by hand after a change there.
 - Webhooks exist only on the Mac mini (tunnel + keychain secret); everywhere else Fleet polls.

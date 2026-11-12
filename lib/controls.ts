@@ -4,7 +4,12 @@
 // event log as the user's.
 //
 // - Cancel is refused outright on a default branch (development-denext, development, main, or the
-//   repo's own default_branch): those must stay green.
+//   repo's own default_branch): those must stay green. By provenance, not name: a fork PR's (or any
+//   PR's) branch named `main` is not the repo's `main`, so cancelling it is allowed.
+// - Every dialog names the full owner/repo, who started the run and whether it is a fork PR; run,
+//   job and branch names are quoted, stripped of control characters and capped (they are text
+//   anyone who can open a PR chooses).
+// - Controls act on the org's own repos only (ORG/*).
 // - Re-run on a release branch (rel/*) warns that a failed attempt on a release commit blocks its
 //   tag, so the fix is a new commit.
 // - Dispatch is refused when the workflow already has a run on the same commit SHA, unless every
@@ -12,7 +17,8 @@
 // - Pool commands run only exact absolute paths with argv built here (no shell, no free text but a
 //   sanitized reason), for known pools only; nothing restarts a VM or deletes anything.
 
-import { currentPools, DEFAULT_BRANCHES } from "./pools.ts";
+import { PR_EVENTS } from "./classify.ts";
+import { currentPools, DEFAULT_BRANCHES, ORG } from "./pools.ts";
 
 /** A GitHub control. */
 export type GitHubControl =
@@ -38,6 +44,14 @@ export interface RunFacts {
   /** The repo's own default branch, when known. */
   readonly repoDefaultBranch?: string | null;
   readonly jobName?: string;
+  /** The run's event (`push`, `pull_request`, …), when known. */
+  readonly event?: string;
+  /** Who started the run (this attempt), when known. */
+  readonly actor?: string | null;
+  /** A fork PR (the head commit from another repo). */
+  readonly fork?: boolean;
+  /** The fork's owner, when it is one. */
+  readonly forkOwner?: string | null;
 }
 
 /** What a dispatch looks like to the guardrails. */
@@ -58,6 +72,8 @@ export interface ControlCheck {
   readonly refusal?: string;
   /** The dialog's main line: exactly what will happen. */
   readonly message: string;
+  /** Who and where from (owner/repo, actor, fork status): the dialog's first detail line. */
+  readonly facts?: string;
   /** Warnings shown under it. */
   readonly warnings: readonly string[];
   /** The confirm button's label. */
@@ -66,20 +82,60 @@ export interface ControlCheck {
 
 const RELEASE = /^rel\//;
 
-/** Whether a branch must stay green. */
+/** Whether a branch NAME is one that must stay green (see isProtectedRun for a run). */
 export function isProtectedBranch(branch: string, repoDefault?: string | null): boolean {
   return DEFAULT_BRANCHES.has(branch) || (!!repoDefault && branch === repoDefault);
 }
 
+/**
+ * Whether a run is on a branch that must stay green: a protected name, from the repo itself, not a
+ * PR event (a fork PR from a branch named `main` is not).
+ */
+export function isProtectedRun(run: RunFacts): boolean {
+  return isProtectedBranch(run.branch, run.repoDefaultBranch) && run.fork !== true &&
+    !PR_EVENTS.has(run.event ?? "");
+}
+
+/** Names in dialogs are at most this long. */
+export const DIALOG_NAME_MAX = 80;
+
+/**
+ * Text someone else chose (a run, job or branch name), fit for a dialog: control characters,
+ * newlines and bidi overrides become spaces, runs of space collapse, capped at `max` with "…".
+ */
+export function dialogText(text: string, max = DIALOG_NAME_MAX): string {
+  const t = text
+    .replace(/[\p{Cc}\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+}
+
+/** A name, quoted (an embedded `"` can't close the quote early). */
+export const quoted = (text: string) => `"${dialogText(text).replace(/"/g, "”")}"`;
+
 const short = (repo: string) => repo.split("/")[1] ?? repo;
 const jobsText = (n: number) => `${n} job${n === 1 ? "" : "s"}`;
 
+/** The dialog's facts line: who started it, and from where. */
+function factsOf(run: RunFacts): string {
+  const actor = run.actor ? `Started by ${dialogText(run.actor, 40)}` : "Started by (not reported)";
+  const origin = run.fork
+    ? `fork PR from ${dialogText(run.forkOwner ?? "an unknown owner", 40)}`
+    : run.event && PR_EVENTS.has(run.event)
+    ? "a PR from a branch of this repo"
+    : "from this repo";
+  return `${actor} · ${origin}${run.event ? ` · ${dialogText(run.event, 40)}` : ""}`;
+}
 /** Check a run control (cancel / re-run). */
 export function checkRunControl(
   c: Exclude<GitHubControl, { kind: "dispatch" }>,
   run: RunFacts,
 ): ControlCheck {
-  const on = `${run.workflow} on ${run.branch}`;
+  const on = `in ${c.repo}: ${quoted(run.workflow)} on ${quoted(run.branch)}${
+    run.fork ? ` (fork PR from ${dialogText(run.forkOwner ?? "an unknown owner", 40)})` : ""
+  }`;
+  const facts = factsOf(run);
   const warnings: string[] = [];
   if (c.kind !== "cancel-run" && RELEASE.test(run.branch)) {
     warnings.push(
@@ -88,38 +144,42 @@ export function checkRunControl(
   }
   switch (c.kind) {
     case "cancel-run": {
-      const message = `Cancel run ${run.id}, ${on}, ${jobsText(run.jobs)}?`;
-      if (isProtectedBranch(run.branch, run.repoDefaultBranch)) {
+      const message = `Cancel run ${run.id} ${on}, ${jobsText(run.jobs)}?`;
+      if (isProtectedRun(run)) {
         return {
           allowed: false,
-          refusal: `Cancel is refused on ${run.branch}: ${
+          refusal: `Cancel is refused on ${dialogText(run.branch)}: ${
             short(c.repo)
           }'s default branch must stay green.`,
           message,
+          facts,
           warnings,
           confirmLabel: "Cancel run",
         };
       }
-      return { allowed: true, message, warnings, confirmLabel: "Cancel run" };
+      return { allowed: true, message, facts, warnings, confirmLabel: "Cancel run" };
     }
     case "rerun-failed":
       return {
         allowed: true,
-        message: `Re-run the failed jobs of run ${run.id}, ${on}?`,
+        message: `Re-run the failed jobs of run ${run.id} ${on}?`,
+        facts,
         warnings,
         confirmLabel: "Re-run failed jobs",
       };
     case "rerun-all":
       return {
         allowed: true,
-        message: `Re-run all ${jobsText(run.jobs)} of run ${run.id}, ${on}?`,
+        message: `Re-run all ${jobsText(run.jobs)} of run ${run.id} ${on}?`,
+        facts,
         warnings,
         confirmLabel: "Re-run all",
       };
     case "rerun-job":
       return {
         allowed: true,
-        message: `Re-run job "${run.jobName ?? c.jobId}" of run ${run.id}, ${on}?`,
+        message: `Re-run job ${quoted(run.jobName ?? String(c.jobId))} of run ${run.id} ${on}?`,
+        facts,
         warnings,
         confirmLabel: "Re-run job",
       };
@@ -132,9 +192,9 @@ export function checkDispatch(
   d: DispatchFacts,
 ): ControlCheck {
   const inputs = Object.entries(c.inputs);
-  const message = `Dispatch ${d.workflow} on ${d.ref} (${d.sha.slice(0, 7)})${
-    inputs.length ? ` with ${inputs.map(([k, v]) => `${k}=${v}`).join(", ")}` : ""
-  }?`;
+  const message = `Dispatch ${quoted(d.workflow)} in ${c.repo} on ${quoted(d.ref)} (${
+    d.sha.slice(0, 7)
+  })${inputs.length ? ` with ${inputs.map(([k, v]) => `${k}=${quoted(v)}`).join(", ")}` : ""}?`;
   const live = d.sameShaRuns.filter((r) => r.conclusion !== "cancelled");
   if (live.length > 0) {
     return {
@@ -171,9 +231,15 @@ export function controlRequest(c: GitHubControl): { path: string; body?: unknown
   }
 }
 
-/** A repo name GitHub would accept (and nothing that could reach a path or shell). */
+/**
+ * One of the org's repos (`${ORG}/<name>`), as a name GitHub would accept (and nothing that could
+ * reach a path or shell). Controls never act outside the org.
+ */
 export function validRepo(repo: unknown): repo is string {
-  return typeof repo === "string" && /^[\w.-]+\/[\w.-]+$/.test(repo) && !repo.includes("..");
+  if (typeof repo !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(repo) || repo.includes("..")) {
+    return false;
+  }
+  return repo.slice(0, repo.indexOf("/")) === ORG;
 }
 
 /** A git ref for a dispatch: a branch or tag name, no spaces, no `..`, no leading `-`. */

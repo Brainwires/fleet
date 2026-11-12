@@ -1,7 +1,8 @@
 "use client";
 // The page's state: the snapshot from the backend (refreshed on its `changed` event, and every few
 // seconds while visible, which also tells the backend to poll GitHub at the visible rate), a 1 s
-// clock for the ticking times, and the token screen when Fleet has no token.
+// clock for the ticking times (stopped while the window is hidden), and the token screen when
+// Fleet has no token.
 
 import { useCallback, useEffect, useRef, useState } from "denext";
 import { onDesktopEvent } from "denext/desktop/client";
@@ -13,6 +14,7 @@ import { FleetView } from "./fleet-view.tsx";
 import { type ControlRequest, DispatchPanel, type PoolRequest } from "./controls.tsx";
 import type { ControlResult } from "../lib/control-runner.ts";
 import { TokenScreen } from "./token-screen.tsx";
+import { visibleClock } from "./visible-clock.ts";
 
 /** How often the page reads the (in-process) snapshot while visible. */
 const READ_MS = 5000;
@@ -92,9 +94,11 @@ export function FleetApp() {
     const poll = setInterval(() => {
       if (visibleNow()) void read();
     }, READ_MS);
-    const tick = setInterval(() => setNow(Date.now()), 1000);
+    // The 1 s clock runs only while the window shows: hidden, nothing ticks (or re-renders).
+    const clock = visibleClock(setNow, { visible: visibleNow });
     const onVis = () => {
       const visible = visibleNow();
+      clock.update();
       void fleet.visibility({ visible }).catch(() => {});
       if (visible) void read();
     };
@@ -102,7 +106,7 @@ export function FleetApp() {
     const stop = onDesktopEvent("fleet", CHANGED_EVENT, () => void read());
     return () => {
       clearInterval(poll);
-      clearInterval(tick);
+      clock.stop();
       document.removeEventListener("visibilitychange", onVis);
       stop();
     };

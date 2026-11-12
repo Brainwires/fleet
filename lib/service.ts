@@ -19,13 +19,18 @@ import { type PersistedState, Poller } from "./poller.ts";
 
 import { pollPlan } from "./budget.ts";
 import type { HealthState } from "./health.ts";
-import { type HookDelivery, HOOKS_STALE_MS, hooksState } from "./hooks.ts";
+import { type HookDelivery, HOOKS_STALE_MS, hooksState, isStaleDelivery } from "./hooks.ts";
 import { backfillEvents, backfillFrom, dropLogged } from "./backfill.ts";
 import { AGENT_HEARTBEAT_MS, type AgentSnapshot, buildAgentSnapshot } from "./agent-snapshot.ts";
 /** A page that hasn't said it's visible for this long counts as hidden (it may be suspended). */
 export const VISIBLE_TTL_MS = 30_000;
 /** The secure-store key of a pasted token. */
 export const TOKEN_KEY = "github-token";
+/**
+ * A poll still running after this long is stuck (each request has its own 20 s deadline, so only
+ * a bug gets here): the next poll goes ahead without it, and its late result is ignored.
+ */
+export const POLL_STUCK_MS = 2 * 60_000;
 
 /** A secret store (the extension's own `host.secureStore`). */
 export interface SecretStore {
@@ -64,6 +69,10 @@ export interface ServiceDeps {
   readonly localHealth?: (variable: HealthState) => Promise<HealthState>;
   readonly setTimeout?: (fn: () => void, ms: number) => number;
   readonly clearTimeout?: (id: number) => void;
+  /** Each GitHub request's deadline (tests shorten it; default the client's 20 s). */
+  readonly requestTimeoutMs?: number;
+  /** Where a recovered fault is noted (never a token or a payload). Default `console.warn`. */
+  readonly warn?: (message: string) => void;
 }
 
 /** A token's check result. */
@@ -148,6 +157,11 @@ export function createFleetService(deps: ServiceDeps): FleetService {
   let timer: number | null = null;
   let lastPoll = -Infinity;
   let polling: Promise<void> | null = null;
+  /** When the poll in flight started, and its generation (a dropped stuck poll's result is ignored). */
+  let pollingSince = 0;
+  let pollGen = 0;
+  let pollWatchdog: number | null = null;
+  const warn = deps.warn ?? ((m: string) => console.warn(m));
   let visibleUntil = -Infinity;
   let stopped = false;
   let loading: Promise<void> | null = null;
@@ -171,6 +185,8 @@ export function createFleetService(deps: ServiceDeps): FleetService {
   const paused = () => prefs.notificationsPaused === true;
 
   const visible = () => now() < visibleUntil;
+  /** Now on GitHub's clock (the API's Date headers), for comparisons with GitHub's timestamps. */
+  const ghNow = () => now() + (client?.clockOffset() ?? 0);
   const plan = () =>
     pollPlan({
       rate: client?.rate() ?? null,
@@ -246,7 +262,12 @@ export function createFleetService(deps: ServiceDeps): FleetService {
   };
 
   const use = (token: string | null, state: AuthState) => {
-    client = createGitHubClient({ token, fetch: deps.fetch, now });
+    client = createGitHubClient({
+      token,
+      fetch: deps.fetch,
+      now,
+      ...(deps.requestTimeoutMs ? { timeoutMs: deps.requestTimeoutMs } : {}),
+    });
     if (poller) durations = poller.durations();
     poller = new Poller({
       client,
@@ -357,7 +378,15 @@ export function createFleetService(deps: ServiceDeps): FleetService {
   let hookChain: Promise<void> = Promise.resolve();
 
   const pollNow = (): Promise<void> => {
-    if (polling) return polling;
+    if (polling) {
+      if (now() - pollingSince < POLL_STUCK_MS) return polling;
+      warn(
+        `fleet: a poll ran over ${POLL_STUCK_MS / 60_000} min; dropped it and polling again`,
+      );
+      polling = null;
+    }
+    if (pollWatchdog !== null) clearT(pollWatchdog);
+    pollWatchdog = null;
     if (!poller) return Promise.resolve();
     // Under the rate floor nothing polls until the reset (the runner scheduler needs the budget).
     const nb = plan().notBefore;
@@ -367,9 +396,17 @@ export function createFleetService(deps: ServiceDeps): FleetService {
       return Promise.resolve();
     }
     const p = poller;
-    polling = (async () => {
+    const gen = ++pollGen;
+    pollingSince = now();
+    // Belt and braces: if this poll never settles, the watchdog drops it and polls again.
+    pollWatchdog = stopped ? null : setT(() => {
+      pollWatchdog = null;
+      void pollNow();
+    }, POLL_STUCK_MS + 1000);
+    const current = (async () => {
       lastPoll = now();
       const r = await p.poll();
+      if (gen !== pollGen) return; // dropped as stuck: a newer poll owns the state
       if (p !== poller) return; // the token changed meanwhile
       if (r.authFailed) {
         auth = "invalid";
@@ -385,10 +422,14 @@ export function createFleetService(deps: ServiceDeps): FleetService {
       await writeAgent();
       emit();
     })().finally(() => {
+      if (gen !== pollGen) return;
+      if (pollWatchdog !== null) clearT(pollWatchdog);
+      pollWatchdog = null;
       polling = null;
       schedule();
     });
-    return polling;
+    polling = current;
+    return current;
   };
 
   const loadState = () => loading ??= loadStateOnce();
@@ -446,7 +487,12 @@ export function createFleetService(deps: ServiceDeps): FleetService {
 
   /** Check a token cheaply: `GET /rate_limit` costs no rate limit. */
   const check = async (token: string): Promise<TokenCheck> => {
-    const c = createGitHubClient({ token, fetch: deps.fetch, now });
+    const c = createGitHubClient({
+      token,
+      fetch: deps.fetch,
+      now,
+      ...(deps.requestTimeoutMs ? { timeoutMs: deps.requestTimeoutMs } : {}),
+    });
     try {
       await c.get("/rate_limit");
       return { ok: true };
@@ -533,6 +579,8 @@ export function createFleetService(deps: ServiceDeps): FleetService {
     applyHook(d) {
       hookChain = hookChain.then(async () => {
         lastDelivery = Math.max(lastDelivery ?? 0, d.receivedAt);
+        // A replay (its newest timestamp over 10 min old on GitHub's clock) changes nothing.
+        if (isStaleDelivery(d.event, d.payload, ghNow())) return;
         const p = poller;
         if (!p || !p.applyHook(d)) return;
         await recordEvents(p);
@@ -573,6 +621,8 @@ export function createFleetService(deps: ServiceDeps): FleetService {
       timer = null;
       if (heartbeat !== null) clearT(heartbeat);
       heartbeat = null;
+      if (pollWatchdog !== null) clearT(pollWatchdog);
+      pollWatchdog = null;
     },
   };
 }

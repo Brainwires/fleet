@@ -29,6 +29,7 @@ import {
   readHookSecret,
   readSpoolSince,
   type Receiver,
+  recentSpoolIds,
   startReceiver,
   tailSpool,
 } from "../lib/deno-hooks.ts";
@@ -93,18 +94,23 @@ let stopSpool: (() => void) | undefined;
 async function startHooks(s: FleetService): Promise<void> {
   if (!(await hooksAvailable())) return;
   const secret = await readHookSecret();
-  if (!secret) return;
+  if (!secret) {
+    console.warn("fleet: hooks: the webhook secret is unreadable or shorter than 32 characters");
+    return;
+  }
+  // The ids already spooled: a replay of one after a restart is still a duplicate.
+  const seen = await recentSpoolIds().catch(() => []);
   receiver = startReceiver(secret, {
     onDelivery: (d) => void s.applyHook(d),
     onVerified: (_event, at) => s.hookVerified(at),
     onReject: (why) => console.warn(`fleet: hooks: rejected ${why}`),
-  });
+  }, { seen, clockOffset: () => s.github()?.client.clockOffset() ?? 0 });
   if (receiver) {
     s.setHooksEnabled(true, "listener");
     return void s.backfill();
   }
   // The port is held by the receiver (the launchd service, or `denext task hooks`): read its spool.
-  const tail = await tailSpool((d) => void s.applyHook(d));
+  const tail = await tailSpool((d) => void s.applyHook(d), undefined, undefined, seen);
   if (tail) {
     stopSpool = tail.stop;
     // Start from the spool's newest delivery, not "no delivery yet": the receiver has been live

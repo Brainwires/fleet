@@ -3,7 +3,7 @@
 // scrolled up. Each line: local time, a severity mark (colour AND glyph), repo, workflow / job, the
 // text, and a link to github.com. Filters: severity (all / problems), repo, text search.
 
-import { useEffect, useLayoutEffect, useRef, useState } from "denext";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "denext";
 import { type FleetEvent, isProblem } from "../lib/events.ts";
 import { shortRepo, shortRunner } from "../lib/format.ts";
 
@@ -63,14 +63,24 @@ export interface EventLogProps {
 /** Within this many px of the bottom counts as "at the bottom" (follow new lines). */
 const STICK_PX = 24;
 
-export function EventLog({ events, onOpen }: EventLogProps) {
+/**
+ * The pane, memoized: the window's 1 s clock re-renders the lanes, never these (up to 2,000) lines;
+ * it re-renders only when the events, the link handler or its own filters change.
+ */
+export const EventLog = memo(function EventLog({ events, onOpen }: EventLogProps) {
   const [severity, setSeverity] = useState<LogFilter["severity"]>("all");
   const [repo, setRepo] = useState("");
   const [query, setQuery] = useState("");
   const list = useRef<HTMLDivElement | null>(null);
   const stick = useRef(true);
-  const shown = filterEvents(events, { severity, repo, query });
-  const repos = [...new Set(events.map((e) => e.repo).filter((r) => r))].sort();
+  const shown = useMemo(
+    () => filterEvents(events, { severity, repo, query }),
+    [events, severity, repo, query],
+  );
+  const repos = useMemo(
+    () => [...new Set(events.map((e) => e.repo).filter((r) => r))].sort(),
+    [events],
+  );
   const lastSeq = shown.at(-1)?.seq ?? 0;
 
   // Follow new lines while at the bottom.
@@ -151,7 +161,7 @@ export function EventLog({ events, onOpen }: EventLogProps) {
       </div>
     </section>
   );
-}
+});
 
 function EventLine({ e, onOpen }: { e: FleetEvent; onOpen: (url: string) => void }) {
   const mark = SEV_MARK[e.sev];

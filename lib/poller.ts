@@ -4,9 +4,9 @@
 // finished" and their lengths the usual-length history. Every GitHub call goes through the
 // injected client (ETag cache, rate limit, back-off); a failed call keeps the last good data.
 
-import { type ActiveRun, durationKey, median, time } from "./classify.ts";
+import { type ActiveRun, durationKey, median, runProvenance, time } from "./classify.ts";
 import type { GitHubClient } from "./github.ts";
-import { GitHubError } from "./github.ts";
+import { API, GitHubError } from "./github.ts";
 import type {
   GhAnnotation,
   GhJob,
@@ -22,7 +22,6 @@ import { type HealthState, type HostHealth, parsePoolHealth } from "./health.ts"
 import type { AuthState, FinishedJob, Snapshot } from "./model.ts";
 import {
   CORE_REPOS,
-  DEFAULT_BRANCHES,
   derivePools,
   GITHUB_POOL,
   ORG,
@@ -43,7 +42,10 @@ export interface ObservedRun {
 
 /** What one round saw, for the event log (lib/events.ts). */
 export interface Observation {
+  /** This machine's clock (the events' `at`). */
   readonly now: number;
+  /** GitHub's clock minus ours (ms): job ages compare GitHub timestamps with `now + offset`. */
+  readonly clockOffsetMs?: number;
   /** The active runs, and the runs that finished since the last round (with their final jobs). */
   readonly runs: readonly ObservedRun[];
   readonly health: HealthState;
@@ -173,6 +175,11 @@ export class Poller {
     return Object.fromEntries(this.#durations);
   }
 
+  /** Now on GitHub's clock: for comparisons with GitHub's timestamps. */
+  #ghNow(): number {
+    return this.#now() + this.#client.clockOffset();
+  }
+
   /** The usual length of a job. */
   usual = (repo: string, workflow: string, job: string): number | null => {
     const d = this.#durations.get(durationKey(repo, workflow, job));
@@ -271,8 +278,9 @@ export class Poller {
 
   /** Record completed jobs: recently finished, and successful lengths for the usual length. */
   #recordCompleted(repo: string, run: GhRun, jobs: readonly GhJob[]): void {
-    const now = this.#now();
+    const now = this.#ghNow();
     const branch = run.head_branch ?? "";
+    const prov = runProvenance(repo, run);
     for (const j of jobs) {
       if (j.status !== "completed") continue;
       const done = time(j.completed_at);
@@ -295,7 +303,8 @@ export class Poller {
         name: j.name,
         workflow: run.name ?? "workflow",
         branch,
-        defaultBranch: DEFAULT_BRANCHES.has(branch),
+        defaultBranch: prov.defaultBranch,
+        ...(prov.fork ? { fork: true } : {}),
         conclusion: j.conclusion ?? "unknown",
         url: j.html_url ?? null,
         pool: runnerPool ?? labelPool ?? GITHUB_POOL,
@@ -437,6 +446,9 @@ export class Poller {
     if (d.event === "workflow_run") {
       const run = asRun(d.payload.workflow_run);
       if (!run) return false;
+      // An older state than the one held (a late or replayed delivery) is dropped.
+      const held = this.#runs.get(run.id)?.run ?? this.#recent.get(run.id)?.run;
+      if (held && !runIsNewer(run, held)) return false;
       if (run.status === "completed") {
         const jobs = this.#jobs.get(run.id) ?? [];
         this.#runs.delete(run.id);
@@ -453,6 +465,9 @@ export class Poller {
     }
     const job = asJob(d.payload.workflow_job);
     if (!job) return false;
+    const heldJob = (this.#jobs.get(job.run_id) ?? this.#recent.get(job.run_id)?.jobs ?? [])
+      .find((j) => j.id === job.id);
+    if (heldJob && !jobIsNewer(job, heldJob)) return false;
     let active = this.#runs.get(job.run_id);
     if (!active) {
       const recent = this.#recent.get(job.run_id);
@@ -476,6 +491,7 @@ export class Poller {
             ? (job as unknown as { head_sha: string }).head_sha
             : "",
           event: "",
+          repository: { full_name: repo },
           status: job.status === "in_progress" ? "in_progress" : "queued",
           html_url: `https://github.com/${repo}/actions/runs/${job.run_id}`,
           created_at: job.created_at,
@@ -563,6 +579,7 @@ export class Poller {
   observation(): Observation {
     return {
       now: this.#now(),
+      clockOffsetMs: this.#client.clockOffset(),
       runs: [
         ...[...this.#runs.values()].map((a) => ({
           repo: a.repo,
@@ -582,13 +599,29 @@ export class Poller {
     }
     if (this.#annotated.size > 5000) this.#annotated = new Set([...this.#annotated].slice(-2000));
     const now = this.#now();
+    const ghNow = this.#ghNow();
     for (const [id, f] of this.#finished) {
-      if (now - f.completedAt > FINISHED_KEEP_MS) this.#finished.delete(id);
+      if (ghNow - f.completedAt > FINISHED_KEEP_MS) this.#finished.delete(id);
     }
     for (const [id, r] of this.#recent) {
-      if (now - r.doneAt > AGENT_FINISHED_KEEP_MS) this.#recent.delete(id);
+      if (now - r.doneAt <= AGENT_FINISHED_KEEP_MS) continue;
+      this.#recent.delete(id);
+      // Gone from every view: its cached ETags (the run, its jobs, their annotations) go too.
+      if (!this.#runs.has(id)) this.#evictRun(r.repo, id, r.jobs);
     }
     if (this.#counted.size > 5000) this.#counted = new Set([...this.#counted].slice(-2000));
+  }
+
+  /** Drop a run's URLs from the client's ETag cache. */
+  #evictRun(repo: string, runId: number, jobs: readonly GhJob[]): void {
+    const run = `${API}/repos/${repo}/actions/runs/${runId}`;
+    const checks = new Set(
+      jobs.map((j) => `${API}/repos/${repo}/check-runs/${j.id}/annotations`),
+    );
+    this.#client.evict((url) =>
+      url === run || url.startsWith(`${run}/`) || url.startsWith(`${run}?`) ||
+      checks.has(url.split("?")[0])
+    );
   }
 
   /** Set the auth state shown (the backend changes it when a token is refused or replaced). */
@@ -602,6 +635,7 @@ export class Poller {
     for (const a of this.#runs.values()) repos.add(a.repo);
     return buildSnapshot({
       now: this.#now(),
+      clockOffsetMs: this.#client.clockOffset(),
       auth: this.#auth,
       poll: {
         ok: this.#ok,
@@ -629,6 +663,45 @@ export class Poller {
 }
 
 const isStr = (v: unknown): v is string => typeof v === "string";
+
+/** queued / waiting / requested < in_progress < completed. */
+function statusRank(status: string | null | undefined): number {
+  return status === "completed" ? 2 : status === "in_progress" ? 1 : 0;
+}
+
+/** The newest of some ISO times (ms), or -Infinity. */
+function newest(...isos: (string | null | undefined)[]): number {
+  return Math.max(-Infinity, ...isos.map((t) => time(t) ?? -Infinity));
+}
+
+/**
+ * Whether a webhook's run is newer than the one held: a later `updated_at`, or the same one with a
+ * later status. A run without `updated_at` on either side is taken (nothing to compare).
+ */
+export function runIsNewer(incoming: GhRun, held: GhRun): boolean {
+  const a = time(incoming.updated_at);
+  const b = time(held.updated_at);
+  if (a === null || b === null) return true;
+  if ((incoming.run_attempt ?? 1) !== (held.run_attempt ?? 1)) {
+    return (incoming.run_attempt ?? 1) > (held.run_attempt ?? 1);
+  }
+  return a > b ||
+    (a === b && incoming.status !== held.status &&
+      statusRank(incoming.status) >= statusRank(held.status));
+}
+
+/**
+ * Whether a webhook's job is newer than the one held (jobs have no `updated_at`): a later status,
+ * or the same rank with a later timestamp (or another status at the same time).
+ */
+export function jobIsNewer(incoming: GhJob, held: GhJob): boolean {
+  const ra = statusRank(incoming.status);
+  const rb = statusRank(held.status);
+  if (ra !== rb) return ra > rb;
+  const a = newest(incoming.created_at, incoming.started_at, incoming.completed_at);
+  const b = newest(held.created_at, held.started_at, held.completed_at);
+  return a > b || (a === b && incoming.status !== held.status);
+}
 
 /** A webhook's `workflow_run`, typed, or `null`. */
 export function asRun(v: unknown): GhRun | null {

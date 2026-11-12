@@ -10,3 +10,5 @@ dist/
 # type-checks.
 .deno-desktop/*
 !.deno-desktop/config.json
+# deno task coverage output.
+coverage/

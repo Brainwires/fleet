@@ -40,7 +40,8 @@
   --line-strong: #c9ced8;
   --text: #13161b;
   --text-2: #4d5565;
-  --text-3: #8790a0;
+  /* ≥ 4.5:1 (WCAG AA) on --bg, --surface, --surface-2 and every *-soft fill. */
+  --text-3: #606878;
   --run: #2563d9;
   --run-soft: #e4ecfb;
   --ok: #17895a;
@@ -66,7 +67,8 @@
     --line-strong: #343d4b;
     --text: #e6e9ef;
     --text-2: #a2abb9;
-    --text-3: #6c7686;
+    /* ≥ 4.5:1 (WCAG AA) on --bg, --surface, --surface-2 and every *-soft fill. */
+    --text-3: #8a94a4;
     --run: #6ea2ff;
     --run-soft: #17243b;
     --ok: #3ccf8e;
@@ -669,6 +671,18 @@ a:hover {
   padding: 2px 5px;
   border-radius: 3px;
   font-weight: 500;
+}
+.fork-chip {
+  color: var(--text-2);
+  background: var(--warn-soft);
+  border-left: 2px solid var(--warn);
+  padding: 2px 5px;
+  border-radius: 3px;
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 16em;
 }
 .diamond {
   font-size: 11px;
@@ -1302,5 +1316,17 @@ code {
   }
   .ev-where {
     display: none;
+  }
+}
+
+/* Motion only for those who want it. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

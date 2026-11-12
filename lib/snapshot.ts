@@ -32,7 +32,10 @@ import {
 
 /** What the builder reads. */
 export interface SnapshotInput {
+  /** This machine's clock. */
   readonly now: number;
+  /** GitHub's clock minus ours (ms): GitHub timestamps are compared with `now + clockOffsetMs`. */
+  readonly clockOffsetMs?: number;
   readonly auth: AuthState;
   readonly poll: Snapshot["poll"];
   readonly rate: RateInfo | null;
@@ -206,11 +209,13 @@ export function trayText(summary: Summary): string {
 
 /** Build the snapshot. */
 export function buildSnapshot(input: SnapshotInput): Snapshot {
+  const offset = input.clockOffsetMs ?? 0;
+  const ghNow = input.now + offset;
   const { running, queued: queuedRaw } = groupLanes(
     input.runs,
     input.jobsByRun,
     input.usual,
-    input.now,
+    ghNow,
   );
   const runRows = rowsOf(running);
   const pools = poolCards(runRows, rowsOf(queuedRaw), input.health, input.runners);
@@ -219,12 +224,13 @@ export function buildSnapshot(input: SnapshotInput): Snapshot {
   const h = input.health;
   const doc = h.state === "ok" || h.state === "stale" ? h.doc : null;
   const alerts: AlertRow[] = doc ? doc.alerts.map((a) => ({ ...a })) : [];
-  const summary = summarize(runRows, qRows, pools, input.now, {
+  const summary = summarize(runRows, qRows, pools, ghNow, {
     pollOk: input.poll.ok,
     healthStale: h.state === "stale",
   });
   return {
     at: input.now,
+    clockOffsetMs: offset,
     auth: input.auth,
     poll: input.poll,
     rate: input.rate,

@@ -8,7 +8,7 @@
 // repo, and the job or run name. Never the secret, headers or the body. Stop it with Ctrl+C.
 // Don't run it beside the app on the same machine: only one can hold the port.
 
-import { hooksAvailable, readHookSecret, startReceiver } from "./lib/deno-hooks.ts";
+import { hooksAvailable, readHookSecret, recentSpoolIds, startReceiver } from "./lib/deno-hooks.ts";
 import { HOOK_HOST, HOOK_PATH, HOOK_PORT, payloadRepo } from "./lib/hooks.ts";
 
 const str = (
@@ -21,10 +21,12 @@ if (!(await hooksAvailable())) {
 }
 const secret = await readHookSecret();
 if (!secret) {
-  console.error("hooks: the keychain secret couldn't be read");
+  console.error("hooks: the keychain secret couldn't be read (or is shorter than 32 characters)");
   Deno.exit(2);
 }
 let n = 0;
+// The ids already spooled: a replay of one after a restart is still a duplicate.
+const seen = await recentSpoolIds().catch(() => []);
 const receiver = startReceiver(secret, {
   onDelivery: (d) => {
     const p = d.payload;
@@ -40,7 +42,7 @@ const receiver = startReceiver(secret, {
     if (event === "ping") console.log(`${new Date().toISOString()} ping (signature verified)`);
   },
   onReject: (why) => console.log(`${new Date().toISOString()} rejected ${why}`),
-});
+}, { seen });
 if (!receiver) {
   console.error(`hooks: ${HOOK_HOST}:${HOOK_PORT} is taken`);
   Deno.exit(1);

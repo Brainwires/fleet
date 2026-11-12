@@ -2,7 +2,14 @@
 // trigger. The files come in as values (mcp/fleet-mcp.ts reads them), the clock as a number, so
 // the tests drive every tool from fixtures.
 
-import type { AgentJob, AgentRun, AgentSnapshot } from "../lib/agent-snapshot.ts";
+import {
+  AGENT_NAME_MAX,
+  AGENT_NOTE_MAX,
+  type AgentJob,
+  type AgentRun,
+  type AgentSnapshot,
+  capText,
+} from "../lib/agent-snapshot.ts";
 import type { FleetEvent } from "../lib/events.ts";
 
 /** Fleet counts as running while it wrote the snapshot this recently. */
@@ -183,8 +190,10 @@ export function statusResult(
     age_s: Math.round((now - extra.hooksSpoolAt) / 1000),
   };
   if (!snap) return { ...fresh, watchdog, hooks_spool: hooksSpool };
+  // Queue waits are GitHub timestamps: aged on GitHub's clock.
+  const ghNow = now + (typeof snap.clock_offset_ms === "number" ? snap.clock_offset_ms : 0);
   const waitS = (iso: string | null) =>
-    iso === null ? null : Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
+    iso === null ? null : Math.max(0, Math.round((ghNow - Date.parse(iso)) / 1000));
   const pools = snap.pools.map((p) => ({ ...p, oldest_wait_s: waitS(p.oldest_queued_since) }));
   let oldest: { pool: string; wait_s: number } | null = null;
   for (const p of pools) {
@@ -295,9 +304,20 @@ export function jobsResult(snap: AgentSnapshot | null, now: number, args: Args) 
 
 // ---- fleet_events ----
 
-/** An event for an answer (its time as ISO). */
+/**
+ * An event for an answer: its time as ISO, its free text capped (names 120, text 300) and stripped
+ * of control characters. An `untrusted` event (a fork / pull_request_target run) never carries a
+ * failed step or annotation in its text.
+ */
 export function eventOut(e: FleetEvent) {
-  return { ...e, at: new Date(e.at).toISOString() };
+  return {
+    ...e,
+    at: new Date(e.at).toISOString(),
+    workflow: capText(e.workflow, AGENT_NAME_MAX),
+    job: e.job === null ? null : capText(e.job, AGENT_NAME_MAX),
+    text: capText(e.text, AGENT_NOTE_MAX),
+    ...(e.branch !== undefined ? { branch: capText(e.branch, AGENT_NAME_MAX) } : {}),
+  };
 }
 
 /** The run and job an event is about: its own fields, else parsed from its link. */

@@ -66,7 +66,10 @@ Deno.test("control: a dismissed dialog sends nothing", async () => {
     runId: ciRunId(),
   });
   assert(!r.ok && r.cancelled);
-  assertEquals(s.asked, [`Cancel run ${ciRunId()}, CI on train/4.17, 12 jobs?`]);
+  assertEquals(s.asked, [
+    `Cancel run ${ciRunId()} in Brainwires/denext: "CI" on "train/4.17", 12 jobs? | ` +
+    "Started by (not reported) · from this repo · workflow_dispatch",
+  ]);
   assertEquals(s.posted, []);
   // Escape / closed (null) is the same.
   const t = await setup({ answer: null });
@@ -169,7 +172,7 @@ Deno.test("dispatch: only workflow_dispatch workflows; same-SHA refused; confirm
   assertStringIncludes(bad.message, "must be one of");
   const ok = await runControl(s.deps, c);
   assert(ok.ok);
-  assertEquals(s.asked, [`Dispatch e2e on main (fffffff) with job=e2e?`]);
+  assertEquals(s.asked, [`Dispatch "e2e" in Brainwires/qutty on "main" (fffffff) with job="e2e"?`]);
   assertEquals(s.posted, [{
     url: "/repos/Brainwires/qutty/actions/workflows/1/dispatches",
     body: JSON.stringify({ ref: "main", inputs: { job: "e2e" } }),

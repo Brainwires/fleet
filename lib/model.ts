@@ -51,8 +51,13 @@ export interface RunGroup {
   readonly sha: string;
   readonly event: string;
   readonly url: string;
-  /** The branch must stay green (`development-denext`, `development`, `main`). */
+  /**
+   * The run is on a branch that must stay green (`development-denext`, `development`, `main`):
+   * the name, from this repo, not a PR (a fork PR's `main` is not).
+   */
   readonly defaultBranch: boolean;
+  /** A fork PR: the fork's owner ("fork PR from <owner>"). Absent for this repo's own runs. */
+  readonly forkOwner?: string;
   /** Queued with no jobs listed yet (GitHub hasn't expanded the run). */
   readonly pendingJobs: boolean;
   readonly jobs: readonly JobRow[];
@@ -96,7 +101,10 @@ export interface FinishedJob {
   readonly name: string;
   readonly workflow: string;
   readonly branch: string;
+  /** On a default branch by provenance (see RunGroup.defaultBranch). */
   readonly defaultBranch: boolean;
+  /** From a fork PR. */
+  readonly fork?: boolean;
   readonly conclusion: string;
   readonly url: string | null;
   readonly pool: string;
@@ -141,8 +149,13 @@ export interface Summary {
 
 /** Everything the page shows. */
 export interface Snapshot {
-  /** When it was built. */
+  /** When it was built (this machine's clock). */
   readonly at: number;
+  /**
+   * GitHub's clock minus this machine's (ms, from the API's `Date` headers; 0 when unknown). Ages
+   * of GitHub timestamps (queue waits, elapsed, "finished N min ago") use `now + clockOffsetMs`.
+   */
+  readonly clockOffsetMs?: number;
   readonly auth: AuthState;
   /** The last poll: ok, or what went wrong (never the token). */
   readonly poll: {

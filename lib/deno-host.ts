@@ -58,6 +58,29 @@ export async function ghToken(os: string = Deno.build.os): Promise<string | null
 
 /** The state file's name in the app's data folder. */
 export const STATE_FILE = "fleet-state.json";
+/** Data files: the owner only (CI state names our infrastructure). */
+export const FILE_MODE = 0o600;
+/** The data folder: the owner only. */
+export const DIR_MODE = 0o700;
+
+const posix = () => Deno.build.os !== "windows";
+/** Folders already made / tightened by this process. */
+const madeDirs = new Set<string>();
+
+/** Create `dir` owner-only, and tighten one created before (once per process; POSIX only). */
+async function ensureDir(dir: string): Promise<void> {
+  if (madeDirs.has(dir)) return;
+  await Deno.mkdir(dir, { recursive: true, mode: DIR_MODE });
+  if (posix()) {
+    try {
+      const st = await Deno.stat(dir);
+      if (st.mode !== null && (st.mode & 0o777) !== DIR_MODE) await Deno.chmod(dir, DIR_MODE);
+    } catch {
+      // Best effort: the files inside are 0600.
+    }
+  }
+  madeDirs.add(dir);
+}
 
 /** Join a folder and a file name with the OS's separator. */
 function join(dir: string, name: string): string {
@@ -115,17 +138,21 @@ export async function appendJournal(
   maxBytes = JOURNAL_MAX_BYTES,
 ): Promise<void> {
   if (events.length === 0) return;
-  await Deno.mkdir(dir, { recursive: true });
+  await ensureDir(dir);
   const target = join(dir, JOURNAL_FILE);
   try {
-    if ((await Deno.stat(target)).size >= maxBytes) {
+    const st = await Deno.stat(target);
+    if (st.size >= maxBytes) {
       await Deno.rename(target, join(dir, JOURNAL_OLD_FILE));
+    } else if (posix() && st.mode !== null && (st.mode & 0o777) !== FILE_MODE) {
+      // A journal from a build before 0600: tightened once.
+      await Deno.chmod(target, FILE_MODE);
     }
   } catch {
     // No journal yet.
   }
   const text = events.map((e) => JSON.stringify(e)).join("\n") + "\n";
-  await Deno.writeTextFile(target, text, { append: true });
+  await Deno.writeTextFile(target, text, { append: true, mode: FILE_MODE });
 }
 
 /** The journal's last `seq` (0 when there is none), so a lost log file never reuses a number. */
@@ -163,12 +190,21 @@ export async function journalLastSeq(dir: string): Promise<number> {
   return 0;
 }
 
+/**
+ * Write JSON atomically: a fresh temp file with a random name (0600, created exclusively, so
+ * nothing pre-placed is written through), renamed over the target.
+ */
 async function writeJson(dir: string, name: string, data: unknown): Promise<void> {
-  await Deno.mkdir(dir, { recursive: true });
+  await ensureDir(dir);
   const target = join(dir, name);
-  const tmp = `${target}.tmp`;
-  await Deno.writeTextFile(tmp, JSON.stringify(data));
-  await Deno.rename(tmp, target);
+  const tmp = `${target}.${crypto.randomUUID()}.tmp`;
+  try {
+    await Deno.writeTextFile(tmp, JSON.stringify(data), { createNew: true, mode: FILE_MODE });
+    await Deno.rename(tmp, target);
+  } catch (err) {
+    await Deno.remove(tmp).catch(() => {});
+    throw err;
+  }
 }
 
 /** The slice of `Deno.desktop.notifications` Fleet uses (denext's Deno Desktop runtime). */
