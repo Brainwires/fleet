@@ -16,7 +16,13 @@ import type {
   Snapshot,
   Summary,
 } from "./model.ts";
-import { GITHUB_POOL, poolFromRunnerName, poolIdOfLabel, POOLS } from "./pools.ts";
+import {
+  currentPools,
+  GITHUB_POOL,
+  labelIsShared,
+  poolFromRunnerName,
+  poolIdOfLabel,
+} from "./pools.ts";
 
 /** What the builder reads. */
 export interface SnapshotInput {
@@ -38,7 +44,13 @@ export function rowsOf(groups: readonly RepoGroup[]): JobRow[] {
   return groups.flatMap((g) => g.runs.flatMap((r) => r.jobs));
 }
 
-/** The pool cards: every known pool, any other pool a job targets, then GitHub-hosted. */
+/**
+ * The pool cards: every pool of the current list (one per host), any other pool a job targets, then
+ * GitHub-hosted. A pool whose label it shares with another gets its own numbers, never the label's
+ * merged ones: its `hosts` entry when the watchdog publishes one, else its own slots, busy runners by
+ * runner name and the label's health. Queued jobs of a shared label sit on its first pool's card
+ * (a queued job's label can't say which host takes it).
+ */
 export function poolCards(
   running: readonly JobRow[],
   queued: readonly JobRow[],
@@ -47,11 +59,12 @@ export function poolCards(
 ): PoolCard[] {
   const fresh = health.state === "ok" ? health.doc : null;
   const stale = health.state === "stale" ? health.doc : null;
-  const ids = [...POOLS.map((p) => p.id)];
+  const defs = currentPools();
+  const ids = [...defs.map((p) => p.id)];
   for (const r of [...running, ...queued]) {
     if (r.pool !== GITHUB_POOL && !ids.includes(r.pool)) ids.push(r.pool);
   }
-  // Health for a pool the variable names that we don't know (a new pool): a card too.
+  // Health for a label the pool list doesn't know (a new pool): a card too.
   for (const label of Object.keys((fresh ?? stale)?.pools ?? {})) {
     const id = poolIdOfLabel(label);
     if (!ids.includes(id)) ids.push(id);
@@ -63,10 +76,12 @@ export function poolCards(
     if (id && r.busy) busyRunners.set(id, (busyRunners.get(id) ?? 0) + 1);
   }
   const cards: PoolCard[] = ids.map((id) => {
-    const def = POOLS.find((p) => p.id === id);
+    const def = defs.find((p) => p.id === id);
     const label = def?.label ?? id;
-    const h = fresh?.pools[label] ?? null;
-    const sh = stale?.pools[label] ?? null;
+    const shared = def ? labelIsShared(label, defs) : false;
+    const host = fresh?.hosts?.[id] ?? null;
+    const h = host ?? fresh?.pools[label] ?? null;
+    const sh = stale?.hosts?.[id] ?? stale?.pools[label] ?? null;
     const run = running.filter((r) => r.pool === id).length;
     const q = queued.filter((r) => r.pool === id);
     let state: PoolCard["state"] = "unknown";
@@ -77,12 +92,14 @@ export function poolCards(
     } else if (sh) {
       reason = "health is stale";
     }
+    const ownBusy = Math.max(run, busyRunners.get(id) ?? 0);
+    const perHost = host !== null || !shared;
     return {
       id,
       title: id,
       label,
-      slots: h?.slots ?? sh?.slots ?? def?.slots ?? null,
-      busy: h?.busy ?? Math.max(run, busyRunners.get(id) ?? 0),
+      slots: perHost ? h?.slots ?? sh?.slots ?? def?.slots ?? null : def?.slots ?? null,
+      busy: perHost ? h?.busy ?? ownBusy : ownBusy,
       running: run,
       queued: q.length,
       state,

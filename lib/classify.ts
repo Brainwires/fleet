@@ -51,7 +51,8 @@ export function classifyJob(job: GhJob): JobClass | null {
       return {
         lane,
         target: "pool",
-        pool: labelPool ?? poolFromRunnerName(runner) ?? "self-hosted",
+        // The runner's name first: pools that share a label (win-x64, win-x64-brain) differ there.
+        pool: poolFromRunnerName(runner) ?? labelPool ?? "self-hosted",
       };
     }
     if (!runner && (labelPool || labels.includes("self-hosted"))) {

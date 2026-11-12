@@ -23,10 +23,12 @@ import type { AuthState, FinishedJob, Snapshot } from "./model.ts";
 import {
   CORE_REPOS,
   DEFAULT_BRANCHES,
+  derivePools,
   GITHUB_POOL,
   ORG,
   poolFromLabels,
   poolFromRunnerName,
+  setPools,
 } from "./pools.ts";
 import { buildSnapshot } from "./snapshot.ts";
 import { type HookDelivery, payloadRepo } from "./hooks.ts";
@@ -371,6 +373,13 @@ export class Poller {
       if (this.#localHealth) {
         this.#health = await this.#localHealth(this.#health).catch(() => this.#health);
       }
+      // The pool list follows the data: a pool the watchdog stops reporting leaves the cards.
+      const h = this.#health;
+      const pools = derivePools(
+        h.state === "ok" || h.state === "stale" ? h.doc : null,
+        this.#runners,
+      );
+      if (pools) setPools(pools);
       this.#prune();
       this.#ok = true;
       this.#lastError = "";

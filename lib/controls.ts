@@ -12,7 +12,7 @@
 // - Pool commands run only exact absolute paths with argv built here (no shell, no free text but a
 //   sanitized reason), for known pools only; nothing restarts a VM or deletes anything.
 
-import { DEFAULT_BRANCHES, POOLS } from "./pools.ts";
+import { currentPools, DEFAULT_BRANCHES } from "./pools.ts";
 
 /** A GitHub control. */
 export type GitHubControl =
@@ -361,7 +361,7 @@ export function poolCommand(
   paths: PoolPaths,
   uid: number,
 ): { ok: true; command: PoolCommand } | { ok: false; message: string } {
-  const known = (p: string) => POOLS.some((x) => x.id === p);
+  const known = (p: string) => currentPools().some((x) => x.id === p);
   switch (c.kind) {
     case "pause": {
       if (!known(c.pool)) return { ok: false, message: `unknown pool "${c.pool}"` };

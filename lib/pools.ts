@@ -1,6 +1,13 @@
-// Our self-hosted runner pools, as ops/runners/runners.conf defines them: the short pool name the
-// cards show, the runs-on label a job carries (the key DENEXT_POOL_HEALTH uses), the runner-name
-// prefix the launcher registers, and the slot count when the health variable doesn't say.
+// Our self-hosted runner pools: the short pool name the cards show, the runs-on label a job carries
+// (the key DENEXT_POOL_HEALTH's `pools` uses), the runner-name prefix the scheduler registers
+// (`denext-<pool>-<slot>-<epoch>`), and the slot count. The list is rebuilt from live data on every
+// poll (`derivePools` → `setPools`): the watchdog's per-pool `hosts` (the Mac mini's health.json or
+// the variable), else the variable's labels plus the org's runners. POOLS, the static list, is only
+// the first render's, before any data arrives. Several pools may share a label (win-x64 and
+// win-x64-brain on denext-windows-x64): a job's label then names the FIRST of them.
+
+import type { GhRunner } from "./github-types.ts";
+import type { PoolHealthDoc } from "./health.ts";
 
 /** One self-hosted pool. */
 export interface PoolDef {
@@ -10,11 +17,11 @@ export interface PoolDef {
   readonly label: string;
   /** The runner-name prefix (`denext-mac-arm-`), for a running job whose labels say nothing. */
   readonly runnerPrefix: string;
-  /** The slot count when the health variable is missing. */
-  readonly slots: number;
+  /** The pool's own slot count (`null`: unknown). */
+  readonly slots: number | null;
 }
 
-/** The pools, in card order. */
+/** The static pools, in card order: the list before any live data arrives. */
 export const POOLS: readonly PoolDef[] = [
   { id: "mac-arm", label: "denext-macos-arm64", runnerPrefix: "denext-mac-arm-", slots: 2 },
   { id: "mac-x64", label: "denext-macos-x64", runnerPrefix: "denext-mac-x64-", slots: 1 },
@@ -33,6 +40,12 @@ export const POOLS: readonly PoolDef[] = [
   },
   { id: "win-arm64", label: "denext-windows-arm64", runnerPrefix: "denext-win-arm64-", slots: 2 },
   { id: "win-x64", label: "denext-windows-x64", runnerPrefix: "denext-win-x64-", slots: 1 },
+  {
+    id: "win-x64-brain",
+    label: "denext-windows-x64",
+    runnerPrefix: "denext-win-x64-brain-",
+    slots: 1,
+  },
 ];
 
 /** The pseudo-pool for GitHub-hosted runners. */
@@ -56,17 +69,103 @@ export const DEFAULT_BRANCHES: ReadonlySet<string> = new Set([
   "main",
 ]);
 
-/** The pool a runs-on label names, by label. */
-const BY_LABEL = new Map(POOLS.map((p) => [p.label, p]));
+let current: readonly PoolDef[] = POOLS;
+/** The FIRST pool per label (a job's label can't say which host of a shared label takes it). */
+let byLabel = firstByLabel(POOLS);
+
+function firstByLabel(defs: readonly PoolDef[]): Map<string, PoolDef> {
+  const m = new Map<string, PoolDef>();
+  for (const d of defs) if (!m.has(d.label)) m.set(d.label, d);
+  return m;
+}
+
+/** The current pool list, in card order. */
+export function currentPools(): readonly PoolDef[] {
+  return current;
+}
+
+/** Replace the pool list (from `derivePools`); every lookup below follows it. */
+export function setPools(defs: readonly PoolDef[]): void {
+  current = defs;
+  byLabel = firstByLabel(defs);
+}
+
+/** Whether another pool shares this pool's label. */
+export function labelIsShared(label: string, defs: readonly PoolDef[] = current): boolean {
+  return defs.filter((d) => d.label === label).length > 1;
+}
+
+/** A scheduler runner name (`denext-<pool>-<slot>-<epoch>`) → its pool name, or `null`. */
+export function poolNameOfRunner(name: string): string | null {
+  return /^denext-(.+)-\d+-\d+$/.exec(name)?.[1] ?? null;
+}
+
+/**
+ * The pool list from live data, or `null` when there is none yet (keep the current list):
+ * 1. the watchdog's per-pool `hosts` (the mini's health.json merged in, or the variable's), in
+ *    its order: exactly the scheduler's pools;
+ * 2. else (an older watchdog) per label of the variable's `pools`: the pools its registered
+ *    runners' names show, plus the static pools on that label, else one pool named for the label.
+ */
+export function derivePools(
+  doc: PoolHealthDoc | null,
+  runners: readonly GhRunner[] | null,
+): PoolDef[] | null {
+  if (!doc) return null;
+  const known = new Map(POOLS.map((p) => [p.id, p]));
+  const hosts = Object.entries(doc.hosts ?? {});
+  if (hosts.length > 0) {
+    const out: PoolDef[] = [];
+    for (const [id, h] of hosts) {
+      const label = h.label ?? known.get(id)?.label;
+      if (!label) continue;
+      out.push({
+        id,
+        label,
+        runnerPrefix: h.runnerPrefix ?? `denext-${id}-`,
+        slots: h.slots ?? known.get(id)?.slots ?? null,
+      });
+    }
+    return out;
+  }
+  const labels = Object.keys(doc.pools);
+  if (labels.length === 0) return null;
+  const order = (label: string) => {
+    const i = POOLS.findIndex((p) => p.label === label);
+    return i < 0 ? POOLS.length : i;
+  };
+  labels.sort((a, b) => order(a) - order(b) || a.localeCompare(b));
+  const out: PoolDef[] = [];
+  for (const label of labels) {
+    const ids: string[] = POOLS.filter((p) => p.label === label).map((p) => p.id);
+    for (const r of runners ?? []) {
+      const id = poolNameOfRunner(r.name);
+      if (id && !ids.includes(id) && (r.labels ?? []).some((l) => l.name === label)) ids.push(id);
+    }
+    if (ids.length === 0) ids.push(label);
+    const merged = doc.pools[label];
+    for (const id of ids) {
+      out.push({
+        id,
+        label,
+        runnerPrefix: known.get(id)?.runnerPrefix ?? `denext-${id}-`,
+        slots: ids.length === 1
+          ? merged.slots ?? known.get(id)?.slots ?? null
+          : known.get(id)?.slots ?? null,
+      });
+    }
+  }
+  return out;
+}
 
 /** The pool for a runs-on label, or `undefined` for a label that isn't one of ours. */
 export function poolByLabel(label: string): PoolDef | undefined {
-  return BY_LABEL.get(label);
+  return byLabel.get(label);
 }
 
 /** The short name for a pool label (`denext-macos-arm64` → `mac-arm`); an unknown label as is. */
 export function poolIdOfLabel(label: string): string {
-  return BY_LABEL.get(label)?.id ?? label;
+  return byLabel.get(label)?.id ?? label;
 }
 
 /**
@@ -75,7 +174,7 @@ export function poolIdOfLabel(label: string): string {
  */
 export function poolFromLabels(labels: readonly string[]): string | null {
   for (const label of labels) {
-    const known = BY_LABEL.get(label);
+    const known = byLabel.get(label);
     if (known) return known.id;
   }
   const ours = labels.find((l) => l.startsWith("denext-"));
@@ -88,7 +187,7 @@ export function poolFromLabels(labels: readonly string[]): string | null {
  */
 export function poolFromRunnerName(name: string): string | null {
   let best: PoolDef | undefined;
-  for (const p of POOLS) {
+  for (const p of current) {
     if (
       name.startsWith(p.runnerPrefix) && (!best || p.runnerPrefix.length > best.runnerPrefix.length)
     ) {

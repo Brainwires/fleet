@@ -63,7 +63,7 @@ Deno.test("view: counts, pools, lanes, alerts and finished jobs from the fixture
   assertStringIncludes(html, "sev-alert");
   assertEquals(one(screen.container, ".count-run .num")?.textContent, "2");
   assertEquals(one(screen.container, ".count-q .num")?.textContent, "3");
-  // One card per pool plus GitHub-hosted, in order.
+  // One card per pool (per host: win-x64 and win-x64-brain share a label) plus GitHub-hosted.
   const names = all(screen.container, ".pool-name").map((n) => n.textContent);
   assertEquals(names, [
     "mac-arm",
@@ -73,6 +73,7 @@ Deno.test("view: counts, pools, lanes, alerts and finished jobs from the fixture
     "linux-x64-docker",
     "win-arm64",
     "win-x64",
+    "win-x64-brain",
     "GitHub-hosted",
   ]);
   assertStringIncludes(html, "pool pool-unhealthy");

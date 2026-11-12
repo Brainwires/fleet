@@ -1,6 +1,7 @@
 // DENEXT_POOL_HEALTH: the org variable the runner watchdog publishes (ops/runners/README.md).
 // Schema v1: {"v":1,"checked_at":epoch,"pools":{"<label>":{ok,reason,since,slots,busy,paused}},
-// "alerts":[{at,pool,msg}]}. The variable may be missing (404), garbage, or stale (the watchdog
+// "hosts":{"<pool>":{label,ok,reason,since,slots,busy,paused,runner_prefix}},"alerts":[{at,pool,msg}]}.
+// `pools` merges the pools that share a label; `hosts` (newer watchdogs) keeps each pool apart. The variable may be missing (404), garbage, or stale (the watchdog
 // down); every case parses to a result the UI can show, never a throw.
 
 /** One pool's health as published. */
@@ -12,6 +13,14 @@ export interface PoolHealth {
   readonly slots: number | null;
   readonly busy: number | null;
   readonly paused: boolean;
+}
+
+/** One pool (host) as published, unmerged: the `hosts` map, or the Mac mini's health.json. */
+export interface HostHealth extends PoolHealth {
+  /** The runs-on label (`null` when the source doesn't say). */
+  readonly label: string | null;
+  /** The runner-name prefix (`denext-win-x64-brain-`), `null` when the source doesn't say. */
+  readonly runnerPrefix: string | null;
 }
 
 /** One alert line. */
@@ -29,6 +38,8 @@ export interface PoolHealthDoc {
   readonly checkedAt: number;
   /** By runs-on label. */
   readonly pools: Readonly<Record<string, PoolHealth>>;
+  /** By pool name (`win-x64-brain`), in the watchdog's order; empty from an older watchdog. */
+  readonly hosts: Readonly<Record<string, HostHealth>>;
   readonly alerts: readonly HealthAlert[];
 }
 
@@ -82,6 +93,22 @@ export function parsePoolHealth(raw: string | null, now: number): HealthState {
       };
     }
   }
+  const hosts: Record<string, HostHealth> = {};
+  if (isObj(data.hosts)) {
+    for (const [id, p] of Object.entries(data.hosts)) {
+      if (!isObj(p) || typeof p.ok !== "boolean") continue;
+      hosts[id] = {
+        ok: p.ok,
+        reason: str(p.reason),
+        since: ms(num(p.since)),
+        slots: num(p.slots),
+        busy: num(p.busy),
+        paused: p.paused === true,
+        label: str(p.label) || null,
+        runnerPrefix: str(p.runner_prefix) || null,
+      };
+    }
+  }
   const alerts: HealthAlert[] = [];
   if (Array.isArray(data.alerts)) {
     for (const a of data.alerts) {
@@ -93,6 +120,6 @@ export function parsePoolHealth(raw: string | null, now: number): HealthState {
     }
   }
   alerts.sort((a, b) => b.at - a.at);
-  const doc: PoolHealthDoc = { checkedAt: checked * 1000, pools, alerts };
+  const doc: PoolHealthDoc = { checkedAt: checked * 1000, pools, hosts, alerts };
   return { state: now - doc.checkedAt > HEALTH_STALE_MS ? "stale" : "ok", doc };
 }
