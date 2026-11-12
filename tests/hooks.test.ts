@@ -253,3 +253,27 @@ Deno.test("hooks: deliveries feed the state and the event log; the timer follows
   assertEquals(svc.events(0).events.length, 2);
   svc.stop();
 });
+
+Deno.test("spool: complete lines become deliveries; partial lines wait; dedupe; rotation", async () => {
+  const { readSpool, spoolLine } = await import("../lib/hooks.ts");
+  const line = (id: string) =>
+    JSON.stringify({
+      received_at: "2026-11-11T17:30:00Z",
+      delivery: id,
+      event: "workflow_job",
+      payload: JOB,
+    }) + "\n";
+  let file = new TextEncoder().encode(line("a") + line("b").slice(0, 20));
+  const cursor = { offset: 0, partial: "", seen: new Set<string>() };
+  const read = () => readSpool(cursor, file.length, (from) => file.subarray(from));
+  assertEquals(read().map((d) => d.id), ["a"]);
+  file = new TextEncoder().encode(line("a") + line("b") + line("a") + "garbage\n");
+  assertEquals(read().map((d) => d.id), ["b"], "the rest of b, a again deduped, garbage skipped");
+  assertEquals(read(), []);
+  // Rotated: the file is shorter than the offset, so it is read from the start.
+  file = new TextEncoder().encode(line("c"));
+  assertEquals(read().map((d) => d.id), ["c"]);
+  assertEquals(spoolLine('{"delivery":"x","event":"push","payload":{}}'), null);
+  assertEquals(spoolLine("{"), null);
+  assertEquals(spoolLine(line("z"))?.receivedAt, Date.parse("2026-11-11T17:30:00Z"));
+});

@@ -199,3 +199,64 @@ export function payloadRepo(p: Record<string, unknown>): string | null {
   const r = p.repository as { full_name?: unknown } | undefined;
   return typeof r?.full_name === "string" ? r.full_name : null;
 }
+
+/**
+ * One line of the receiver's spool (`~/.denext-runners/hooks/events.jsonl`, written by the
+ * receiver after verifying the signature) as a delivery, or `null` for anything else.
+ */
+export function spoolLine(line: string): HookDelivery | null {
+  let v: unknown;
+  try {
+    v = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  const r = v as Record<string, unknown> | null;
+  if (!r || typeof r.delivery !== "string" || !r.delivery) return null;
+  if (r.event !== "workflow_job" && r.event !== "workflow_run") return null;
+  if (typeof r.payload !== "object" || r.payload === null || Array.isArray(r.payload)) return null;
+  const at = typeof r.received_at === "string" ? Date.parse(r.received_at) : NaN;
+  return {
+    id: r.delivery,
+    event: r.event,
+    receivedAt: Number.isFinite(at) ? at : 0,
+    payload: r.payload as Record<string, unknown>,
+  };
+}
+
+/** A spool reader's state: the byte offset read so far, and the delivery ids seen. */
+export interface SpoolCursor {
+  offset: number;
+  partial: string;
+  readonly seen: Set<string>;
+}
+
+/**
+ * Feed new spool bytes (from `cursor.offset` on) through `cursor`: complete lines become deliveries,
+ * de-duplicated by id; a file shorter than the offset was rotated, so reading restarts at 0.
+ */
+export function readSpool(
+  cursor: SpoolCursor,
+  size: number,
+  chunk: (from: number) => Uint8Array,
+): HookDelivery[] {
+  if (size < cursor.offset) {
+    cursor.offset = 0;
+    cursor.partial = "";
+  }
+  if (size === cursor.offset) return [];
+  const bytes = chunk(cursor.offset);
+  cursor.offset += bytes.length;
+  const text = cursor.partial + new TextDecoder().decode(bytes);
+  const lines = text.split("\n");
+  cursor.partial = lines.pop() ?? "";
+  const out: HookDelivery[] = [];
+  for (const l of lines) {
+    const d = spoolLine(l);
+    if (!d || cursor.seen.has(d.id)) continue;
+    cursor.seen.add(d.id);
+    if (cursor.seen.size > DEDUPE_KEEP) cursor.seen.delete(cursor.seen.values().next().value!);
+    out.push(d);
+  }
+  return out;
+}

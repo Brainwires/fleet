@@ -10,7 +10,7 @@
     "test": "deno run -A ../../../denext/cli.ts test",
     "check": "deno fmt --check && deno lint && deno task test",
     "icons": "deno run --allow-write=icons,public tools/make-icons.ts",
-    "hooks": "deno run --allow-net=127.0.0.1:8789 --allow-run=/usr/bin/security --allow-read --allow-env=HOME --allow-write=$HOME/.denext-runners/hooks hooks-only.ts"
+    "hooks": "deno run --allow-net=127.0.0.1:8789 --allow-run=/usr/bin/security --allow-env=HOME --allow-read=$HOME/Library/LaunchAgents/com.brainwires.denext-ci-hooks-tunnel.plist,/Library/LaunchDaemons/com.brainwires.denext-ci-hooks-tunnel.plist,/Library/LaunchAgents/com.brainwires.denext-ci-hooks-tunnel.plist,$HOME/.denext-runners/hooks --allow-write=$HOME/.denext-runners/hooks hooks-only.ts"
   },
   "allowScripts": {
     "deny": [

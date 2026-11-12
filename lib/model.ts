@@ -158,6 +158,8 @@ export interface Snapshot {
   readonly hooks: {
     readonly state: "live" | "stale" | "off";
     readonly lastDeliveryAt: number | null;
+    /** Received here, or read from the standalone receiver's spool. */
+    readonly via?: "listener" | "spool";
   };
 }
 

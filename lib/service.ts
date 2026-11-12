@@ -74,7 +74,7 @@ export interface FleetService {
   /** Called after every poll (and auth change). Returns the unsubscribe. */
   onChange(fn: (snap: Snapshot) => void): () => void;
   /** Webhooks: whether this instance receives them (the receiver is listening). */
-  setHooksEnabled(on: boolean): void;
+  setHooksEnabled(on: boolean, via?: "listener" | "spool"): void;
   /** A verified delivery arrived (any event, ping included): the "last delivery" time. */
   hookVerified(at: number): void;
   /** Apply a verified workflow_job / workflow_run delivery; resolves once it's in the log. */
@@ -132,6 +132,7 @@ export function createFleetService(deps: ServiceDeps): FleetService {
   let tracker: TrackerState = restoreTracker(null, now());
   let prefs: FleetPrefs = {};
   let hooksEnabled = false;
+  let hooksVia: "listener" | "spool" = "listener";
   let lastDelivery: number | null = null;
   const hooks = () => hooksState(hooksEnabled, lastDelivery, now());
   const paused = () => prefs.notificationsPaused === true;
@@ -171,7 +172,7 @@ export function createFleetService(deps: ServiceDeps): FleetService {
     repos: [],
     eventSeq: log.lastSeq,
     notificationsPaused: paused(),
-    hooks: { state: hooks(), lastDeliveryAt: lastDelivery },
+    hooks: { state: hooks(), lastDeliveryAt: lastDelivery, via: hooksVia },
   });
 
   const snapshot = (): Snapshot => {
@@ -184,7 +185,7 @@ export function createFleetService(deps: ServiceDeps): FleetService {
       ...poller.snapshot(),
       eventSeq: log.lastSeq,
       notificationsPaused: paused(),
-      hooks: { state: hooks(), lastDeliveryAt: lastDelivery },
+      hooks: { state: hooks(), lastDeliveryAt: lastDelivery, via: hooksVia },
     };
   };
 
@@ -396,8 +397,9 @@ export function createFleetService(deps: ServiceDeps): FleetService {
       listeners.add(fn);
       return () => listeners.delete(fn);
     },
-    setHooksEnabled(on) {
+    setHooksEnabled(on, how = "listener") {
       hooksEnabled = on;
+      hooksVia = how;
       emit();
       schedule();
     },

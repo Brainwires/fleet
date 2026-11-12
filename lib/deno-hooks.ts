@@ -3,7 +3,14 @@
 // Anywhere else it stays off and Fleet polls as before. The secret is read into memory by running
 // `/usr/bin/security` (an exact path); it is never logged, written, or shown.
 
-import { createHookHandler, HOOK_HOST, HOOK_PORT, type HookDelivery } from "./hooks.ts";
+import {
+  createHookHandler,
+  HOOK_HOST,
+  HOOK_PORT,
+  type HookDelivery,
+  readSpool,
+  type SpoolCursor,
+} from "./hooks.ts";
 
 /** The keychain item. */
 export const SECRET_SERVICE = "denext-ci-hooks";
@@ -98,6 +105,59 @@ export async function appendHookLine(d: HookDelivery, dir = defaultLogDir()): Pr
 function defaultLogDir(): string | null {
   const h = home();
   return h ? `${h}/${HOOKS_LOG_DIR}` : null;
+}
+
+/**
+ * Tail the receiver's spool (another process holds the port: `denext task hooks`, or a launchd
+ * receiver): from its current end, every 2 s, rotation-aware. Returns the stop function, or `null`
+ * when there is no spool.
+ */
+export async function tailSpool(
+  onDelivery: (d: HookDelivery) => void,
+  dir = defaultLogDir(),
+  everyMs = 2000,
+): Promise<(() => void) | null> {
+  if (!dir) return null;
+  const path = `${dir}/${HOOKS_LOG}`;
+  let size: number;
+  try {
+    size = (await Deno.stat(path)).size;
+  } catch {
+    return null;
+  }
+  const cursor: SpoolCursor = { offset: size, partial: "", seen: new Set() };
+  let busy = false;
+  const tick = async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      const st = await Deno.stat(path);
+      const f = await Deno.open(path, { read: true });
+      try {
+        const deliveries = readSpool(cursor, st.size, (from) => {
+          const len = Math.min(st.size - from, 4 * 1024 * 1024);
+          const buf = new Uint8Array(len);
+          f.seekSync(from, Deno.SeekMode.Start);
+          let n = 0;
+          while (n < len) {
+            const r = f.readSync(buf.subarray(n));
+            if (r === null || r === 0) break;
+            n += r;
+          }
+          return buf.subarray(0, n);
+        });
+        for (const d of deliveries) onDelivery(d);
+      } finally {
+        f.close();
+      }
+    } catch {
+      // Mid-rotation or briefly missing: the next tick reads it.
+    } finally {
+      busy = false;
+    }
+  };
+  const id = setInterval(() => void tick(), everyMs);
+  return () => clearInterval(id);
 }
 
 /** A running receiver. */

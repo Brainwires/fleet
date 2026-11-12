@@ -214,8 +214,9 @@ function FinishedLine(
 
 /** "hooks: live / stale (last delivery N min ago) / off". */
 function HooksBadge({ hooks, now }: { hooks: Snapshot["hooks"]; now: number }) {
+  const via = hooks.via === "spool" ? " (via receiver)" : "";
   const text = hooks.state === "live"
-    ? "hooks: live"
+    ? `hooks: live${via}`
     : hooks.state === "stale"
     ? `hooks: stale (${
       hooks.lastDeliveryAt === null

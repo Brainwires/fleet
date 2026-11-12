@@ -15,7 +15,13 @@ import {
 import { CHANGED_EVENT, type Snapshot } from "../lib/model.ts";
 import { createFleetService, type FleetService } from "../lib/service.ts";
 import type { WindowManager } from "../lib/tray-driver.ts";
-import { hooksAvailable, readHookSecret, type Receiver, startReceiver } from "../lib/deno-hooks.ts";
+import {
+  hooksAvailable,
+  readHookSecret,
+  type Receiver,
+  startReceiver,
+  tailSpool,
+} from "../lib/deno-hooks.ts";
 
 let service: FleetService | undefined;
 let windows: WindowManager | undefined;
@@ -49,10 +55,14 @@ function start(host: DesktopExtensionHost): void {
   for (const fn of waiting.splice(0)) fn(service);
   service.start().catch((err) => console.error("fleet: start failed:", errName(err)));
   void startHooks(service);
-  host.onAppQuit(() => receiver?.stop());
+  host.onAppQuit(() => {
+    stopSpool?.();
+    return receiver?.stop();
+  });
 }
 
 let receiver: Receiver | null = null;
+let stopSpool: (() => void) | undefined;
 
 /**
  * GitHub webhooks, only on the machine that runs the tunnel and holds the secret (the Mac mini):
@@ -67,8 +77,16 @@ async function startHooks(s: FleetService): Promise<void> {
     onVerified: (_event, at) => s.hookVerified(at),
     onReject: (why) => console.warn(`fleet: hooks: rejected ${why}`),
   });
-  if (!receiver) console.warn("fleet: hooks: 127.0.0.1:8789 is taken; polling only");
-  s.setHooksEnabled(receiver !== null);
+  if (receiver) return s.setHooksEnabled(true, "listener");
+  // The port is held by the standalone receiver (`denext task hooks`): read its spool instead.
+  const stop = await tailSpool((d) => void s.applyHook(d));
+  if (stop) {
+    stopSpool = stop;
+    s.setHooksEnabled(true, "spool");
+  } else {
+    console.warn("fleet: hooks: 127.0.0.1:8789 is taken and there is no spool; polling only");
+    s.setHooksEnabled(false);
+  }
 }
 
 /** An error's name only: a message could, in principle, echo a request. */
