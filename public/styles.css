@@ -607,9 +607,10 @@ a:hover {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(290px, 360px);
   min-height: 0;
 }
-/* Nothing queued: the Queued lane shrinks to a narrow column and Running takes the width. */
+/* Nothing queued: the Queued lane narrows so Running takes the width, but keeps a usable minimum
+   (its title, count and "Nothing queued." stay on one line and the column doesn't jump around). */
 .lanes-q-empty {
-  grid-template-columns: minmax(0, 1fr) 150px minmax(290px, 360px);
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 0.4fr) minmax(290px, 360px);
 }
 .lane-collapsed {
   background: var(--surface-2);
