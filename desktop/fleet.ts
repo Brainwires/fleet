@@ -85,10 +85,9 @@ function start(host: DesktopExtensionHost): void {
     }
   });
   for (const fn of waiting.splice(0)) fn(service);
-  const started = service.start();
-  started.catch((err) => console.error("fleet: start failed:", errName(err)));
-  // Webhooks follow the settings loaded by start() (a change applies at the next launch).
-  void started.then(() => startHooks(service!, dir), () => {});
+  service.start().catch((err) => console.error("fleet: start failed:", errName(err)));
+  // Webhooks follow the startup settings (a change applies at the next launch).
+  void service.settingsReady().then(() => startHooks(service!, dir), () => {});
   host.onAppQuit(() => {
     stopSpool?.();
     return receiver?.stop();

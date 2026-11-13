@@ -150,6 +150,8 @@ export interface FleetService {
   github(): { client: GitHubClient; poller: Poller; canWrite: boolean } | null;
   /** The settings in force (loaded by `start()`). */
   settings(): FleetSettings;
+  /** Resolves once the startup settings are loaded (before the first poll). */
+  settingsReady(): Promise<void>;
   /**
    * Validate, save and apply new settings; the watched repos are re-read and a poll follows.
    * Resolves the problems instead when they don't validate (nothing changes then).
@@ -689,6 +691,7 @@ export function createFleetService(deps: ServiceDeps): FleetService {
     },
     github: () => (client && poller ? { client, poller, canWrite: auth !== "public" } : null),
     settings: () => activeSettings(),
+    settingsReady: () => loadSettings(),
     async saveSettings(raw) {
       const r = validateSettings(raw);
       if (!r.ok) return r;
