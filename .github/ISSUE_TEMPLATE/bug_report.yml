@@ -1,0 +1,54 @@
+name: Bug report
+description: Something in Fleet does not work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never paste a GitHub token, webhook secret or other credential.** Redact them from logs
+        and screenshots. For a security problem, do not file an issue: see SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: Fleet version
+      description: From the About / tray menu, or `version` in deno.json.
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Windows
+        - Linux
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version and architecture
+      placeholder: macOS 15.2 arm64
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: The relevant lines from the event log or the console. Redact secrets.
+      render: text

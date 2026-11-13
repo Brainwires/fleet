@@ -441,3 +441,13 @@ lanes and the GitHub-hosted panel show `hosting gh-intel-helper-1 · idle`, or
 one of that slot (`helper (1)` ↔ `gh-intel-helper-1-…`). A job on such a runner counts in the
 `mac-x64` pool, marked "(GitHub helper)". The rules are `RUNNER_HOSTS` in `lib/pools.ts`
 (`{ repo, workflow, runnerPrefix, pool }`); add an entry for another workflow of this kind.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT)
+at your option.
+
+## Contributing and security
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and conventions, and [SECURITY.md](SECURITY.md) for
+reporting a vulnerability privately.

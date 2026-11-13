@@ -1,0 +1,33 @@
+name: Feature request
+description: Suggest an improvement to Fleet
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never paste a GitHub token, webhook secret or other credential** into this form.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating systems affected
+      multiple: true
+      options:
+        - macOS
+        - Windows
+        - Linux
