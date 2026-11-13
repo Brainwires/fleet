@@ -189,9 +189,38 @@ with `~/`.
   shrinks to a narrow column and Running takes the width.
 - **Side**: the pool-health variable's recent alerts (each clamped to three lines; a click expands
   it, the full text is also the tooltip), and jobs finished in the last 30 min with ✓ / ✕ / ⊘.
-- A click on a run or job opens it on github.com in the system browser.
+- A click on a run or job opens it on github.com: in the in-app GitHub browser where the window can
+  host embedded web views, else in the system browser (see below). Links from the wizard, the
+  Settings view and the token screen always open in the system browser. Only `https://github.com/`
+  links open at all.
 - A click on a pool card (or its name, a button) or on the GitHub-hosted panel opens that pool's
   [detail screen](#pool-detail-screens).
+
+### In-app GitHub browser
+
+Where denext's embedded web view is available (`createWebView` from `denext/desktop/window`, on an
+engine that reports `webViewCapabilities().supported`), a GitHub link opens in a panel that covers
+the main view instead of leaving Fleet. On a denext or engine without it, or if the view can't be
+created, the link opens in the system browser as before; Fleet checks at run time, so the same build
+uses the panel as soon as the runtime has it.
+
+- **Toolbar**: Back, Forward, Reload, **Fleet** (back to the main view), the page's title and URL,
+  and **Open in browser** (the current page in the system browser). A bar under the toolbar shows
+  while a page loads; a failed load shows its error there.
+- **One view, kept**: every GitHub link navigates the same view. Leaving the panel hides the view
+  without closing it, so the next link reopens it at once; it closes when the window does. The view
+  is hidden while the wizard, the Settings view or the token screen replaces the main view (a native
+  view draws above all of the page's HTML).
+- **Session**: the view keeps its cookies in its own persistent storage partition (`fleet-github`,
+  apart from Fleet's page), so a GitHub sign-in survives restarts. Pop-ups open in the same view,
+  downloads go to the system browser, and camera, microphone, location and notification prompts are
+  refused.
+- **Keys** (Ctrl instead of Cmd on Windows and Linux): Cmd+[ and Cmd+] go back and forward whether
+  the keyboard is in GitHub's page or in Fleet's toolbar (as app-menu items while GitHub's page has
+  it). Esc returns to Fleet only while the keyboard is in Fleet's own part of the panel (click the
+  toolbar first): in GitHub's page, Esc stays with GitHub's own menus and dialogs. Fleet sets its
+  app menu (Edit and Go, the editing items kept) the first time the panel opens; on Windows and
+  Linux that menu is a menu bar in the window.
 
 ## Pool detail screens
 
@@ -564,6 +593,7 @@ this repo.
 | `lib/dock-policy.ts`                   | Whether the Dock icon follows the window (macOS: not when installed under `/Applications`)               |
 | `lib/quit-guard.ts`                    | Which quits quit: the tray's Quit and the session end; any other closes to the tray                      |
 | `lib/shortcuts.ts`                     | Cmd+W / Cmd+Q in the window close it (an accessory app has no menu bar)                                  |
+| `app/web-panel/`                       | The in-app GitHub browser: the web view adapter (`engine.ts`), the browser, its panel and app menu       |
 | `lib/icons.ts`, `png.ts`               | The tray and app icons, drawn in code (`denext task icons`)                                              |
 | `mcp/fleet-mcp.ts`, `mcp/queries.ts`   | The read-only MCP server for agents (stdio) and its tools' answers                                       |
 | `app/`                                 | The page: `fleet-app.tsx` (state), `fleet-view.tsx`, `event-log.tsx`, `controls.tsx`, `token-screen.tsx` |
