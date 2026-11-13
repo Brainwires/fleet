@@ -54,7 +54,7 @@ webhook secret is shared only with GitHub.
 flowchart LR
   GH["GitHub<br/>org or repo webhook"] -- "HTTPS POST<br/>X-Hub-Signature-256" --> EDGE["Public endpoint<br/>https://&lt;your-hostname&gt;/github/hooks<br/>(e.g. Cloudflare Tunnel)"]
   EDGE -- "only the path /github/hooks;<br/>everything else 404" --> RX["Receiver<br/>127.0.0.1:8789<br/>(Fleet itself, or hooks-only.ts)"]
-  RX -- "verified deliveries" --> SPOOL["Spool<br/>~/.denext-runners/hooks/events.jsonl"]
+  RX -- "verified deliveries" --> SPOOL["Spool<br/><spool>/events.jsonl"]
   RX -- "in-process (Fleet is the receiver)" --> FLEET["Fleet"]
   SPOOL -- "tailed every 2 s<br/>(a separate receiver holds the port)" --> FLEET
 ```
@@ -68,7 +68,7 @@ GitHub ──HTTPS──▶ https://<your-hostname>/github/hooks   (tunnel / rev
                   http://127.0.0.1:8789/github/hooks      (receiver, loopback only)
                         │  checks route, type, size, signature, replay, duplicates
                         ▼
-                  ~/.denext-runners/hooks/events.jsonl    (spool, 0600, rotated at 20 MB)
+                  <spool>/events.jsonl    (spool, 0600, rotated at 20 MB)
                         │
                         ▼
                       Fleet                               ("hooks: live")
@@ -123,25 +123,26 @@ before processing (GitHub waits at most 10 s; the receiver answers in well under
 | Cloudflare Tunnel (or another endpoint) as a service           | yes   | yes          | yes          |
 | GitHub webhook, verification with `curl` and Recent Deliveries | yes   | yes          | yes          |
 
-Current requirements and fixed values, all set in code (they become settings with the 1.0 setup
-wizard):
+Everything is a setting: the `webhooks` section of `fleet-settings.json`, edited in Fleet's Settings
+view (Integrations → Webhooks) or the first-run wizard. A change applies the next time Fleet starts.
 
-- **Fleet only turns webhooks on when a launchd job file for the tunnel exists** under the label in
-  `TUNNEL_LABEL` (`lib/deno-hooks.ts`). Fleet checks only that the `.plist` file exists, in
-  `~/Library/LaunchAgents/`, `/Library/LaunchAgents/` or `/Library/LaunchDaemons/`; it doesn't check
-  that the tunnel runs or which tunnel it is. Below, `<tunnel-label>` means that exact value.
-  `cloudflared service install` uses a different label, so on macOS run the tunnel with the plist in
-  [Step 3](#run-the-tunnel-as-a-service) instead.
-- **The secret is read from the macOS login keychain** by `/usr/bin/security`: service
-  `denext-ci-hooks`, account `github-webhook-secret`.
-- **The port is 8789 and the path is `/github/hooks`.** Neither is configurable.
-- **The spool is `~/.denext-runners/hooks/`** (from `$HOME`).
-- **Fleet polls one organization**, the one in `ORG` (`lib/pools.ts`). Deliveries are applied for
-  whatever repository they name, so point the webhook at that same organization (or its
-  repositories) to keep webhooks and polling in agreement.
-- **A packaged Fleet may write the spool only at the path baked in at build time** (the builder's
-  `$HOME`). Build Fleet on the account that runs it, or run the standalone receiver (Fleet then only
-  reads the spool).
+| Setting                      | What                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Default                         |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| `webhooks.enabled`           | Receive webhooks on this machine at all                                                                                                                                                                                                                                                                                                                                                                                                                     | off                             |
+| `webhooks.port`              | The loopback port (the path is always `/github/hooks`)                                                                                                                                                                                                                                                                                                                                                                                                      | `8789`                          |
+| `webhooks.spoolDir`          | The spool folder (`~/` allowed)                                                                                                                                                                                                                                                                                                                                                                                                                             | `hooks/` in Fleet's data folder |
+| `webhooks.secret`            | Where the secret is: `{ "source": "macos-keychain", "service": …, "account": … }` (the login keychain, read by `/usr/bin/security`), or `{ "source": "secure-store" }` (Fleet's own keychain namespace, key `github-webhook-secret`; setting it from the UI comes with the cross-platform work)                                                                                                                                                             | `secure-store`                  |
+| `webhooks.requireLaunchdJob` | macOS: turn webhooks on only while a launchd job file with this label exists (the tunnel's), in `~/Library/LaunchAgents/`, `/Library/LaunchAgents/` or `/Library/LaunchDaemons/`. Fleet checks only that the `.plist` exists, not that the tunnel runs. Below, `<tunnel-label>` means this value; with it set, run the tunnel with the plist in [Step 3](#run-the-tunnel-as-a-service) rather than `cloudflared service install` (which uses another label) | none                            |
+
+Also:
+
+- **Fleet watches the owners in its settings.** A delivery is applied only for a repository it
+  watches, so point the webhook at those organizations (or their repositories).
+- **A packaged Fleet may write only inside its data folder**, plus, in an internal build
+  (`FLEET_INTERNAL=1`), the spool folder its build machine's local config names. With a spool
+  elsewhere, run the standalone receiver (Fleet then only reads the spool).
+- Below, `<spool>` is the spool folder and `fleet-webhooks` / `github-webhook-secret` the keychain
+  service and account; use the values in your settings.
 
 ## Prerequisites
 
@@ -161,19 +162,20 @@ wizard):
 
 Placeholders used below:
 
-| Placeholder        | Meaning                                                    | Example                         |
-| ------------------ | ---------------------------------------------------------- | ------------------------------- |
-| `<org>`            | your GitHub organization                                   | `example-org`                   |
-| `<owner>/<repo>`   | a repository, for a repository-level webhook               | `example-org/app`               |
-| `<your-hostname>`  | the public host name GitHub will call                      | `ci-hooks.example.com`          |
-| `<tunnel-name>`    | the Cloudflare Tunnel's name                               | `fleet-hooks`                   |
-| `<tunnel-id>`      | the tunnel's UUID, printed by `cloudflared tunnel create`  | `6ff42ae2-…`                    |
-| `<tunnel-label>`   | the launchd label Fleet checks for (`TUNNEL_LABEL`, macOS) | (see `lib/deno-hooks.ts`)       |
-| `<receiver-label>` | your label for the standalone receiver's service           | `com.example.fleet-hooks`       |
-| `<fleet-checkout>` | the absolute path of Fleet's source folder                 | `/Users/you/src/fleet`          |
-| `<deno>`           | the absolute path of `deno` (`which deno` / `where deno`)  | `/opt/homebrew/bin/deno`        |
-| `<cloudflared>`    | the absolute path of `cloudflared`                         | `/opt/homebrew/bin/cloudflared` |
-| `<user>`, `<home>` | your user name and home folder                             | `you`, `/Users/you`             |
+| Placeholder        | Meaning                                                   | Example                         |
+| ------------------ | --------------------------------------------------------- | ------------------------------- |
+| `<org>`            | your GitHub organization                                  | `example-org`                   |
+| `<owner>/<repo>`   | a repository, for a repository-level webhook              | `example-org/app`               |
+| `<your-hostname>`  | the public host name GitHub will call                     | `ci-hooks.example.com`          |
+| `<tunnel-name>`    | the Cloudflare Tunnel's name                              | `fleet-hooks`                   |
+| `<tunnel-id>`      | the tunnel's UUID, printed by `cloudflared tunnel create` | `6ff42ae2-…`                    |
+| `<tunnel-label>`   | the tunnel's launchd label (`webhooks.requireLaunchdJob`) | `com.example.fleet-tunnel`      |
+| `<spool>`          | the spool folder (`webhooks.spoolDir`)                    | `<home>/.fleet/hooks`           |
+| `<receiver-label>` | your label for the standalone receiver's service          | `com.example.fleet-hooks`       |
+| `<fleet-checkout>` | the absolute path of Fleet's source folder                | `/Users/you/src/fleet`          |
+| `<deno>`           | the absolute path of `deno` (`which deno` / `where deno`) | `/opt/homebrew/bin/deno`        |
+| `<cloudflared>`    | the absolute path of `cloudflared`                        | `/opt/homebrew/bin/cloudflared` |
+| `<user>`, `<home>` | your user name and home folder                            | `you`, `/Users/you`             |
 
 ## Step 1: the webhook secret
 
@@ -203,13 +205,13 @@ don't raise a keychain prompt (a background service can't answer one). With `-w`
 `security` prompts for the secret (paste it twice), so it never lands in your shell history:
 
 ```sh
-security add-generic-password -U -s denext-ci-hooks -a github-webhook-secret -l "Fleet webhook secret" -w
+security add-generic-password -U -s fleet-webhooks -a github-webhook-secret -l "Fleet webhook secret" -w
 ```
 
 Check that it exists (prints the item's attributes, not the secret):
 
 ```sh
-security find-generic-password -s denext-ci-hooks -a github-webhook-secret >/dev/null && echo stored
+security find-generic-password -s fleet-webhooks -a github-webhook-secret >/dev/null && echo stored
 ```
 
 Use the **login** keychain (the default) and run the receiver as a **LaunchAgent** of the same user
@@ -223,8 +225,8 @@ planned store is the Secret Service, with the same service and account names. St
 the value:
 
 ```sh
-secret-tool store --label="Fleet webhook secret" service denext-ci-hooks account github-webhook-secret
-secret-tool lookup service denext-ci-hooks account github-webhook-secret >/dev/null && echo stored
+secret-tool store --label="Fleet webhook secret" service fleet-webhooks account github-webhook-secret
+secret-tool lookup service fleet-webhooks account github-webhook-secret >/dev/null && echo stored
 ```
 
 The keyring must be unlocked in the session that runs the receiver (a desktop login unlocks it).
@@ -232,21 +234,21 @@ The keyring must be unlocked in the session that runs the receiver (a desktop lo
 ### Windows: Credential Manager
 
 **Planned for 1.0 — not working yet on Windows.** Fleet doesn't read a secret on Windows today. The
-planned store is Windows Credential Manager, a generic credential named `denext-ci-hooks` with user
+planned store is Windows Credential Manager, a generic credential named `fleet-webhooks` with user
 `github-webhook-secret`. With `/pass` and no value, `cmdkey` prompts for it:
 
 ```powershell
-cmdkey /generic:denext-ci-hooks /user:github-webhook-secret /pass
-cmdkey /list:denext-ci-hooks
+cmdkey /generic:fleet-webhooks /user:github-webhook-secret /pass
+cmdkey /list:fleet-webhooks
 ```
 
 ## Step 2: the receiver
 
 Choose one:
 
-- **Fleet alone.** Nothing to install: once the secret and the tunnel's service file exist, Fleet
-  listens on `127.0.0.1:8789` itself while it runs. Skip to
-  [Step 3](#step-3-a-public-https-endpoint).
+- **Fleet alone.** Nothing to install: with webhooks enabled in its settings and the secret (and, if
+  required, the tunnel's service file) present, Fleet listens on `127.0.0.1:8789` itself while it
+  runs. Skip to [Step 3](#step-3-a-public-https-endpoint).
 - **The standalone receiver** (recommended): `hooks-only.ts` runs as a background service, always
   on, and Fleet reads its spool. Deliveries are recorded while Fleet is closed.
 
@@ -260,10 +262,16 @@ cd <fleet-checkout>
 deno task hooks
 ```
 
-It exits with `hooks: not this machine` until both the secret (Step 1) and the tunnel's launchd file
-(Step 3) exist. Once running, it prints `hooks: listening on http://127.0.0.1:8789/github/hooks` and
-then one line per delivery (time, event, action, repository, job or run name, status), never the
-secret, headers or a body. Stop it with Ctrl+C before installing the service.
+`deno task hooks` reads the `webhooks` section of Fleet's settings file (`--settings`, macOS's data
+folder in the task); flags override it: `--port`, `--spool-dir`, `--keychain-service`,
+`--keychain-account`, `--require-launchd-job`. The standalone receiver reads its secret from the
+macOS keychain only (it has no access to Fleet's own store). It exits with
+`hooks: not this machine
+(…)`, saying why, until the secret (Step 1) and, when required, the
+tunnel's launchd file (Step 3) exist. Once running, it prints
+`hooks: listening on http://127.0.0.1:8789/github/hooks` and then one line per delivery (time,
+event, action, repository, job or run name, status), never the secret, headers or a body. Stop it
+with Ctrl+C before installing the service.
 
 The service needs only these Deno permissions: listen on `127.0.0.1:8789`, run the secret tool, read
 `HOME`, read the tunnel's service file and the spool folder, write the spool folder.
@@ -286,9 +294,17 @@ Save as `~/Library/LaunchAgents/<receiver-label>.plist`:
     <string>--allow-net=127.0.0.1:8789</string>
     <string>--allow-run=/usr/bin/security</string>
     <string>--allow-env=HOME</string>
-    <string>--allow-read=<home>/Library/LaunchAgents/<tunnel-label>.plist,/Library/LaunchDaemons/<tunnel-label>.plist,/Library/LaunchAgents/<tunnel-label>.plist,<home>/.denext-runners/hooks</string>
-    <string>--allow-write=<home>/.denext-runners/hooks</string>
+    <string>--allow-read=<home>/Library/LaunchAgents/<tunnel-label>.plist,/Library/LaunchDaemons/<tunnel-label>.plist,/Library/LaunchAgents/<tunnel-label>.plist,<spool></string>
+    <string>--allow-write=<spool></string>
     <string>hooks-only.ts</string>
+    <string>--spool-dir</string>
+    <string><spool></string>
+    <string>--keychain-service</string>
+    <string>fleet-webhooks</string>
+    <string>--keychain-account</string>
+    <string>github-webhook-secret</string>
+    <string>--require-launchd-job</string>
+    <string><tunnel-label></string>
   </array>
   <key>WorkingDirectory</key>
   <string><fleet-checkout></string>
@@ -376,7 +392,7 @@ Get-ScheduledTaskInfo -TaskName "Fleet webhook receiver"
 ```
 
 Restart it after a secret change: `Stop-ScheduledTask` then `Start-ScheduledTask` with the same
-name. The spool will be `%USERPROFILE%\.denext-runners\hooks\events.jsonl`.
+name. The spool will be `<spool>\events.jsonl`.
 
 ## Step 3: a public HTTPS endpoint
 
@@ -482,9 +498,10 @@ with Ctrl+C once `run` reports registered connections.
 
 #### Run the tunnel as a service
 
-**macOS: a launchd agent under `<tunnel-label>`.** Fleet turns webhooks on only when this file
-exists (see [What works today](#what-works-today)), so use this plist rather than
-`cloudflared service install`. Save as `~/Library/LaunchAgents/<tunnel-label>.plist`:
+**macOS: a launchd agent under `<tunnel-label>`.** With `webhooks.requireLaunchdJob` set, Fleet
+turns webhooks on only when this file exists (see [What works today](#what-works-today)), so use
+this plist rather than `cloudflared service install`. Save as
+`~/Library/LaunchAgents/<tunnel-label>.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -580,9 +597,9 @@ Any of these work as long as GitHub gets a stable HTTPS URL and only `/github/ho
   proxy only `POST /github/hooks` to the receiver and return 404 for the rest. The receiver binds
   loopback only, so the proxy must run on the same machine.
 
-On macOS, Fleet still requires the `<tunnel-label>` launchd file today, whatever carries the
-traffic. Run your alternative's agent under that label (the plist above with its command), or create
-the file with that label for the agent you already run.
+On macOS, with `webhooks.requireLaunchdJob` set, Fleet requires the `<tunnel-label>` launchd file,
+whatever carries the traffic. Run your alternative's agent under that label (the plist above with
+its command), or create the file with that label for the agent you already run.
 
 ## Step 4: the GitHub webhook
 
@@ -606,9 +623,9 @@ Organization: **github.com/organizations/`<org>`/settings/hooks** → **Add webh
 owners only). Repository: **github.com/`<owner>`/`<repo>`/settings/hooks** → **Add webhook**
 (repository admins). Fill in the table above. To paste the secret, copy it from the store:
 
-- macOS: `security find-generic-password -s denext-ci-hooks -a github-webhook-secret -w | pbcopy`
+- macOS: `security find-generic-password -s fleet-webhooks -a github-webhook-secret -w | pbcopy`
 - Linux:
-  `secret-tool lookup service denext-ci-hooks account github-webhook-secret | xclip -selection clipboard`
+  `secret-tool lookup service fleet-webhooks account github-webhook-secret | xclip -selection clipboard`
   (or `wl-copy` on Wayland)
 - Windows: Credential Manager doesn't show a generic credential's password; paste the value you
   generated, before you clear it from your clipboard.
@@ -623,7 +640,7 @@ the request, so it never appears on a command line or in history (macOS shown; o
 first command with the `secret-tool lookup` above):
 
 ```sh
-security find-generic-password -s denext-ci-hooks -a github-webhook-secret -w |
+security find-generic-password -s fleet-webhooks -a github-webhook-secret -w |
   jq -Rn --arg url "https://<your-hostname>/github/hooks" '{
     name: "web", active: true, events: ["workflow_job", "workflow_run"],
     config: { url: $url, content_type: "json", insecure_ssl: "0", secret: input }
@@ -662,7 +679,7 @@ Go through these in order; each one isolates one hop.
 
    ```sh
    body='{"zen":"local test"}'
-   sig=$(printf %s "$body" | openssl dgst -sha256 -hmac "$(security find-generic-password -s denext-ci-hooks -a github-webhook-secret -w)" | sed 's/^.* //')
+   sig=$(printf %s "$body" | openssl dgst -sha256 -hmac "$(security find-generic-password -s fleet-webhooks -a github-webhook-secret -w)" | sed 's/^.* //')
    curl -si http://127.0.0.1:8789/github/hooks -H 'content-type: application/json' \
      -H 'x-github-event: ping' -H "x-hub-signature-256: sha256=$sig" --data-binary "$body" | head -1
    # HTTP/1.1 200 OK   (body: pong)
@@ -704,8 +721,8 @@ Go through these in order; each one isolates one hop.
 6. **The spool grows** (one line per accepted delivery; this prints only the head of the last line):
 
    ```sh
-   ls -l ~/.denext-runners/hooks/
-   tail -n 1 ~/.denext-runners/hooks/events.jsonl | cut -c1-120
+   ls -l <spool>/
+   tail -n 1 <spool>/events.jsonl | cut -c1-120
    ```
 
    The standalone receiver also logs one line per delivery (macOS:
@@ -720,25 +737,25 @@ Go through these in order; each one isolates one hop.
 
 ## Troubleshooting
 
-| Symptom                                                                           | Cause                                                                                                                                               | Fix                                                                                                                                                                                                    |
-| --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Deliveries **401** `rejected signature`                                           | The secret in GitHub differs from the stored one, or the receiver started before you changed it                                                     | Store the secret again (Step 1), set the same value in GitHub (Step 4, or [Rotating](#rotating-the-secret)), restart the receiver (and Fleet if it is the receiver). The secret is read once at start. |
-| **401** after editing other webhook settings in the browser                       | Saving the form with an empty Secret field can clear or replace it                                                                                  | Re-enter the secret and save.                                                                                                                                                                          |
-| Deliveries **404** with a Cloudflare-style empty body                             | The path filter didn't match: wrong Payload URL (trailing slash, other path) or wrong `hostname`                                                    | The URL must be exactly `https://<your-hostname>/github/hooks`. Check with `cloudflared tunnel ingress rule https://<your-hostname>/github/hooks`.                                                     |
-| Deliveries **404** `not found` (plain text)                                       | The request reached the receiver with another method or path (a proxy rewrote it)                                                                   | Forward the path unchanged, `POST` only.                                                                                                                                                               |
-| Deliveries **413** `body too large`                                               | A payload over 1 MiB (not expected for workflow events)                                                                                             | Check that only Workflow jobs / Workflow runs are selected.                                                                                                                                            |
-| Deliveries **415**                                                                | Content type set to `application/x-www-form-urlencoded`                                                                                             | Set Content type to `application/json` (`content_type: "json"`).                                                                                                                                       |
-| Deliveries **502 / 530**, or timeouts                                             | The tunnel runs but nothing listens on 8789, or the tunnel is down                                                                                  | Start the receiver (or open Fleet); check the tunnel's log for `Registered tunnel connection`; `curl` step 1 and 3 above.                                                                              |
-| Header **`hooks: off`**                                                           | Webhooks not enabled on this machine: not macOS today, no `<tunnel-label>` launchd file, no keychain item, or the secret shorter than 32 characters | Check each (`ls ~/Library/LaunchAgents/<tunnel-label>.plist`, the `security find-generic-password` check). `deno task hooks` prints which: `not this machine` or `couldn't be read`.                   |
-| `hooks: off` and the console says `127.0.0.1:8789 is taken and there is no spool` | Another program holds port 8789, and no receiver has written a spool                                                                                | Find it: `lsof -nP -iTCP:8789 -sTCP:LISTEN` (macOS / Linux), `netstat -ano \| findstr :8789` (Windows). Stop it, or start the standalone receiver so a spool exists.                                   |
-| `hooks: live (via receiver)` but nothing arrives                                  | Fleet tails a spool, but what holds the port isn't Fleet's receiver, or the receiver died after Fleet started                                       | Check the receiver's service and log; restart Fleet after fixing so it can take the port itself if needed.                                                                                             |
-| `hooks: stale (no delivery yet)` for long                                         | No workflow has run, or deliveries fail before Fleet                                                                                                | Look at Recent Deliveries. With a standalone receiver, a ping doesn't update Fleet; run a workflow.                                                                                                    |
-| Deliveries **202** with body `stale`; Fleet doesn't change                        | The event's newest timestamp is over 10 min old: a redelivery of an old event, a queue backlog at GitHub, or **your clock is fast**                 | Normal for redeliveries. Otherwise compare your clock: `date -u` against `curl -sI https://api.github.com \| grep -i '^date'`; turn on automatic time.                                                 |
-| Deliveries **202** `duplicate`                                                    | The delivery id was already accepted (also across restarts; the spool's last 10,000 ids)                                                            | Normal for redeliveries.                                                                                                                                                                               |
-| Deliveries **202** `ignored`                                                      | An event other than workflow_job / workflow_run                                                                                                     | Select only those two events.                                                                                                                                                                          |
-| `hooks-only.ts` exits `hooks: ... is taken`                                       | Fleet (or another receiver) already holds 8789                                                                                                      | Run one receiver. Quit Fleet, start the service, then reopen Fleet: it tails the spool.                                                                                                                |
-| The receiver service restarts every 10 s                                          | It exits at once: secret missing or unreadable, tunnel file missing, or a keychain prompt nobody can answer                                         | Read its log. Re-create the keychain item with `security add-generic-password` (Step 1) so `/usr/bin/security` may read it without a prompt.                                                           |
-| Fleet back-fill shows nothing after a restart                                     | Fleet was the receiver and was closed, so nothing was recorded                                                                                      | Run the standalone receiver to record deliveries while Fleet is closed.                                                                                                                                |
+| Symptom                                                                           | Cause                                                                                                                                         | Fix                                                                                                                                                                                                    |
+| --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Deliveries **401** `rejected signature`                                           | The secret in GitHub differs from the stored one, or the receiver started before you changed it                                               | Store the secret again (Step 1), set the same value in GitHub (Step 4, or [Rotating](#rotating-the-secret)), restart the receiver (and Fleet if it is the receiver). The secret is read once at start. |
+| **401** after editing other webhook settings in the browser                       | Saving the form with an empty Secret field can clear or replace it                                                                            | Re-enter the secret and save.                                                                                                                                                                          |
+| Deliveries **404** with a Cloudflare-style empty body                             | The path filter didn't match: wrong Payload URL (trailing slash, other path) or wrong `hostname`                                              | The URL must be exactly `https://<your-hostname>/github/hooks`. Check with `cloudflared tunnel ingress rule https://<your-hostname>/github/hooks`.                                                     |
+| Deliveries **404** `not found` (plain text)                                       | The request reached the receiver with another method or path (a proxy rewrote it)                                                             | Forward the path unchanged, `POST` only.                                                                                                                                                               |
+| Deliveries **413** `body too large`                                               | A payload over 1 MiB (not expected for workflow events)                                                                                       | Check that only Workflow jobs / Workflow runs are selected.                                                                                                                                            |
+| Deliveries **415**                                                                | Content type set to `application/x-www-form-urlencoded`                                                                                       | Set Content type to `application/json` (`content_type: "json"`).                                                                                                                                       |
+| Deliveries **502 / 530**, or timeouts                                             | The tunnel runs but nothing listens on 8789, or the tunnel is down                                                                            | Start the receiver (or open Fleet); check the tunnel's log for `Registered tunnel connection`; `curl` step 1 and 3 above.                                                                              |
+| Header **`hooks: off`**                                                           | Webhooks off in the settings, or not ready here: not macOS today, no `<tunnel-label>` launchd file, no keychain item, or the secret too short | Check each (`ls ~/Library/LaunchAgents/<tunnel-label>.plist`, the `security find-generic-password` check). `deno task hooks` prints which: `not this machine` or `couldn't be read`.                   |
+| `hooks: off` and the console says `127.0.0.1:8789 is taken and there is no spool` | Another program holds port 8789, and no receiver has written a spool                                                                          | Find it: `lsof -nP -iTCP:8789 -sTCP:LISTEN` (macOS / Linux), `netstat -ano \| findstr :8789` (Windows). Stop it, or start the standalone receiver so a spool exists.                                   |
+| `hooks: live (via receiver)` but nothing arrives                                  | Fleet tails a spool, but what holds the port isn't Fleet's receiver, or the receiver died after Fleet started                                 | Check the receiver's service and log; restart Fleet after fixing so it can take the port itself if needed.                                                                                             |
+| `hooks: stale (no delivery yet)` for long                                         | No workflow has run, or deliveries fail before Fleet                                                                                          | Look at Recent Deliveries. With a standalone receiver, a ping doesn't update Fleet; run a workflow.                                                                                                    |
+| Deliveries **202** with body `stale`; Fleet doesn't change                        | The event's newest timestamp is over 10 min old: a redelivery of an old event, a queue backlog at GitHub, or **your clock is fast**           | Normal for redeliveries. Otherwise compare your clock: `date -u` against `curl -sI https://api.github.com \| grep -i '^date'`; turn on automatic time.                                                 |
+| Deliveries **202** `duplicate`                                                    | The delivery id was already accepted (also across restarts; the spool's last 10,000 ids)                                                      | Normal for redeliveries.                                                                                                                                                                               |
+| Deliveries **202** `ignored`                                                      | An event other than workflow_job / workflow_run                                                                                               | Select only those two events.                                                                                                                                                                          |
+| `hooks-only.ts` exits `hooks: ... is taken`                                       | Fleet (or another receiver) already holds 8789                                                                                                | Run one receiver. Quit Fleet, start the service, then reopen Fleet: it tails the spool.                                                                                                                |
+| The receiver service restarts every 10 s                                          | It exits at once: secret missing or unreadable, tunnel file missing, or a keychain prompt nobody can answer                                   | Read its log. Re-create the keychain item with `security add-generic-password` (Step 1) so `/usr/bin/security` may read it without a prompt.                                                           |
+| Fleet back-fill shows nothing after a restart                                     | Fleet was the receiver and was closed, so nothing was recorded                                                                                | Run the standalone receiver to record deliveries while Fleet is closed.                                                                                                                                |
 
 The receiver logs only the kind of a refusal (`rejected signature`, `rejected type`, …), never a
 body, header or the secret.
@@ -759,9 +776,9 @@ body, header or the secret.
   standalone receiver uses the local clock.
 - **Payloads are data.** Fleet reads typed fields only; nothing from a payload is executed, fetched
   or passed to a shell, and CI text that could come from untrusted pull requests is marked as such.
-- **The spool is private.** `~/.denext-runners/hooks/` is created 0700 and `events.jsonl` 0600. It
-  holds workflow metadata (repository, workflow, job and runner names, branches, actors), no
-  secrets. It rotates at 20 MB, keeping one older file (`events.jsonl.1`).
+- **The spool is private.** `<spool>/` is created 0700 and `events.jsonl` 0600. It holds workflow
+  metadata (repository, workflow, job and runner names, branches, actors), no secrets. It rotates at
+  20 MB, keeping one older file (`events.jsonl.1`).
 - **The tunnel credentials** (`<tunnel-id>.json`) let anyone run your tunnel; keep them 0400 and out
   of backups you share. `cert.pem` can manage your Cloudflare tunnels and DNS; remove it when not
   needed.
@@ -774,15 +791,15 @@ for a few seconds; polling covers the gap, and you can redeliver them.
 1. Generate a new value (`openssl rand -hex 32`).
 2. Replace it in the store:
    - macOS:
-     `security add-generic-password -U -s denext-ci-hooks -a github-webhook-secret -l "Fleet webhook secret" -w`
+     `security add-generic-password -U -s fleet-webhooks -a github-webhook-secret -l "Fleet webhook secret" -w`
    - Linux (planned for 1.0):
-     `secret-tool store --label="Fleet webhook secret" service denext-ci-hooks account github-webhook-secret`
-   - Windows (planned for 1.0): `cmdkey /generic:denext-ci-hooks /user:github-webhook-secret /pass`
+     `secret-tool store --label="Fleet webhook secret" service fleet-webhooks account github-webhook-secret`
+   - Windows (planned for 1.0): `cmdkey /generic:fleet-webhooks /user:github-webhook-secret /pass`
 3. Update GitHub. In the browser: the webhook's settings, enter the new Secret, **Update webhook**.
    With `gh` (macOS shown; the config PATCH needs the URL and content type again):
 
    ```sh
-   security find-generic-password -s denext-ci-hooks -a github-webhook-secret -w |
+   security find-generic-password -s fleet-webhooks -a github-webhook-secret -w |
      jq -Rn --arg url "https://<your-hostname>/github/hooks" \
        '{url: $url, content_type: "json", insecure_ssl: "0", secret: input}' |
      gh api orgs/<org>/hooks/<id>/config --method PATCH --input - --jq '.url'
@@ -833,11 +850,10 @@ for a few seconds; polling covers the gap, and you can redeliver them.
    longer use cloudflared, `~/.cloudflared/cert.pem` (Windows: the same names under
    `%USERPROFILE%\.cloudflared\`).
 4. **Delete the secret.**
-   - macOS: `security delete-generic-password -s denext-ci-hooks -a github-webhook-secret`
-   - Linux: `secret-tool clear service denext-ci-hooks account github-webhook-secret`
-   - Windows: `cmdkey /delete:denext-ci-hooks`
-5. **Delete the spool** if nothing else reads it: `rm -r ~/.denext-runners/hooks` (Windows:
-   `%USERPROFILE%\.denext-runners\hooks`).
+   - macOS: `security delete-generic-password -s fleet-webhooks -a github-webhook-secret`
+   - Linux: `secret-tool clear service fleet-webhooks account github-webhook-secret`
+   - Windows: `cmdkey /delete:fleet-webhooks`
+5. **Delete the spool** if nothing else reads it: `rm -r <spool>` (Windows: `<spool>`).
 
 Fleet then shows `hooks: off` and polls as before. Optionally uninstall cloudflared
 (`brew uninstall cloudflared`, `sudo apt remove cloudflared`,

@@ -1,9 +1,10 @@
 # Fleet
 
-A tray app that shows the Brainwires org's GitHub Actions jobs and our self-hosted runner pools,
-live: a menu-bar / tray icon with a summary, and a window with every running and queued job, a card
-per runner host, an event log and the controls. Internal only: it names our infrastructure (pool
-labels, runner names, hosts).
+A tray app that shows GitHub Actions jobs and self-hosted runner pools for the organizations and
+accounts you choose, live: a menu-bar / tray icon with a summary, and a window with every running
+and queued job, a card per runner pool, an event log and the controls. A first-run wizard sets it up
+(who to watch, protected branches, start at login, integrations); nothing about any one team's
+infrastructure is built in.
 
 A denext desktop app on the Deno Desktop runtime. The backend is a desktop extension
 (`desktop/fleet.ts`) that runs in the app's own Deno process, holds the GitHub token, polls the API,
@@ -20,8 +21,8 @@ macOS (the normal way):
    (see below), so Gatekeeper opens it on any Mac. A build without it is only signed: open it once
    with right-click → Open (or System Settings → Privacy & Security → Open Anyway).
 
-The first launch shows the window and turns on start at login; after that Fleet starts in the tray,
-with no window.
+The first launch shows the setup wizard ([Settings](#settings-and-the-first-run-wizard)); after that
+Fleet starts in the tray, with no window. Start at login is off until you turn it on.
 
 From source, without installing:
 
@@ -35,8 +36,8 @@ from any host (a `.zip`, not an `.msi`: WiX runs on Windows only). Unzip it anyw
 `Fleet-x64.exe`. It is unsigned unless a certificate is configured (see the header of
 `scripts/package-windows.ts`).
 
-`deno task …` runs the same tasks with Deno installed. Agents never launch Fleet's window on the Mac
-mini: GUI checks use the [dry-run mode](#dry-run-mode) on a test host.
+`deno task …` runs the same tasks with Deno installed. Automated GUI checks use the
+[dry-run mode](#dry-run-mode) on a test host, never a machine someone is working on.
 
 ## GitHub token
 
@@ -46,15 +47,55 @@ mini: GUI checks use the [dry-run mode](#dry-run-mode) on a test host.
    and Fleet needs nothing else.
 2. Else a token pasted earlier, from the extension's own secure-store namespace
    (`dev.brainwires.fleet/ext/fleet` in the OS keychain; no page can read it).
-3. Else the token screen: run `gh auth login` and press "try the GitHub CLI again", or paste a
-   fine-grained token for the Brainwires org with read access to Actions, Administration (for the
-   self-hosted runners) and Variables. It is checked with `GET /rate_limit` before it is stored. The
-   same screen comes back if GitHub later refuses the stored token.
-4. "Continue without a token" runs on public data only: the core repos, no runners or pool health,
-   GitHub controls refused, polled every 60 s visible / 5 min hidden to fit the 60-an-hour
-   unauthenticated limit.
+3. Else the sign-in step (the wizard's first, or the token screen once set up): run `gh auth login`
+   and press "try the GitHub CLI again", or paste a fine-grained token for the owners you watch with
+   read access to Actions, Administration (the organizations' self-hosted runners) and, with a
+   pool-health variable, Variables. Actions "Read and write" enables the controls. It is checked
+   with `GET /rate_limit` before it is stored. The wizard then shows the token's account, its scopes
+   (classic and OAuth tokens) and whether the controls will work. The token screen comes back if
+   GitHub later refuses the stored token.
+4. "Continue without a token" runs on public data only: the pinned and allowed repos, no runners or
+   pool health, GitHub controls refused, polled every 60 s visible / 5 min hidden to fit the
+   60-an-hour unauthenticated limit.
 
 The token is never logged, rendered, written to a file, or returned to the page.
+
+## Settings and the first-run wizard
+
+Fleet's settings are one typed, versioned JSON document, `fleet-settings.json` in the app's data
+folder (0600, written atomically), validated on every read and save (`lib/settings.ts`). The first
+launch shows a wizard in the window; afterwards the same sections are in the Settings view (the
+header's Settings button, or Settings… in the tray menu), where "Run setup again" re-runs the
+wizard. Both are keyboard-navigable (every control labelled, focus moved to each step's heading),
+and follow the light and dark themes.
+
+| Wizard step             | Settings                                                                                                                                                                                                                                                 |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Sign in                 | (the token; see [GitHub token](#github-token))                                                                                                                                                                                                           |
+| Owners and repos        | `owners` (organizations or users, several allowed); `repos.allow` (only these; empty: all of the owners'), `repos.deny`, `repos.pinned` (polled every round, listed first)                                                                               |
+| Protected branches      | `branches.rules`: each `{ branch, repo?, cancel, duplicateDispatch }`, `branch` being `:default` (each repo's default branch, from the API), a name or a `*` pattern; `warn` or `refuse`. `branches.otherDuplicateDispatch`: `allow` / `warn` / `refuse` |
+| Start and notifications | `startAtLogin` (opt-in), `notifications.poolUnhealthy` / `queuedLong` / `protectedFailure`                                                                                                                                                               |
+| Integrations            | `webhooks` ([docs/webhooks.md](docs/webhooks.md)), `pools.healthVariable` ([docs/pool-health.md](docs/pool-health.md)), and the MCP registration command for this machine                                                                                |
+
+The defaults watch nobody (the wizard asks), protect each repo's default branch with `warn`, group
+pools from the runners, and leave webhooks, start at login and every integration off.
+
+Two more sections are file-only, kept as they are by the UI:
+
+- `runnerHosts`: [runner-host workflows](#runner-host-jobs),
+  `{ repo, workflow, runnerPrefix, pool }`.
+- `integrations.runnerScheduler`: a self-hosted runner scheduler Fleet works with: its declared
+  `pools` (`{ id, label, runnerPrefix?, slots? }`, the first render's list), `runnerNamePrefix`
+  (runner names `<prefix><pool>-<slot>-<epoch>`), `labelPrefix`, the watchdog's `localHealthFile`
+  and `pausedDir`, and `controls` (`pausePool`, `watchdog`, `launchdLabel`: the
+  [pool controls](#controls)). Inactive unless configured.
+
+**A machine's own config.** When there is no settings file yet and `fleet-local-config.json` (a
+complete settings document) sits beside it in the data folder, Fleet starts from it, marked set up,
+and writes `fleet-settings.json` from it: no wizard. That is how a team ships its integrations to
+its own machines without putting them in this repo. A settings file that doesn't parse is reported
+in the console and never overwritten until new settings are saved. Paths in the settings may start
+with `~/`.
 
 ## Tray behaviour
 
@@ -81,32 +122,34 @@ The token is never logged, rendered, written to a file, or returned to the page.
   pool is unhealthy or a job has been queued over 15 min (a wait on a pool with every slot busy
   doesn't count, see Queued lanes). The tooltip is "N running · M queued" plus the reasons. A click
   opens the window, or closes it while it shows.
-- **The menu**: Open / Close Fleet, the summary (disabled), Pause notifications, Start at login,
-  Refresh now, Quit Fleet.
-- **Start at login** is turned on at the first run; turning it off in the menu sticks.
+- **The menu**: Open / Close Fleet, the summary (disabled), Settings…, Pause notifications, Start at
+  login, Refresh now, Quit Fleet.
+- **Start at login** is opt-in: set from the wizard, the Settings view or the menu (which keeps the
+  setting in step); Fleet never turns it on by itself.
 - With no tray host (stock GNOME without an AppIndicator extension) the window shows instead and is
   the only way in; closing it quits.
 
 ## The window
 
-- **Header**: a 3 px severity stripe (grey, amber, red), running and queued counts, why it isn't
-  green, the last poll, the poll interval, API requests left (amber below 1,500, red below 800), the
-  webhook state (`hooks: live`, `live (via receiver)`, `stale (last delivery N min ago)` or `off`),
-  and Refresh.
-- **Pool cards**: one card per runner host, then GitHub-hosted. The list follows the live data,
-  rebuilt on every poll: the watchdog's per-host `hosts` map (from its local
-  `~/.denext-runners/health.json` on the Mac mini when that is fresher, else from the
-  `DENEXT_POOL_HEALTH` org variable), else an older variable's labels plus the org's registered
-  runners. The built-in list in `lib/pools.ts` is only the first render's, before any data arrives;
-  a host that leaves the data leaves the cards. Each card: slots as pips (filled = busy), a state
-  chip (ok / paused / unhealthy / no health) with its reason, and the oldest queued wait, red past
-  15 min (amber when every slot is busy: the jobs are waiting for capacity, not faulting). Hosts
-  that share a runs-on label (`win-x64` and `win-x64-brain` on `denext-windows-x64`) each show their
-  own numbers; a running job is placed by its runner's name, and a queued job of a shared label sits
-  on that label's first card (its label can't say which host will take it). A long pool name
-  truncates with "…" (full name on hover); the state chip stays on its line. A self-hosted card is
-  compact; when its pool has running jobs, its `busy/slots` count is a toggle that widens the card
-  to two columns and lists the busy runners.
+- **Header**: a 3 px severity stripe (grey, amber, red), the watched owners, running and queued
+  counts, why it isn't green, the last poll, the poll interval, API requests left (amber below
+  1,500, red below 800), the webhook state (`hooks: live`, `live (via receiver)`,
+  `stale (last delivery N min ago)` or `off`), Refresh and Settings.
+- **Pool cards**: one card per runner pool, then GitHub-hosted. The list follows the live data,
+  rebuilt on every poll: without a pool-health variable, the organizations' self-hosted runners
+  grouped by their custom labels (ok while one runner is online); with one
+  ([docs/pool-health.md](docs/pool-health.md)), its per-host `hosts` map (the runner scheduler
+  integration's local health file merged in when fresher), else its labels plus the registered
+  runners. The scheduler integration's declared pools are only the first render's, before any data
+  arrives; a pool that leaves the data leaves the cards. Each card: slots as pips (filled = busy), a
+  state chip (ok / paused / unhealthy / no health) with its reason, and the oldest queued wait, red
+  past 15 min (amber when every slot is busy: the jobs are waiting for capacity, not faulting).
+  Hosts that share a runs-on label (`win-x64` and `win-x64-brain` on `denext-windows-x64`) each show
+  their own numbers; a running job is placed by its runner's name, and a queued job of a shared
+  label sits on that label's first card (its label can't say which host will take it). A long pool
+  name truncates with "…" (full name on hover); the state chip stays on its line. A self-hosted card
+  is compact; when its pool has running jobs, its `busy/slots` count is a toggle that widens the
+  card to two columns and lists the busy runners.
 - **GitHub-hosted panel**: a wider card beside the self-hosted grid (stacked below it under 1000
   px), as tall as the cards and scrolling inside, with one row per running job's runner: the image
   label from the job's runs-on labels (`macos-15-intel`, `ubuntu-22.04`) and the short runner id
@@ -114,22 +157,22 @@ The token is never logged, rendered, written to a file, or returned to the page.
   · workflow · job, a link to it). Self-hosted cards use the same rows when opened.
 - **Running / Queued lanes**: repo → run (workflow, branch, short SHA, event) → job (name, pool
   chip, runner, elapsed or waited, ticking each second while the window shows (the clock stops while
-  it is hidden); `/ ~usual` once three successful runs of that job were seen). A default branch
-  (`development-denext`, `development`, `main`) gets a violet left rule and a ◆ branch chip, but
-  only a run of the repo's own commit that isn't a PR: a fork PR (or any PR) from a branch named
-  `main` isn't the default branch, and a fork PR shows "fork PR from <owner>" instead. Ages (waited,
-  elapsed, finished N min ago) are reckoned on GitHub's clock, from the API's `Date` headers, so a
-  skewed local clock doesn't fake or hide a late job. A job queued over 15 min turns red, unless its
-  pool is ok with every slot busy: that is a capacity wait, shown amber as "waiting for a free slot
-  (pool full)" and counted in the header as "N waiting for capacity" (a free slot, a paused,
-  unhealthy or no-health pool stay red); one running past 1.5× its usual length (and at least 3 min
-  over) turns amber. A queued run GitHub hasn't expanded into jobs shows "queued, no jobs yet" for
-  its first 10 min; past that it is GitHub's stale status (the jobs list never fills) and is left
-  out. The job name takes a row's spare width; the runner (`#id` for GitHub's) is capped and gives
-  way first. A long branch moves to its own header line before it truncates. With nothing queued,
-  the Queued lane shrinks to a narrow column and Running takes the width.
-- **Side**: the health variable's recent alerts (each clamped to three lines; a click expands it,
-  the full text is also the tooltip), and jobs finished in the last 30 min with ✓ / ✕ / ⊘.
+  it is hidden); `/ ~usual` once three successful runs of that job were seen). A protected branch
+  (the settings' `branches.rules`) gets a violet left rule and a ◆ branch chip, but only a run of
+  the repo's own commit that isn't a PR: a fork PR (or any PR) from a branch named `main` isn't the
+  protected branch, and a fork PR shows "fork PR from <owner>" instead. Ages (waited, elapsed,
+  finished N min ago) are reckoned on GitHub's clock, from the API's `Date` headers, so a skewed
+  local clock doesn't fake or hide a late job. A job queued over 15 min turns red, unless its pool
+  is ok with every slot busy: that is a capacity wait, shown amber as "waiting for a free slot (pool
+  full)" and counted in the header as "N waiting for capacity" (a free slot, a paused, unhealthy or
+  no-health pool stay red); one running past 1.5× its usual length (and at least 3 min over) turns
+  amber. A queued run GitHub hasn't expanded into jobs shows "queued, no jobs yet" for its first 10
+  min; past that it is GitHub's stale status (the jobs list never fills) and is left out. The job
+  name takes a row's spare width; the runner (`#id` for GitHub's) is capped and gives way first. A
+  long branch moves to its own header line before it truncates. With nothing queued, the Queued lane
+  shrinks to a narrow column and Running takes the width.
+- **Side**: the pool-health variable's recent alerts (each clamped to three lines; a click expands
+  it, the full text is also the tooltip), and jobs finished in the last 30 min with ✓ / ✕ / ⊘.
 - A click on a run or job opens it on github.com in the system browser.
 
 ## Event log
@@ -162,17 +205,19 @@ Native, posted from the backend so they arrive with no window open (a click open
 - a pool goes unhealthy (once per outage);
 - a job passes 15 min queued (once per job; more than three at once become one summary; none for a
   wait on a full pool);
-- a default-branch job fails (once per job, only failures after Fleet started): the repo's own
+- a protected-branch job fails (once per job, only failures after Fleet started): the repo's own
   commit on the branch, not a PR (a fork PR from a branch named `main` notifies nothing).
 
-Posted keys are kept for 48 h in `fleet-state.json`, so a relaunch doesn't repeat them. Pause
-notifications in the tray menu silences them (the setting persists).
+Each kind can be turned off in the settings (`notifications`). Posted keys are kept for 48 h in
+`fleet-state.json`, so a relaunch doesn't repeat them; a kind turned off is still marked, so turning
+it back on doesn't replay the past. Pause notifications in the tray menu silences them all (the
+setting persists).
 
 ## The shared rate limit
 
-Fleet uses the same gh token as the runner scheduler, the watchdog and the CI watchers, and so
+Fleet usually runs on the same gh token as other tools (a runner scheduler, CI watchers), and so
 shares one 5,000-an-hour REST budget with them. If Fleet starved it, queued jobs would go unseen and
-runners would stop launching. So (`lib/budget.ts`):
+a scheduler would stop launching runners. So (`lib/budget.ts`):
 
 - every request is conditional (`If-None-Match`): an unchanged list is a free 304 (the ETag cache is
   an LRU of 2,000 URLs, and a run's URLs leave it once the run leaves the agents' 2 h window);
@@ -186,15 +231,15 @@ What it polls, per round (every 15 s visible, 60 s hidden, unless the budget or 
 
 | What                    | Endpoint                                                           | When                                |
 | ----------------------- | ------------------------------------------------------------------ | ----------------------------------- |
-| Org repos               | `GET /orgs/Brainwires/repos`                                       | every 10 min                        |
+| Owners' repos           | `GET /orgs/{org}/repos`, `GET /user/repos` (a user owner)          | every 10 min                        |
 | Active runs             | `GET /repos/{repo}/actions/runs?status=queued/in_progress/waiting` | every round*                        |
 | Jobs of each active run | `GET /repos/{repo}/actions/runs/{id}/jobs`                         | when the run's `updated_at` changed |
-| Runners                 | `GET /orgs/Brainwires/actions/runners`                             | every round                         |
-| Pool health             | `GET /orgs/Brainwires/actions/variables/DENEXT_POOL_HEALTH`        | every round                         |
+| Runners                 | `GET /orgs/{org}/actions/runners` (organization owners)            | every round                         |
+| Pool health             | `GET /orgs/{org}/actions/variables/{name}` (when configured)       | every round                         |
 
-\*The core repos (deno, denext, laufey, qutty), any repo pushed in the last 24 h and any repo with
-an active run last round are polled every round; a repo with no active run on its last 3 polls drops
-to every 5 min, and every other non-archived repo is covered by the 10-minute sweep.
+\*The pinned repos, any repo with an active run on one of its last 3 polls are polled every round; a
+repo with no active run on its last 3 polls drops to every 5 min, and every other watched,
+non-archived repo is covered by the 10-minute sweep.
 
 Every request has a 20 s deadline: a hung connection fails that round as a timeout (retried on the
 next), never a poll stuck forever; and a poll still running after 2 min (a bug) is dropped, logged
@@ -209,21 +254,23 @@ changes arrive in seconds and polling only reconciles every 5 min; with no deliv
 runs are active, polling goes back to its normal rate, so a missed delivery or a dead tunnel costs
 freshness, not correctness. Without webhooks Fleet polls (`hooks: off`).
 
-- **The receiver** listens on `127.0.0.1:8789` (loopback only) and accepts only
-  `POST /github/hooks`: `application/json` (else 415), at most 1 MiB (else 413), and a valid
-  `X-Hub-Signature-256` HMAC under the webhook secret, checked before anything is parsed (else 401).
-  `ping` → 200; `workflow_job` / `workflow_run` → 202, de-duplicated on `X-GitHub-Delivery` (the
-  last 10,000, kept across restarts) and dropped as a replay (202 `stale`) when the event's newest
-  timestamp is over 10 min old. Payloads are data only.
+- **The receiver** listens on `127.0.0.1` (loopback only, port `webhooks.port`, 8789 by default) and
+  accepts only `POST /github/hooks`: `application/json` (else 415), at most 1 MiB (else 413), and a
+  valid `X-Hub-Signature-256` HMAC under the webhook secret, checked before anything is parsed (else
+  401). `ping` → 200; `workflow_job` / `workflow_run` → 202, de-duplicated on `X-GitHub-Delivery`
+  (the last 10,000, kept across restarts) and dropped as a replay (202 `stale`) when the event's
+  newest timestamp is over 10 min old. Payloads are data only.
 - **Fleet or `hooks-only.ts`.** Fleet listens itself (`hooks: live`), unless the standalone receiver
   (`denext task hooks`, or the same as a background service) already holds the port; then Fleet
   tails its spool every 2 s (`hooks: live (via receiver)`). Port taken and no spool: polling only.
-- **The spool**, `~/.denext-runners/hooks/events.jsonl` (0600 in a 0700 folder, rotated to `.1` at
-  20 MB), records every verified delivery; Fleet back-fills its event log from it at start.
-- **Today** webhooks turn on only on macOS, with the secret in the login keychain (service
-  `denext-ci-hooks`, account `github-webhook-secret`, at least 32 characters) and the public
-  endpoint's launchd job file present (`TUNNEL_LABEL` in `lib/deno-hooks.ts`). Linux and Windows are
-  planned.
+- **The spool**, `events.jsonl` in `webhooks.spoolDir` (default `hooks/` in the data folder; 0600 in
+  a 0700 folder, rotated to `.1` at 20 MB), records every verified delivery; Fleet back-fills its
+  event log from it at start.
+- **Today** webhooks turn on only when enabled in the settings, on macOS, with the secret readable
+  (the login keychain item the settings name, or Fleet's own secure store; at least 32 characters)
+  and, when `webhooks.requireLaunchdJob` names one, the public endpoint's launchd job file present.
+  `denext task hooks` runs the standalone receiver from the settings file (flags override it). Linux
+  and Windows are planned.
 
 **Setup, verification, troubleshooting and removal:** [docs/webhooks.md](docs/webhooks.md).
 
@@ -236,11 +283,11 @@ GitHub controls go through the backend with the same token, never from page JS:
 - Dispatch…: repo → a workflow that declares `workflow_dispatch` → ref → its declared inputs (read
   from that block of the workflow YAML).
 
-Pool controls, only on the machine with the runner scheduler's ops checkout
-(`~/Source/Brainwires/denext-internal/ops/runners/pause-pool.sh`, the Mac mini): per pool Pause (1m
-/ 2m / 3m, a segmented group on the card's last row; the script's own expiry still applies) and
-Resume, Restart scheduler (`launchctl kickstart -k gui/<uid>/com.brainwires.denext-runners`) and Run
-watchdog pass now.
+Pool controls, only with the runner scheduler integration (`integrations.runnerScheduler.controls`)
+and its pause script present on this machine: per pool Pause (1m / 2m / 3m, a segmented group on the
+card's last row; the script's own expiry still applies) and Resume, Restart scheduler
+(`launchctl kickstart -k gui/<uid>/<launchdLabel>`, when a label is set) and Run watchdog pass now
+(when a watchdog is set).
 
 Guardrails, as code in `lib/controls.ts` (unit-tested):
 
@@ -249,12 +296,13 @@ Guardrails, as code in `lib/controls.ts` (unit-tested):
   run, job and branch names are quoted, stripped of control characters and newlines and capped at 80
   characters; the safe button is the default, and a runtime without native message boxes refuses
   rather than act unconfirmed;
-- controls act on the org's repos only (`Brainwires/*`);
-- Cancel is refused outright on `development-denext`, `development`, `main` or the repo's own
-  default branch, with the reason shown: a run of the repo's own commit that isn't a PR (a fork PR
-  from a branch named `main` can be cancelled);
-- Dispatch is refused when the workflow already has a run on that commit SHA, unless every such run
-  was cancelled (then it warns);
+- controls act on the watched repos only (the configured owners', past the allow / deny lists);
+- Cancel on a protected branch warns or is refused, per its rule (`branches.rules`; by default each
+  repo's own default branch, warn), with the reason shown: a run of the repo's own commit that isn't
+  a PR (a fork PR from a branch named `main` is a plain cancel);
+- Dispatch when the workflow already has a live run on that commit SHA warns or is refused per the
+  protecting rule (else `branches.otherDuplicateDispatch`); if every such run was cancelled, it only
+  notes it;
 - a re-run on `rel/*` warns that a failed attempt on a release commit blocks its tag;
 - pool commands run exact absolute paths with argv built in code (no shell, no free text), for known
   pools only; nothing restarts a VM or deletes anything;
@@ -268,23 +316,21 @@ tests.
 
 ## MCP for agents
 
-Agents (Claude Code sessions and their subagents on the Mac mini) read CI state from Fleet's cache
-instead of each polling the GitHub API: the REST budget is shared with the runner scheduler, and
-every agent watch loop spends it. `mcp/fleet-mcp.ts` is a zero-dependency MCP server over stdio,
-**read-only** over files Fleet already keeps: no network, no GitHub API, no token, no environment,
-no subprocess. It runs with exactly one grant:
+Agents (Claude Code sessions and their subagents) read CI state from Fleet's cache instead of each
+polling the GitHub API: the REST budget is shared, and every agent watch loop spends it.
+`mcp/fleet-mcp.ts` is a zero-dependency MCP server over stdio, **read-only** over files Fleet
+already keeps: no network, no GitHub API, no token, no environment, no subprocess. It runs with
+exactly one grant, the data folder (plus, when given, the webhook spool and a watchdog's local
+health file):
 
 ```sh
-deno run --no-config --no-prompt \
-  "--allow-read=$HOME/Library/Application Support/dev.brainwires.fleet,$HOME/.denext-runners/hooks,$HOME/.denext-runners/health.json" \
-  mcp/fleet-mcp.ts --data-dir "$HOME/Library/Application Support/dev.brainwires.fleet" \
-  --hooks-dir "$HOME/.denext-runners/hooks" --health-file "$HOME/.denext-runners/health.json"
+deno run --no-config --no-prompt "--allow-read=<data dir>[,<spool>][,<health file>]" \
+  mcp/fleet-mcp.ts --data-dir "<data dir>" [--hooks-dir "<spool>"] [--health-file "<health file>"]
 ```
 
-`deno task mcp` runs that. It is registered for Claude Code at user scope as `fleet`
-(`claude mcp add --scope user fleet -- /opt/homebrew/bin/deno run …` with the same flags and
-absolute paths), so every session on the mini has it. Fleet itself must be running for the answers
-to be fresh.
+`deno task mcp` runs it for macOS's data folder. The Settings view (Integrations) shows the
+`claude mcp add --scope user fleet -- …` line for this machine, with its paths. Fleet itself must be
+running for the answers to be fresh. `fleet_status` names the watched owners.
 
 | Tool           | Arguments                                                           | Returns                                                                                                                              |
 | -------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
@@ -294,7 +340,7 @@ to be fresh.
 | `fleet_events` | `since_seq?`, `kinds?`, `repo?`, `limit?`                           | `{ events, next_seq, has_more }`: pass `next_seq` back as `since_seq` for only what's new                                            |
 | `fleet_wait`   | `run_ids?`, `job_ids?`, `until`, `timeout_s?` (≤ 1800, default 600) | blocks until `any_failure` / `completed` / `first_event`, then `{ triggered, runs, failed_jobs, jobs, events, next_seq }`            |
 
-`repo` takes `Brainwires/denext` or `denext`; `status` also takes `active` (anything not completed).
+`repo` takes `owner/name` or just `name`; `status` also takes `active` (anything not completed).
 `fleet_wait` watches the data folder and the webhook spool's folder (plus a 2 s re-read), returns at
 once when the state is already there, and `triggered` says why it returned: `failure`, `completed`,
 `event`, `timeout` or `stale`. Example, instead of a watch script:
@@ -333,6 +379,8 @@ name and renamed over:
 
 | File                                         | What                                                                                                                                                                |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fleet-settings.json`                        | the settings ([Settings](#settings-and-the-first-run-wizard))                                                                                                       |
+| `fleet-local-config.json`                    | optional, never written by Fleet: a machine's own settings, read once when there is no settings file                                                                |
 | `fleet-state.json`                           | usual job lengths (the last 10 successful runs per job), posted notification keys (48 h), prefs (first launch done, start at login defaulted, notifications paused) |
 | `fleet-events.json`                          | the window's event log: the last 2,000 lines and the tracker, rewritten whole                                                                                       |
 | `fleet-events.jsonl`, `fleet-events.1.jsonl` | the event log as an append-only journal for agents: one event a line, `seq` increasing across restarts, `run_id` / `job_id` on job and run lines; rotated at 5 MB   |
@@ -345,23 +393,31 @@ branch, sha, event, actor, `head_repository`, `fork`, `untrusted`, status, concl
 `html_url`; jobs also name, labels, `runner_name`, pool, steps, and for a failure `failed_step` and
 the first failure annotation). `clock_offset_ms` is GitHub's clock minus the Mac's.
 
-Outside it, only on the webhook machine: `~/.denext-runners/hooks/events.jsonl` (and `.1`). Fleet
-reads, never writes, `~/.denext-runners/health.json` and the scheduler's `paused-<pool>` files.
+Outside it, only where the settings say: a webhook spool outside the data folder
+(`webhooks.spoolDir`). Fleet reads, never writes, the runner scheduler integration's local health
+file and `paused-<pool>` files.
 
 ## Permissions
 
 Baked into the binary from `denext.config.ts` (least privilege, derived by the package scripts):
 `--allow-net` connect to `api.github.com` only, plus the loopback listen every desktop app has (the
-webhook port 8789 is inside it); `--allow-run` only the `gh` paths above, `/usr/bin/security` (the
-webhook secret) and, where the ops checkout exists at build time, `pause-pool.sh`, `watchdog.sh` and
-`/bin/launchctl`; `--allow-write` only the app's data folder and `~/.denext-runners/hooks`. denext
-adds its baseline read / env grants and the unscoped `--allow-sys` that the secure store,
-notifications and start at login need.
+webhook port is inside it); `--allow-run` only the `gh` paths above and `/usr/bin/security` (a
+keychain webhook secret); `--allow-write` only the app's data folder. denext adds its baseline read
+/ env grants and the unscoped `--allow-sys` that the secure store, notifications and start at login
+need.
+
+**An internal build** (`FLEET_INTERNAL=1`, `denext task desktop:package:internal`) also bakes what
+the build machine's `fleet-local-config.json` (or `$FLEET_LOCAL_CONFIG`) calls for: the runner
+scheduler integration's programs (`pausePool`, `watchdog`, `/bin/launchctl` with a `launchdLabel`)
+and a webhook spool outside the data folder (`lib/build-grants.ts`). It fails without a readable,
+valid local config. A release build bakes none of it: no ops paths, no launchctl, nothing of the
+builder's home. An internal build rewrites `.deno-desktop/config.json` with those grants: restore it
+(`git checkout .deno-desktop/config.json`) rather than commit it.
 
 ## Development
 
 ```sh
-denext task test      # data layer, view, controls, tray, hooks and MCP tests (no network, gh or keychain)
+denext task test      # data layer, settings, wizard, view, controls, tray, hooks and MCP tests (no network, gh or keychain)
 denext task check     # deno fmt --check (Markdown included), deno lint, the tests
 denext task icons     # redraw the icons/ and public/ art from lib/icons.ts
 denext task export    # the static page export → out/
@@ -374,7 +430,9 @@ credentials.
 
 ```sh
 DENEXT_CODESIGN_IDENTITY="Developer ID Application: <name> (<team id>)" \
-  denext task desktop:package               # dist/Fleet.app + dist/Fleet.dmg, signed
+  denext task desktop:package               # dist/Fleet.app + dist/Fleet.dmg, signed (release)
+DENEXT_CODESIGN_IDENTITY="…" DENEXT_NOTARY_PROFILE=<profile> \
+  denext task desktop:package:internal      # the same, with the local config's grants baked in
 denext task desktop:package:windows         # dist/Fleet-x64-windows.zip
 ```
 
@@ -398,13 +456,17 @@ this repo.
 | `lib/budget.ts`                        | The poll interval from the shared rate budget and the webhooks                                           |
 | `lib/events.ts`                        | The event log: diffing successive observations, the bounded log                                          |
 | `lib/hooks.ts`                         | The webhook handler (route, size, signature, dedupe) and the spool reader                                |
-| `lib/deno-hooks.ts`                    | Webhooks on the mini: enable check, secret, listener, `events.jsonl`, spool tailing                      |
-| `hooks-only.ts`                        | The receiver without a window (the launchd service, `denext task hooks`)                                 |
+| `lib/deno-hooks.ts`                    | Webhooks per the settings: enable check, secret, listener, `events.jsonl`, spool tailing                 |
+| `hooks-only.ts`                        | The receiver without a window (a background service, `denext task hooks`)                                |
+| `lib/settings.ts`                      | The settings: schema, validation, versions, startup (file → local config → defaults), the active ones    |
+| `lib/branches.ts`                      | Protected-branch rules and the repos' default branches                                                   |
+| `lib/discover.ts`                      | The wizard's questions to GitHub: the token's account, scopes and orgs; an owner's repos                 |
+| `lib/build-grants.ts`                  | The internal build's extra permissions, from the local config                                            |
 | `lib/controls.ts`                      | The controls' guardrails and pool commands (pure)                                                        |
 | `lib/control-runner.ts`                | Controls end to end: guardrails → OS dialog → GitHub or the pool script → event log                      |
-| `lib/deno-pools.ts`, `local-health.ts` | The ops checkout, the watchdog's local `health.json` merged over the variable                            |
-| `lib/health.ts`                        | The `DENEXT_POOL_HEALTH` parser (`pools` by label, `hosts` by pool)                                      |
-| `lib/pools.ts`                         | The first-render pool list, labels, runner prefixes, core repos, default branches                        |
+| `lib/deno-pools.ts`, `local-health.ts` | The runner scheduler integration: pool commands, the watchdog's local health merged over the variable    |
+| `lib/health.ts`                        | The pool-health variable's parser (`pools` by label, `hosts` by pool; docs/pool-health.md)               |
+| `lib/pools.ts`                         | The pool list (grouped from runners, or from the variable), labels, runner prefixes, runner hosts        |
 | `lib/classify.ts`                      | Job classification, queue ages, warnings, lane grouping                                                  |
 | `lib/snapshot.ts`                      | Pool cards, summary, the page's snapshot                                                                 |
 | `lib/notify.ts`                        | Which notifications to post, once each                                                                   |
@@ -416,6 +478,7 @@ this repo.
 | `lib/icons.ts`, `png.ts`               | The tray and app icons, drawn in code (`denext task icons`)                                              |
 | `mcp/fleet-mcp.ts`, `mcp/queries.ts`   | The read-only MCP server for agents (stdio) and its tools' answers                                       |
 | `app/`                                 | The page: `fleet-app.tsx` (state), `fleet-view.tsx`, `event-log.tsx`, `controls.tsx`, `token-screen.tsx` |
+| `app/settings-view.tsx`                | The first-run wizard and the Settings view                                                               |
 | `public/fonts/`                        | IBM Plex Sans / Mono (OFL), bundled                                                                      |
 | `scripts/package-*.ts`                 | The packaging scripts denext generated                                                                   |
 | `tests/`                               | Unit and view tests over trimmed recorded API responses                                                  |
@@ -425,22 +488,22 @@ this repo.
 - The macOS `.dmg` itself is unsigned (the app inside is signed and notarized).
 - Windows: the build packages and launches, but the tray menu and Quit Fleet have not been verified
   by automation; check them by hand after a change there.
-- Webhooks work only on macOS for now (tunnel launchd job + keychain secret; see
-  [docs/webhooks.md](docs/webhooks.md)); everywhere else Fleet polls.
-- Pool controls exist only where the ops checkout is (the Mac mini).
+- Webhooks work only on macOS for now (see [docs/webhooks.md](docs/webhooks.md)); everywhere else
+  Fleet polls. The secure-store secret can't be set from the UI yet.
+- Pool controls exist only with the runner scheduler integration on the machine that runs it.
+- A user owner's repo-level runners aren't listed (only organizations' runners make pools).
 - Runs that finished over 2 h ago are not in the agents' snapshot; older history is GitHub's.
 
 ## Runner-host jobs
 
-Some GitHub-hosted jobs exist only to host a self-hosted runner for a while, such as
-`intel helper / helper (N)` in Brainwires/deno (`ops/intel-helper`): a GitHub-hosted Intel Mac that
-registers an ephemeral runner `gh-intel-helper-<slot>-<ts>` and waits for one fleet job. They are
-long-lived by design, so Fleet never raises STALLED, "over usual" or a notification for them. The
-lanes and the GitHub-hosted panel show `hosting gh-intel-helper-1 · idle`, or
-`hosting gh-intel-helper-1 · running <repo> · <workflow> · <job>` when a running job's runner is the
-one of that slot (`helper (1)` ↔ `gh-intel-helper-1-…`). A job on such a runner counts in the
-`mac-x64` pool, marked "(GitHub helper)". The rules are `RUNNER_HOSTS` in `lib/pools.ts`
-(`{ repo, workflow, runnerPrefix, pool }`); add an entry for another workflow of this kind.
+Some GitHub-hosted jobs exist only to host a self-hosted runner for a while: for example a
+`helper / helper (N)` workflow whose GitHub-hosted job registers an ephemeral runner
+`gh-helper-<slot>-<ts>` and waits for one job. They are long-lived by design, so Fleet never raises
+STALLED, "over usual" or a notification for them. The lanes and the GitHub-hosted panel show
+`hosting gh-helper-1 · idle`, or `hosting gh-helper-1 · running <repo> · <workflow> · <job>` when a
+running job's runner is the one of that slot (`helper (1)` ↔ `gh-helper-1-…`). A job on such a
+runner counts in the rule's pool, marked "(GitHub helper)". The rules are the settings'
+`runnerHosts` (`{ repo, workflow, runnerPrefix, pool }`); add one for each workflow of this kind.
 
 ## License
 
