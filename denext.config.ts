@@ -1,6 +1,7 @@
 import type { DenextConfig } from "denext/server";
 import { ALL_GH_PATHS } from "./lib/deno-host.ts";
 import { SECURITY_BIN } from "./lib/deno-hooks.ts";
+import { LOG_HOSTS } from "./lib/github.ts";
 import { internalGrants } from "./lib/build-grants.ts";
 import { INITIAL_MENU } from "./lib/tray-driver.ts";
 
@@ -63,9 +64,10 @@ export default {
       extensions: ["./desktop/fleet.ts"],
     },
     extraPermissions: {
-      // The GitHub API, outbound only. The webhook receiver listens on loopback, inside the
-      // loopback listen grant every desktop app has.
-      netConnect: ["api.github.com"],
+      // The GitHub API, outbound only, and the hosts its job-log downloads redirect to (a signed
+      // URL fetched without the token; the pool detail's "View log"). The webhook receiver listens
+      // on loopback, inside the loopback listen grant every desktop app has.
+      netConnect: ["api.github.com", ...LOG_HOSTS],
       // `gh auth token`, and a webhook secret from the macOS login keychain, by absolute path only;
       // an internal build adds the runner scheduler's pool commands.
       run: [...ALL_GH_PATHS, SECURITY_BIN, ...INTERNAL.run],

@@ -85,9 +85,11 @@ Two more sections are file-only, kept as they are by the UI:
 - `runnerHosts`: [runner-host workflows](#runner-host-jobs),
   `{ repo, workflow, runnerPrefix, pool }`.
 - `integrations.runnerScheduler`: a self-hosted runner scheduler Fleet works with: its declared
-  `pools` (`{ id, label, runnerPrefix?, slots? }`, the first render's list), `runnerNamePrefix`
-  (runner names `<prefix><pool>-<slot>-<epoch>`), `labelPrefix`, the watchdog's `localHealthFile`
-  and `pausedDir`, and `controls` (`pausePool`, `watchdog`, `launchdLabel`: the
+  `pools` (`{ id, label, runnerPrefix?, slots?, host? }`, the first render's list; pools with the
+  same `host` share one machine, and their detail screens add a combined usage chart),
+  `runnerNamePrefix` (runner names `<prefix><pool>-<slot>-<epoch>`), `labelPrefix`, the watchdog's
+  `localHealthFile` and `pausedDir`, `logsDir` (the scheduler's log folder, read-only: the
+  [Logs tab](#pool-detail-screens)), and `controls` (`pausePool`, `watchdog`, `launchdLabel`: the
   [pool controls](#controls)). Inactive unless configured.
 
 **A machine's own config.** When there is no settings file yet and `fleet-local-config.json` (a
@@ -188,6 +190,67 @@ with `~/`.
 - **Side**: the pool-health variable's recent alerts (each clamped to three lines; a click expands
   it, the full text is also the tooltip), and jobs finished in the last 30 min with ✓ / ✕ / ⊘.
 - A click on a run or job opens it on github.com in the system browser.
+- A click on a pool card (or its name, a button) or on the GitHub-hosted panel opens that pool's
+  [detail screen](#pool-detail-screens).
+
+## Pool detail screens
+
+Self-hosted runners are ephemeral (a new runner name per job), so history is kept per pool, the
+cards' unit. A pool's screen (Back or Esc returns; every control is keyboard-reachable; both themes)
+has a header (name, state and reason, labels, slots, the machine, busy and queued now with the
+oldest wait, the pause controls) and two tabs.
+
+**Usage**: a range picker (1 h / 24 h / 7 d / 30 d: 1-minute, 15-minute, 1-hour and 6-hour points),
+a summary row (share of slot time busy, jobs finished, failed / cancelled, median and p90 length,
+the longest wait, the average queue wait), then the charts. Each is hand-drawn SVG with one y scale,
+labelled axes, a faint grid, the latest point marked, a tooltip with the bucket's exact values on
+hover or keyboard focus (arrow keys move it), a legend when it has more than one series, a "Show as
+a table" view, and an empty state when the range has no data:
+
+- **Utilization**: average busy slots per point (filled area) against the pool's capacity (dashed
+  line), in slots; the subtitle gives the share of slot time busy. For pools that share a machine
+  (the settings' `host`), a second chart adds their busy slots and capacities together.
+- **Queue length** (average jobs waiting per point) and **Oldest wait** (the longest any queued job
+  had waited, in minutes): two charts, since they don't share a unit.
+- **Throughput**: jobs finished per point, stacked by conclusion (succeeded green, failed red,
+  cancelled grey, other light grey).
+- **Job duration**: the median and p90 length of the jobs finished per point (minutes), and a
+  **duration distribution** histogram of the whole range with the median and p90 marked.
+- GitHub-hosted: **running jobs by image** (stacked areas, the five busiest runs-on images and
+  "other") instead of utilization, and **minutes used** per point (each job rounded up to a whole
+  minute, as billed).
+
+Below the charts: the pool's recent jobs (finish time, repo · workflow · job linking to GitHub,
+runner, duration, conclusion, "View log") and its recent events.
+
+**Logs**: GitHub's log of any recent job, fetched on demand
+(`GET
+/repos/{repo}/actions/jobs/{id}/logs`, one request of the shared budget, refused while fewer
+than 1,500 remain, at most 30 an hour, finished jobs cached in memory) and shown in the log viewer
+with its `##[group]` steps folding. With the runner scheduler's `logsDir` configured, also: the
+pool's launcher logs `jobs/<pool>-<slot>-<epoch>.log` newest first (start, slot, runner, the job and
+run it took, result `rc`, duration, disk before → after, from the log's own markers and the
+scheduler's `job done` lines), each opening in the viewer (a running job's log can be followed
+live), a "Runner log" button per recent job, and the scheduler's and the watchdog's lines about the
+pool (`scheduler.log`, `alerts.log`, refreshed every 5 s while the tab shows).
+
+The viewer is monospace and virtualized (only the visible rows are in the page), with search (next /
+previous), copy, follow for a live log, and ANSI colours. Logs are read-only and bounded: a file's
+last 512 KB at a time ("Load earlier lines" pages back), a GitHub log's last 4 MB, at most 60,000
+lines in the page. **Secrets never reach the page**: every line is redacted in the backend first
+(`lib/redact.ts`): `--jitconfig` values and JIT configs, GitHub tokens (`ghp_` / `ghs_` / … /
+`github_pat_`), bearer / basic credentials, JWTs, credentials in URLs, signed-URL signatures, values
+of secret-named keys, and any long token-shaped string (git SHAs and paths are kept).
+
+**The history** lives in `fleet-history.json` ([Data files](#data-files)): per pool (and per GitHub
+image) 1-minute buckets for 24 h and 15-minute buckets for 30 days, each holding the pool samples
+Fleet takes as it polls and receives webhooks (busy, capacity, queue, the oldest wait, paused /
+unhealthy) and the jobs that started and finished in it (by conclusion, minutes, a fixed log-scale
+duration histogram for the percentiles, queue waits); the last 200 finished jobs per pool. It is
+written atomically every 2 minutes and at quit, pruned past each tier's retention, and capped (64
+series, 16 GitHub images). On its first run Fleet back-fills it from the event journal
+(`fleet-events.jsonl`) and the webhook spool (GitHub's own times), so the charts start with what
+Fleet already saw; capacity for that past is today's slot count.
 
 ## Event log
 
@@ -338,21 +401,24 @@ exactly one grant, the data folder (plus, when given, the webhook spool and a wa
 health file):
 
 ```sh
-deno run --no-config --no-prompt "--allow-read=<data dir>[,<spool>][,<health file>]" \
-  mcp/fleet-mcp.ts --data-dir "<data dir>" [--hooks-dir "<spool>"] [--health-file "<health file>"]
+deno run --no-config --no-prompt "--allow-read=<data dir>[,<spool>][,<health file>][,<logs>]" \
+  mcp/fleet-mcp.ts --data-dir "<data dir>" [--hooks-dir "<spool>"] [--health-file "<health file>"] \
+  [--logs-dir "<runner scheduler log folder>"]
 ```
 
 `deno task mcp` runs it for macOS's data folder. The Settings view (Integrations) shows the
 `claude mcp add --scope user fleet -- …` line for this machine, with its paths. Fleet itself must be
 running for the answers to be fresh. `fleet_status` names the watched owners.
 
-| Tool           | Arguments                                                           | Returns                                                                                                                              |
-| -------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `fleet_status` | none                                                                | pools and hosts (health, slots, busy, paused), queue counts and the oldest wait, rate budget, webhooks, the watchdog's `health.json` |
-| `fleet_runs`   | `repo?`, `branch?`, `sha?` (prefix), `status?`, `limit?`            | runs newest first, each with its jobs' counts and failed jobs (name + failed step)                                                   |
-| `fleet_jobs`   | `run_id?`, `repo?`, `status?`, `conclusion?`, `pool?`, `limit?`     | jobs; steps for failed jobs, and for every job when `run_id` is given; `conclusion: "failed"` = failure, timed_out, startup_failure  |
-| `fleet_events` | `since_seq?`, `kinds?`, `repo?`, `limit?`                           | `{ events, next_seq, has_more }`: pass `next_seq` back as `since_seq` for only what's new                                            |
-| `fleet_wait`   | `run_ids?`, `job_ids?`, `until`, `timeout_s?` (≤ 1800, default 600) | blocks until `any_failure` / `completed` / `first_event`, then `{ triggered, runs, failed_jobs, jobs, events, next_seq }`            |
+| Tool                 | Arguments                                                                           | Returns                                                                                                                                                                                |
+| -------------------- | ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fleet_status`       | none                                                                                | pools and hosts (health, slots, busy, paused), queue counts and the oldest wait, rate budget, webhooks, the watchdog's `health.json`                                                   |
+| `fleet_runs`         | `repo?`, `branch?`, `sha?` (prefix), `status?`, `limit?`                            | runs newest first, each with its jobs' counts and failed jobs (name + failed step)                                                                                                     |
+| `fleet_jobs`         | `run_id?`, `repo?`, `status?`, `conclusion?`, `pool?`, `limit?`                     | jobs; steps for failed jobs, and for every job when `run_id` is given; `conclusion: "failed"` = failure, timed_out, startup_failure                                                    |
+| `fleet_events`       | `since_seq?`, `kinds?`, `repo?`, `limit?`                                           | `{ events, next_seq, has_more }`: pass `next_seq` back as `since_seq` for only what's new                                                                                              |
+| `fleet_wait`         | `run_ids?`, `job_ids?`, `until`, `timeout_s?` (≤ 1800, default 600)                 | blocks until `any_failure` / `completed` / `first_event`, then `{ triggered, runs, failed_jobs, jobs, events, next_seq }`                                                              |
+| `fleet_pool_history` | `pool` (a pool, `github`, `github:<image>`), `range?` (`1h` / `24h` / `7d` / `30d`) | the pool's bucketed usage (≤ 168 points: busy, slots, utilization, queue, longest wait, jobs by conclusion, minutes, median / p90), totals, the duration histogram, its 20 latest jobs |
+| `fleet_runner_log`   | `job_id` or `pool` + `file`, `tail?` (≤ 2000, default 200)                          | a launcher log's last lines (≤ 256 KB), redacted; only when the server runs with `--logs-dir`                                                                                          |
 
 `repo` takes `owner/name` or just `name`; `status` also takes `active` (anything not completed).
 `fleet_wait` watches the data folder and the webhook spool's folder (plus a 2 s re-read), returns at
@@ -398,6 +464,7 @@ name and renamed over:
 | `fleet-state.json`                           | usual job lengths (the last 10 successful runs per job), posted notification keys (48 h), prefs (first launch done, start at login defaulted, notifications paused) |
 | `fleet-events.json`                          | the window's event log: the last 2,000 lines and the tracker, rewritten whole                                                                                       |
 | `fleet-events.jsonl`, `fleet-events.1.jsonl` | the event log as an append-only journal for agents: one event a line, `seq` increasing across restarts, `run_id` / `job_id` on job and run lines; rotated at 5 MB   |
+| `fleet-history.json`                         | the usage history per pool ([Pool detail screens](#pool-detail-screens)): two bucket tiers, 24 h and 30 days, and the last 200 jobs per pool; rewritten every 2 min |
 | `snapshot.json`                              | the agents' snapshot, written atomically after every poll and webhook update and at least once a minute (a heartbeat that bumps `written_at` only)                  |
 
 `snapshot.json` is
@@ -414,11 +481,13 @@ file and `paused-<pool>` files.
 ## Permissions
 
 Baked into the binary from `denext.config.ts` (least privilege, derived by the package scripts):
-`--allow-net` connect to `api.github.com` only, plus the loopback listen every desktop app has (the
-webhook port is inside it); `--allow-run` only the `gh` paths above and `/usr/bin/security` (a
-keychain webhook secret); `--allow-write` only the app's data folder. denext adds its baseline read
-/ env grants and the unscoped `--allow-sys` that the secure store, notifications and start at login
-need.
+`--allow-net` connect to `api.github.com`, plus the hosts its job-log downloads redirect to
+(`productionresultssa0`–`19.blob.core.windows.net`, `pipelines.actions.githubusercontent.com`:
+fetched without the token, any other redirect refused), plus the loopback listen every desktop app
+has (the webhook port is inside it); `--allow-run` only the `gh` paths above and `/usr/bin/security`
+(a keychain webhook secret); `--allow-write` only the app's data folder. denext adds its baseline
+read / env grants and the unscoped `--allow-sys` that the secure store, notifications and start at
+login need.
 
 **An internal build** (`FLEET_INTERNAL=1`, `denext task desktop:package:internal`) also bakes what
 the build machine's `fleet-local-config.json` (or `$FLEET_LOCAL_CONFIG`) calls for: the runner
@@ -483,6 +552,10 @@ this repo.
 | `lib/pools.ts`                         | The pool list (grouped from runners, or from the variable), labels, runner prefixes, runner hosts        |
 | `lib/classify.ts`                      | Job classification, queue ages, warnings, lane grouping                                                  |
 | `lib/snapshot.ts`                      | Pool cards, summary, the page's snapshot                                                                 |
+| `lib/history.ts`, `history-sources.ts` | The usage history (tiers, samples, jobs, percentiles, back-fill) and where its data comes from           |
+| `lib/pool-detail.ts`                   | A pool detail screen's data: history over a range, shared machine, recent jobs and events                |
+| `lib/redact.ts`, `runner-logs.ts`      | Secrets out of log lines, ANSI; parsing launcher logs, scheduler lines, job log groups                   |
+| `lib/deno-logs.ts`, `logs.ts`          | Bounded, redacted reads of the scheduler's logs; GitHub job logs (budgeted, cached)                      |
 | `lib/notify.ts`                        | Which notifications to post, once each                                                                   |
 | `lib/agent-snapshot.ts`                | The agents' `snapshot.json`, built from the poller's state                                               |
 | `lib/agent-files.ts`                   | The agent files' names, shared with the MCP server                                                       |
@@ -494,6 +567,8 @@ this repo.
 | `lib/icons.ts`, `png.ts`               | The tray and app icons, drawn in code (`denext task icons`)                                              |
 | `mcp/fleet-mcp.ts`, `mcp/queries.ts`   | The read-only MCP server for agents (stdio) and its tools' answers                                       |
 | `app/`                                 | The page: `fleet-app.tsx` (state), `fleet-view.tsx`, `event-log.tsx`, `controls.tsx`, `token-screen.tsx` |
+| `app/pool-detail.tsx`, `charts.tsx`    | The pool detail screen and its hand-drawn SVG charts                                                     |
+| `app/log-viewer.tsx`                   | The virtualized log viewer                                                                               |
 | `app/settings-view.tsx`                | The first-run wizard and the Settings view                                                               |
 | `public/fonts/`                        | IBM Plex Sans / Mono (OFL), bundled                                                                      |
 | `scripts/package-*.ts`                 | The packaging scripts denext generated                                                                   |
@@ -509,6 +584,9 @@ this repo.
 - Pool controls exist only with the runner scheduler integration on the machine that runs it.
 - A user owner's repo-level runners aren't listed (only organizations' runners make pools).
 - Runs that finished over 2 h ago are not in the agents' snapshot; older history is GitHub's.
+- Usage history starts when Fleet first runs (plus what the journal and spool held); gaps while
+  Fleet was closed show as gaps. A back-filled past uses today's slot counts.
+- GitHub keeps job logs for its log retention (90 days by default); an older one answers 404.
 
 ## Runner-host jobs
 

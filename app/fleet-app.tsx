@@ -20,6 +20,18 @@ import { type MachineInfo, type SettingsApi, SettingsView, SetupWizard } from ".
 import type { FleetSettings } from "../lib/settings.ts";
 import { visibleClock } from "./visible-clock.ts";
 import { windowShortcut } from "../lib/shortcuts.ts";
+import { type LogsApi, PoolDetailView } from "./pool-detail.tsx";
+import type { PoolDetail } from "../lib/pool-detail.ts";
+import type { HistoryRange } from "../lib/history.ts";
+
+/** The detail screen's loaders (the backend's log methods). */
+const LOGS: LogsApi = {
+  runnerLogList: (pool) => fleet.runnerLogList({ pool }),
+  poolLogLines: (pool) => fleet.poolLogLines({ pool }),
+  runnerLog: (pool, file, opts) => fleet.runnerLog({ pool, file, ...opts }),
+  runnerLogForJob: (jobId) => fleet.runnerLogForJob({ jobId }),
+  jobLog: (repo, jobId) => fleet.jobLog({ repo, jobId }),
+};
 
 /** How often the page reads the (in-process) snapshot while visible. */
 const READ_MS = 5000;
@@ -51,6 +63,11 @@ export function FleetApp() {
   const [dispatching, setDispatching] = useState(false);
   const [repos, setRepos] = useState<string[]>([]);
   const busy = useRef(false);
+  /** The pool detail screen (`null`: the dashboard), its range and its data. */
+  const [detailPool, setDetailPool] = useState<string | null>(null);
+  const [range, setRange] = useState<HistoryRange>("24h");
+  const [detail, setDetail] = useState<PoolDetail | null>(null);
+  const [detailError, setDetailError] = useState("");
 
   /** Run a control: the backend checks it and asks in a system dialog; show its outcome. */
   const act = useCallback(async (call: () => Promise<ControlResult>) => {
@@ -101,6 +118,26 @@ export function FleetApp() {
   useEffect(() => {
     void fleet.capabilities().then(setPools).catch(() => {});
   }, []);
+
+  // The detail screen's data: on open, on a range change, and with every snapshot change.
+  const wanted = useRef<{ pool: string | null; range: HistoryRange }>({ pool: null, range });
+  wanted.current = { pool: detailPool, range };
+  const loadDetail = useCallback(async (pool: string, r: HistoryRange) => {
+    try {
+      const d = await fleet.poolDetail({ pool, range: r });
+      // A late answer for another pool or range (the user moved on) is dropped.
+      if (wanted.current.pool !== pool || wanted.current.range !== r) return;
+      setDetail(d);
+      setDetailError("");
+    } catch (err) {
+      setDetailError(errorText(err));
+    }
+  }, []);
+  useEffect(() => {
+    if (detailPool === null) return;
+    setDetail((d) => (d && d.pool === detailPool && d.range === range ? d : null));
+    void loadDetail(detailPool, range);
+  }, [detailPool, range, snap?.at, loadDetail]);
 
   const loadConfig = useCallback(async () => {
     try {
@@ -216,6 +253,32 @@ export function FleetApp() {
   if (snap.auth === "needs-token" || snap.auth === "invalid") {
     return <TokenScreen auth={snap.auth} {...signIn} onOpen={openUrl} />;
   }
+  if (detailPool !== null) {
+    return (
+      <PoolDetailView
+        key={detailPool}
+        pool={detailPool}
+        detail={detail && detail.pool === detailPool ? detail : null}
+        range={range}
+        onRange={setRange}
+        onBack={() => {
+          setDetailPool(null);
+          setDetail(null);
+        }}
+        onOpen={openUrl}
+        now={now + (snap.clockOffsetMs ?? 0)}
+        error={detailError}
+        logs={LOGS}
+        controls={pools.pools
+          ? {
+            onControl: (c: ControlRequest) => void act(() => fleet.control(c)),
+            onPool: (c: PoolRequest) => void act(() => fleet.poolControl(c)),
+            message,
+          }
+          : { onControl: (c: ControlRequest) => void act(() => fleet.control(c)), message }}
+      />
+    );
+  }
   if (screen === "settings") {
     if (!config) return <div class="loading" aria-busy="true">Loading the settings…</div>;
     return (
@@ -238,6 +301,7 @@ export function FleetApp() {
       refreshing={refreshing}
       events={events}
       onSettings={() => setScreen("settings")}
+      onPoolDetail={(pool) => setDetailPool(pool)}
       controls={{
         onControl: (c: ControlRequest) => void act(() => fleet.control(c)),
         ...(pools.pools

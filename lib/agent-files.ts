@@ -11,5 +11,7 @@ export const JOURNAL_FILE = "fleet-events.jsonl";
 export const JOURNAL_OLD_FILE = "fleet-events.1.jsonl";
 /** The journal rotates past this size. */
 export const JOURNAL_MAX_BYTES = 5 * 1024 * 1024;
+/** The usage history per pool (lib/history.ts), rewritten atomically every few minutes. */
+export const HISTORY_FILE = "fleet-history.json";
 /** The app's identifier: its data folder's name (macOS `~/Library/Application Support/<id>`). */
 export const APP_ID = "dev.brainwires.fleet";

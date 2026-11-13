@@ -105,6 +105,11 @@ export interface PollerOptions {
   readonly publicOnly?: boolean;
   /** The watchdog's local health (fresher than the variable), merged over it. */
   readonly localHealth?: (variable: HealthState) => Promise<HealthState>;
+  /**
+   * Every completed job seen (repeatedly: each read of its run's jobs), with the pool it ran on:
+   * the usage history (lib/history.ts) records each once.
+   */
+  readonly onJobCompleted?: (repo: string, run: GhRun, job: GhJob, pool: string) => void;
 }
 
 /** Run `fn` over `items`, at most `n` at a time. */
@@ -127,6 +132,7 @@ export class Poller {
   readonly #now: () => number;
   readonly #publicOnly: boolean;
   readonly #localHealth?: (variable: HealthState) => Promise<HealthState>;
+  readonly #onJobCompleted?: PollerOptions["onJobCompleted"];
   #auth: AuthState;
   #repos: GhRepo[] = [];
   #reposAt = -Infinity;
@@ -160,6 +166,7 @@ export class Poller {
     this.#now = options.now ?? Date.now;
     this.#publicOnly = options.publicOnly ?? false;
     this.#localHealth = options.localHealth;
+    this.#onJobCompleted = options.onJobCompleted;
     for (const [k, v] of Object.entries(options.durations ?? {})) {
       if (Array.isArray(v)) this.#durations.set(k, v.filter((n) => typeof n === "number"));
     }
@@ -333,10 +340,15 @@ export class Poller {
         const list = [...(this.#durations.get(key) ?? []), dur].slice(-DURATION_SAMPLES);
         this.#durations.set(key, list);
       }
-      if (done === null || now - done > FINISHED_KEEP_MS) continue;
-      if (j.conclusion === "skipped") continue;
+      if (done === null || j.conclusion === "skipped") continue;
       const labelPool = poolFromLabels(j.labels ?? []);
       const runnerPool = j.runner_name ? poolFromRunnerName(j.runner_name) : null;
+      try {
+        this.#onJobCompleted?.(repo, run, j, runnerPool ?? labelPool ?? GITHUB_POOL);
+      } catch {
+        // The history's failure is its own.
+      }
+      if (now - done > FINISHED_KEEP_MS) continue;
       this.#finished.set(j.id, {
         id: j.id,
         runId: j.run_id,

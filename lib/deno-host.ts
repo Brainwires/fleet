@@ -5,8 +5,10 @@
 import type { FleetNotification } from "./notify.ts";
 import type { PersistedState } from "./poller.ts";
 import { type FleetSettings, LOCAL_CONFIG_FILE, SETTINGS_FILE } from "./settings.ts";
+import type { FleetEvent } from "./events.ts";
 import {
   AGENT_SNAPSHOT_FILE,
+  HISTORY_FILE,
   JOURNAL_FILE,
   JOURNAL_MAX_BYTES,
   JOURNAL_OLD_FILE,
@@ -159,6 +161,45 @@ export function saveLog(dir: string, data: unknown): Promise<void> {
 /** The agents' snapshot (lib/agent-snapshot.ts), written atomically like the state file. */
 export function saveAgentSnapshot(dir: string, snap: unknown): Promise<void> {
   return writeJson(dir, AGENT_SNAPSHOT_FILE, snap);
+}
+
+/** The usage history file, or `null` when there is none (or it doesn't parse). */
+export async function loadHistory(dir: string): Promise<unknown> {
+  try {
+    return JSON.parse(await Deno.readTextFile(join(dir, HISTORY_FILE)));
+  } catch {
+    return null;
+  }
+}
+
+/** Write the usage history (0600, atomically). */
+export function saveHistory(dir: string, doc: unknown): Promise<void> {
+  return writeJson(dir, HISTORY_FILE, doc);
+}
+
+/** The event journal's events (the rotated file, then the live one), oldest first. */
+export async function readJournal(dir: string): Promise<FleetEvent[]> {
+  const out: FleetEvent[] = [];
+  for (const name of [JOURNAL_OLD_FILE, JOURNAL_FILE]) {
+    let text: string;
+    try {
+      text = await Deno.readTextFile(join(dir, name));
+    } catch {
+      continue;
+    }
+    for (const line of text.split("\n")) {
+      if (!line) continue;
+      try {
+        const e = JSON.parse(line) as FleetEvent;
+        if (typeof e?.seq === "number" && typeof e.at === "number" && typeof e.text === "string") {
+          out.push(e);
+        }
+      } catch {
+        // A torn line: skip it.
+      }
+    }
+  }
+  return out.sort((a, b) => a.seq - b.seq);
 }
 
 /**

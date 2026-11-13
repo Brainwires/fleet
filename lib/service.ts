@@ -31,6 +31,13 @@ import {
   startupSettings,
   validateSettings,
 } from "./settings.ts";
+import { COARSE_KEEP_MS, type HistoryDoc, HistoryStore } from "./history.ts";
+import { backfillHistory } from "./history.ts";
+import { backfillIntervals, jobRecord, poolSamples } from "./history-sources.ts";
+import { type PoolDetail, poolDetail } from "./pool-detail.ts";
+import type { HistoryRange } from "./history.ts";
+import { rowsOf } from "./snapshot.ts";
+import { currentPools } from "./pools.ts";
 import {
   discoverToken,
   listOwnerRepos,
@@ -47,6 +54,8 @@ export const TOKEN_KEY = "github-token";
  * a bug gets here): the next poll goes ahead without it, and its late result is ignored.
  */
 export const POLL_STUCK_MS = 2 * 60_000;
+/** The usage history is written at most this often (and on quit). */
+export const HISTORY_SAVE_MS = 2 * 60_000;
 
 /** A secret store (the extension's own `host.secureStore`). */
 export interface SecretStore {
@@ -98,6 +107,11 @@ export interface ServiceDeps {
   readonly clearTimeout?: (id: number) => void;
   /** Each GitHub request's deadline (tests shorten it; default the client's 20 s). */
   readonly requestTimeoutMs?: number;
+  /** The usage history file (`fleet-history.json`): `null` when there is none. */
+  readonly loadHistory?: () => Promise<unknown>;
+  readonly saveHistory?: (doc: HistoryDoc) => Promise<void>;
+  /** The event journal (both files), oldest first: the history's first-run back-fill. */
+  readonly readJournal?: () => Promise<FleetEvent[]>;
   /** Where a recovered fault is noted (never a token or a payload). Default `console.warn`. */
   readonly warn?: (message: string) => void;
 }
@@ -166,6 +180,14 @@ export interface FleetService {
   tokenInfo(): Promise<TokenInfo>;
   /** An owner's repos, for the wizard's repo step. */
   ownerRepos(owner: string, kind: "org" | "user"): Promise<RepoChoice[]>;
+  /** A pool's detail screen (or `github`): its history over `range`, recent jobs and events. */
+  poolDetail(pool: string, range: HistoryRange): PoolDetail;
+  /** The usage history (the Logs tab finds a job's record in it). */
+  history(): HistoryStore;
+  /** Resolves once the history is loaded (and back-filled on the first run). */
+  historyReady(): Promise<void>;
+  /** Write the usage history now if it changed (on quit). */
+  flushHistory(): Promise<void>;
   /** Stop the timers. */
   stop(): void;
 }
@@ -234,6 +256,10 @@ export function createFleetService(deps: ServiceDeps): FleetService {
   const settingsListeners = new Set<(s: FleetSettings, previous: FleetSettings) => void>();
   let settingsLoaded: Promise<void> | null = null;
   const localHealth = () => deps.localHealth ?? deps.localHealthFor?.(activeSettings());
+  let history = new HistoryStore();
+  let historyLoaded: Promise<void> | null = null;
+  let historyTimer: number | null = null;
+  let historyWriting: Promise<void> = Promise.resolve();
 
   const visible = () => now() < visibleUntil;
   /** Now on GitHub's clock (the API's Date headers), for comparisons with GitHub's timestamps. */
@@ -294,8 +320,75 @@ export function createFleetService(deps: ServiceDeps): FleetService {
     };
   };
 
+  /** Sample the pool cards into the history (each series at most every 10 s). */
+  const sampleHistory = (s: Snapshot) => {
+    if (!poller || s.poll.lastSuccessAt === null) return;
+    try {
+      history.sample(
+        now(),
+        poolSamples(
+          s.pools,
+          rowsOf(s.running),
+          rowsOf(s.queued),
+          ghNow(),
+          history.keys().filter((k) => k.startsWith("github:")),
+        ),
+      );
+      scheduleHistorySave();
+    } catch {
+      // The history's failure is its own.
+    }
+  };
+
+  const flushHistory = (): Promise<void> => {
+    if (historyTimer !== null) clearT(historyTimer);
+    historyTimer = null;
+    if (!deps.saveHistory || !history.dirty) return historyWriting;
+    const save = deps.saveHistory;
+    const doc = history.toJSON(now());
+    historyWriting = historyWriting.then(() => save(doc)).catch(() => {
+      history.dirty = true; // try again at the next save
+    });
+    return historyWriting;
+  };
+
+  const scheduleHistorySave = () => {
+    if (!deps.saveHistory || historyTimer !== null || stopped || !history.dirty) return;
+    historyTimer = setT(() => {
+      historyTimer = null;
+      void flushHistory();
+    }, HISTORY_SAVE_MS);
+  };
+
+  /** Load the history; on the first run, back-fill it from the journal and the webhook spool. */
+  const loadHistory = () =>
+    historyLoaded ??= (async () => {
+      const raw = await deps.loadHistory?.().catch(() => null) ?? null;
+      const loaded = HistoryStore.from(raw);
+      // Jobs recorded live while it loaded are kept.
+      for (const j of history.allJobs()) loaded.jobDone(j, now());
+      history = loaded;
+      if (loaded.backfilledAt !== null || (!deps.readJournal && !deps.readSpool)) return;
+      try {
+        const t = now();
+        const journal = await deps.readJournal?.().catch(() => []) ?? [];
+        const spool = await deps.readSpool?.(t - COARSE_KEEP_MS).catch(() => []) ?? [];
+        const slots = new Map(currentPools().map((p) => [p.id, p.slots]));
+        backfillHistory(
+          history,
+          backfillIntervals(journal, spool, t),
+          (id) => slots.get(id) ?? null,
+          t,
+        );
+        await flushHistory();
+      } catch {
+        warn("fleet: history: the back-fill failed; the charts start empty");
+      }
+    })();
+
   const emit = () => {
     const s = snapshot();
+    sampleHistory(s);
     for (const fn of listeners) {
       try {
         fn(s);
@@ -333,6 +426,10 @@ export function createFleetService(deps: ServiceDeps): FleetService {
       publicOnly: token === null,
       // Read each round, so a settings change takes effect without a new poller.
       localHealth: (v) => localHealth()?.(v) ?? Promise.resolve(v),
+      onJobCompleted: (repo, run, job, pool) => {
+        const rec = jobRecord(repo, run, job, pool);
+        if (rec && history.jobDone(rec, now())) scheduleHistorySave();
+      },
     });
     currentKind = tokenKind(token);
     auth = state;
@@ -586,6 +683,8 @@ export function createFleetService(deps: ServiceDeps): FleetService {
       await loadSettings();
       await loadState();
       await backfill();
+      // In the background: a first-run back-fill reads the whole spool.
+      void loadHistory();
       if (!(await tryGh())) {
         const stored = await deps.secrets.get(TOKEN_KEY).catch(() => null);
         if (stored) use(stored, "stored");
@@ -734,8 +833,22 @@ export function createFleetService(deps: ServiceDeps): FleetService {
       if (!client) return [];
       return await listOwnerRepos(client, owner, kind).catch(() => []);
     },
+    poolDetail: (pool, range) =>
+      poolDetail({
+        store: history,
+        snapshot: snapshot(),
+        events: log.after(0),
+        pool,
+        range,
+        now: now(),
+      }),
+    history: () => history,
+    historyReady: () => loadHistory(),
+    flushHistory,
     stop() {
       stopped = true;
+      if (historyTimer !== null) clearT(historyTimer);
+      historyTimer = null;
       if (timer !== null) clearT(timer);
       timer = null;
       if (heartbeat !== null) clearT(heartbeat);

@@ -36,6 +36,8 @@ export interface FleetViewProps {
   readonly dispatchPanel?: unknown;
   /** Open the Settings view (the header's Settings button). Absent: no button. */
   readonly onSettings?: () => void;
+  /** Open a pool's detail screen (a click on its card, or its name). Absent: cards don't open. */
+  readonly onPoolDetail?: (pool: string) => void;
 }
 
 /** The header's owner line: the watched owners (`a, b`), then `· Actions`. */
@@ -166,13 +168,24 @@ function RunnerList(
   );
 }
 
+/** Whether a click landed on one of the card's own controls (a button, link or field). */
+function onControl(target: EventTarget | null): boolean {
+  let el = target as { tagName?: string; parentElement?: unknown } | null;
+  while (el && el.tagName) {
+    if (/^(BUTTON|A|INPUT|SELECT|TEXTAREA|LABEL)$/.test(el.tagName)) return true;
+    el = el.parentElement as typeof el;
+  }
+  return false;
+}
+
 function PoolCardView(
-  { pool, now, onPool, runners, onOpen }: {
+  { pool, now, onPool, runners, onOpen, onDetail }: {
     pool: PoolCard;
     now: number;
     onPool?: ControlHandlers["onPool"];
     runners: readonly RunnerEntry[];
     onOpen: (u: string) => void;
+    onDetail?: () => void;
   },
 ) {
   const [open, setOpen] = useState(false);
@@ -188,10 +201,27 @@ function PoolCardView(
     <Tag
       class={`pool pool-${pool.state}${github ? " pool-github" : ""}${
         expanded && !github ? " pool-open" : ""
-      }`}
+      }${onDetail ? " pool-clickable" : ""}`}
+      onClick={onDetail
+        ? (e) => {
+          if (!onControl(e.target)) onDetail();
+        }
+        : undefined}
     >
       <div class="pool-head">
-        <span class="pool-name" title={pool.title}>{pool.title}</span>
+        {onDetail
+          ? (
+            <button
+              type="button"
+              class="pool-name pool-link"
+              title={`${pool.title}: usage history and logs`}
+              aria-label={`${pool.title}: open the usage history and logs`}
+              onClick={onDetail}
+            >
+              {pool.title}
+            </button>
+          )
+          : <span class="pool-name" title={pool.title}>{pool.title}</span>}
         <span class={`chip chip-${pool.state}`}>{STATE_TEXT[pool.state]}</span>
       </div>
       <div class="pool-load">
@@ -554,6 +584,7 @@ export function FleetView(props: FleetViewProps) {
                 onPool={props.controls?.onPool}
                 runners={busy.get(p.id) ?? []}
                 onOpen={onOpen}
+                onDetail={props.onPoolDetail ? () => props.onPoolDetail!(p.id) : undefined}
               />
             ))}
           </ul>
@@ -564,6 +595,7 @@ export function FleetView(props: FleetViewProps) {
                 now={now}
                 runners={busy.get("github") ?? []}
                 onOpen={onOpen}
+                onDetail={props.onPoolDetail ? () => props.onPoolDetail!("github") : undefined}
               />
             )
             : null}

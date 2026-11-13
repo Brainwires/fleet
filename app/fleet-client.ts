@@ -11,6 +11,10 @@ import type { TokenCheck } from "../lib/service.ts";
 import type { FleetSettings, SettingsResult } from "../lib/settings.ts";
 import type { RepoChoice, TokenInfo } from "../lib/discover.ts";
 import type { MachineInfo } from "./settings-view.tsx";
+import type { HistoryRange } from "../lib/history.ts";
+import type { PoolDetail } from "../lib/pool-detail.ts";
+import type { LogError, LogView } from "../lib/logs.ts";
+import type { LauncherLog } from "../lib/runner-logs.ts";
 
 /** What the page can ask the backend. */
 export interface FleetClient {
@@ -34,6 +38,16 @@ export interface FleetClient {
   retryGh(args?: Record<never, never>): Promise<boolean>;
   clearToken(args?: Record<never, never>): Promise<null>;
   usePublic(args?: Record<never, never>): Promise<null>;
+  poolDetail(args: { pool: string; range: HistoryRange }): Promise<PoolDetail>;
+  runnerLogList(args: { pool: string }): Promise<{ configured: boolean; logs: LauncherLog[] }>;
+  poolLogLines(
+    args: { pool: string },
+  ): Promise<{ configured: boolean; scheduler: string[]; alerts: string[] }>;
+  runnerLog(
+    args: { pool: string; file: string; after?: number; before?: number },
+  ): Promise<LogView | LogError>;
+  runnerLogForJob(args: { jobId: number }): Promise<LogView | LogError>;
+  jobLog(args: { repo: string; jobId: number }): Promise<LogView | LogError>;
 }
 
 /** The backend. */

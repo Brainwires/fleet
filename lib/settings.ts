@@ -60,6 +60,11 @@ export interface PoolDefSetting {
   readonly runnerPrefix?: string;
   /** Its slot count, when known. */
   readonly slots?: number | null;
+  /**
+   * The machine it runs on, when several pools share one (their capacity is shared): the pool
+   * detail screen shows their combined usage. Absent: a machine of its own.
+   */
+  readonly host?: string;
 }
 
 /**
@@ -119,6 +124,11 @@ export interface RunnerSchedulerIntegration {
   readonly localHealthFile: string;
   /** The folder of the scheduler's `paused-<pool>` files; `""`: none. */
   readonly pausedDir: string;
+  /**
+   * The scheduler's log folder (`~/` allowed): `jobs/<pool>-<slot>-<epoch>.log` launcher logs,
+   * `scheduler.log`, `alerts.log`; read-only, for the pool detail's Logs tab. `""`: none.
+   */
+  readonly logsDir: string;
   readonly controls: SchedulerControls | null;
 }
 
@@ -313,8 +323,9 @@ function readPoolDef(r: Reader, x: unknown, p: string): PoolDefSetting | null {
       r.err(`${p}.slots`, "a whole number from 0 to 1000");
     } else slots = x.slots;
   }
+  const host = r.str(x.host, `${p}.host`, "", (s) => LABEL_ID.test(s), "a machine name");
   if (!id || !label) return null;
-  return { id, label, ...(runnerPrefix ? { runnerPrefix } : {}), slots };
+  return { id, label, ...(runnerPrefix ? { runnerPrefix } : {}), slots, ...(host ? { host } : {}) };
 }
 
 /**
@@ -524,6 +535,7 @@ export function validateSettings(raw: unknown): SettingsResult {
         "an absolute or ~/ path",
       ),
       pausedDir: r.str(so.pausedDir, `${p}.pausedDir`, "", validPath, "an absolute or ~/ path"),
+      logsDir: r.str(so.logsDir, `${p}.logsDir`, "", validPath, "an absolute or ~/ path"),
       controls,
     };
   }

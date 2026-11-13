@@ -12,6 +12,28 @@ import type { RateInfo } from "./model.ts";
 /** The API's origin: the only host Fleet talks to (`--allow-net=api.github.com`). */
 export const API = "https://api.github.com";
 
+/**
+ * Where GitHub redirects a job log download (`GET /repos/{repo}/actions/jobs/{id}/logs` answers 302
+ * to a short-lived signed URL there): the results service's storage accounts (the list GitHub
+ * documents for self-hosted runners) and the older pipelines host. The app's `--allow-net` bakes
+ * exactly these; a redirect anywhere else is refused.
+ */
+export const LOG_HOSTS: readonly string[] = [
+  ...Array.from({ length: 20 }, (_, i) => `productionresultssa${i}.blob.core.windows.net`),
+  "pipelines.actions.githubusercontent.com",
+];
+
+/** A job log download's cap: past it, the log's last this many bytes are kept. */
+export const LOG_MAX_BYTES = 4 * 1024 * 1024;
+
+/** A download's result. */
+export interface DownloadResult {
+  readonly text: string;
+  /** The log was longer than the cap: `text` is its end. */
+  readonly truncated: boolean;
+  readonly bytes: number;
+}
+
 /** First back-off when GitHub gives no time (doubled per failure, capped). */
 export const BACKOFF_FIRST_MS = 60_000;
 /** The longest back-off. */
@@ -76,6 +98,12 @@ export interface GitHubClient {
    * confirmed it). Resolves the status; rejects with a {@linkcode GitHubError} on a failure.
    */
   post(path: string, body?: unknown, opts?: RequestOptions): Promise<number>;
+  /**
+   * Download a job's log: GET the API path (it counts against the rate limit like any request),
+   * follow its redirect to one of {@linkcode LOG_HOSTS} WITHOUT the token, and keep at most
+   * `maxBytes` (the end of a longer log). Rejects with a {@linkcode GitHubError}.
+   */
+  downloadLog(path: string, opts?: RequestOptions & { maxBytes?: number }): Promise<DownloadResult>;
   /** The last rate limit seen. */
   rate(): RateInfo | null;
   /** While backing off: until when (epoch ms); else `null`. */
@@ -322,6 +350,79 @@ export function createGitHubClient(options: GitHubClientOptions): GitHubClient {
           );
         }
         return res.status;
+      });
+    },
+    downloadLog(path, opts) {
+      if (backoff !== null && now() < backoff) {
+        return Promise.reject(new GitHubError("backing off", 0, "backoff"));
+      }
+      if (!/^\/repos\/[\w.-]+\/[\w.-]+\/actions\/jobs\/\d+\/logs$/.test(path)) {
+        return Promise.reject(new GitHubError("refusing that path", 0, "http"));
+      }
+      const max = Math.max(1024, opts?.maxBytes ?? LOG_MAX_BYTES);
+      const headers: Record<string, string> = {
+        accept: "application/vnd.github+json",
+        "x-github-api-version": "2022-11-28",
+      };
+      if (token) headers.authorization = `Bearer ${token}`;
+      requests++;
+      return deadline(opts?.signal, async (signal) => {
+        const sentAt = now();
+        const res = await doFetch(API + path, { headers, signal, redirect: "manual" });
+        readClock(res.headers, sentAt, now());
+        readRate(res.headers);
+        count();
+        await res.body?.cancel();
+        if (res.status === 401) throw new GitHubError("the token was refused (401)", 401, "auth");
+        if (res.status === 429 || (res.status === 403 && isRateLimited(res.headers))) {
+          throw backOff(res.headers, res.status);
+        }
+        if (res.status === 404 || res.status === 410) {
+          throw new GitHubError(
+            "no log (404: expired, or not visible to the token)",
+            404,
+            "not-found",
+          );
+        }
+        if (res.status < 300 || res.status >= 400) {
+          throw new GitHubError(`HTTP ${res.status}`, res.status, "http");
+        }
+        let where: URL;
+        try {
+          where = new URL(res.headers.get("location") ?? "");
+        } catch {
+          throw new GitHubError("no log location", 0, "http");
+        }
+        if (where.protocol !== "https:" || !LOG_HOSTS.includes(where.hostname)) {
+          throw new GitHubError("the log is on a host Fleet doesn't fetch from", 0, "http");
+        }
+        // The signed URL is the credential: no token, no cookies, no further redirects.
+        const blob = await doFetch(where.href, { signal, redirect: "error" });
+        if (!blob.ok || !blob.body) {
+          await blob.body?.cancel();
+          throw new GitHubError(`log download: HTTP ${blob.status}`, blob.status, "http");
+        }
+        const chunks: Uint8Array[] = [];
+        let held = 0;
+        let total = 0;
+        for await (const c of blob.body) {
+          chunks.push(c);
+          held += c.length;
+          total += c.length;
+          while (held - chunks[0].length >= max) held -= chunks.shift()!.length;
+        }
+        let bytes = new Uint8Array(held);
+        let off = 0;
+        for (const c of chunks) {
+          bytes.set(c, off);
+          off += c.length;
+        }
+        const truncated = total > held || held > max;
+        if (held > max) bytes = bytes.subarray(held - max);
+        let text = new TextDecoder().decode(bytes);
+        if (truncated) text = text.slice(text.indexOf("\n") + 1); // a partial first line
+        failures = 0;
+        return { text, truncated, bytes: total };
       });
     },
     rate: () => rate,

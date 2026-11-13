@@ -124,15 +124,23 @@ Deno.test("neutral: no owners and nothing pinned polls nothing", async () => {
   });
 });
 
-Deno.test("mcp: the spool and the health file are optional", () => {
+Deno.test("mcp: the spool, the health file and the logs folder are optional", () => {
   assertEquals(pathsFromArgs(["--data-dir", "/d"]), {
     dataDir: "/d",
     hooksDir: null,
     healthFile: null,
+    logsDir: null,
   });
   assertEquals(pathsFromArgs(["--data-dir=/d", "--hooks-dir", "/h", "--health-file", "/f"]), {
     dataDir: "/d",
     hooksDir: "/h",
     healthFile: "/f",
+    logsDir: null,
+  });
+  assertEquals(pathsFromArgs(["--data-dir", "/d", "--logs-dir", "/l"]), {
+    dataDir: "/d",
+    hooksDir: null,
+    healthFile: null,
+    logsDir: "/l",
   });
 });

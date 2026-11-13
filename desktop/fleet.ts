@@ -8,11 +8,14 @@ import {
   appendJournal,
   ghToken,
   journalLastSeq,
+  loadHistory,
   loadLog,
   loadSettingsFiles,
   loadState,
   postNotification,
+  readJournal,
   saveAgentSnapshot,
+  saveHistory,
   saveLog,
   saveSettings,
   saveState,
@@ -38,8 +41,12 @@ import {
 } from "../lib/deno-hooks.ts";
 import { expandHome, settings } from "../lib/settings.ts";
 import type { PoolPaths } from "../lib/controls.ts";
+import { asRange } from "../lib/pool-detail.ts";
+import { createJobLogs, type JobLogs } from "../lib/logs.ts";
+import { launcherForJob, listLauncherLogs, poolLogLines, runnerLogView } from "../lib/deno-logs.ts";
 
 let service: FleetService | undefined;
+let jobLogs: JobLogs | undefined;
 let extHost: DesktopExtensionHost | undefined;
 /** The pool commands the settings configure here (the runner scheduler integration), or `null`. */
 const pools = (): PoolPaths | null => localPoolPaths(settings().integrations.runnerScheduler);
@@ -76,7 +83,13 @@ function start(host: DesktopExtensionHost): void {
     localHealthFor: (s) => localHealthReader(s.integrations.runnerScheduler),
     loadSettings: () => loadSettingsFiles(dir),
     saveSettings: (s) => saveSettings(dir, s),
+    // The usage history per pool (the detail screens, fleet_pool_history), and its first-run
+    // back-fill from the event journal (and the spool, above).
+    loadHistory: () => loadHistory(dir),
+    saveHistory: (doc) => saveHistory(dir, doc),
+    readJournal: () => readJournal(dir),
   });
+  jobLogs = createJobLogs({ github: () => service?.github() ?? null });
   service.onChange(() => {
     try {
       host.emit(CHANGED_EVENT, null);
@@ -88,9 +101,9 @@ function start(host: DesktopExtensionHost): void {
   service.start().catch((err) => console.error("fleet: start failed:", errName(err)));
   // Webhooks follow the startup settings (a change applies at the next launch).
   void service.settingsReady().then(() => startHooks(service!, dir), () => {});
-  host.onAppQuit(() => {
+  host.onAppQuit(async () => {
     stopSpool?.();
-    return receiver?.stop();
+    await Promise.all([receiver?.stop(), service?.flushHistory()]);
   });
 }
 
@@ -186,6 +199,21 @@ function obj(raw: unknown): Record<string, unknown> {
   return typeof raw === "object" && raw !== null ? raw as Record<string, unknown> : {};
 }
 
+/** The runner scheduler's log folder on this machine (settings), or `null`. */
+function logsDir(): string | null {
+  const dir = settings().integrations.runnerScheduler?.logsDir;
+  return dir ? expandHome(dir, home()) : null;
+}
+
+/** A pool id from a request (a name the cards could show), or `""`. */
+function poolArg(raw: unknown): string {
+  const p = obj(raw).pool;
+  return typeof p === "string" && /^[\w.+-]{1,100}$/.test(p) ? p : "";
+}
+
+const optNum = (v: unknown): number | undefined =>
+  typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined;
+
 export default defineDesktopExtension({
   name: "fleet",
   events: [CHANGED_EVENT],
@@ -247,6 +275,7 @@ export default defineDesktopExtension({
             dataDir: dir,
             spoolDir: s.webhooks.enabled ? spoolDirOf(s.webhooks, dir) : null,
             healthFile,
+            logsDir: logsDir(),
             os: Deno.build.os,
           },
         };
@@ -288,6 +317,71 @@ export default defineDesktopExtension({
     poolControl: {
       timeoutMs: false,
       handler: (raw: unknown) => runPoolControl(controlDeps(), raw),
+    },
+    /** A pool's detail (or `github`): its usage history over a range, recent jobs and events. */
+    poolDetail: {
+      handler: (raw: unknown) => svc().poolDetail(poolArg(raw), asRange(obj(raw).range)),
+    },
+    /** A pool's launcher logs (newest first), when the runner scheduler's logs are configured. */
+    runnerLogList: {
+      timeoutMs: 30_000,
+      handler: async (raw: unknown) => {
+        const dir = logsDir();
+        const pool = poolArg(raw);
+        if (!dir || !pool) return { configured: false, logs: [] };
+        return { configured: true, logs: await listLauncherLogs(dir, pool) };
+      },
+    },
+    /** The scheduler's and the watchdog's lines about a pool (their files' tails), redacted. */
+    poolLogLines: {
+      handler: async (raw: unknown) => {
+        const dir = logsDir();
+        const pool = poolArg(raw);
+        if (!dir || !pool) return { configured: false, scheduler: [], alerts: [] };
+        const [sched, alerts] = await Promise.all([
+          poolLogLines(dir, pool, "scheduler"),
+          poolLogLines(dir, pool, "alerts"),
+        ]);
+        return { configured: true, scheduler: sched.lines, alerts: alerts.lines };
+      },
+    },
+    /** One launcher log: its tail, or the lines after / before an offset; redacted. */
+    runnerLog: {
+      handler: async (raw: unknown) => {
+        const dir = logsDir();
+        const r = obj(raw);
+        const file = typeof r.file === "string" ? r.file : "";
+        const view = dir
+          ? await runnerLogView(dir, poolArg(raw), file, {
+            after: optNum(r.after),
+            before: optNum(r.before),
+          })
+          : null;
+        return view ?? { error: "That log isn't one of this pool's launcher logs." };
+      },
+    },
+    /** The launcher log that took a job (the scheduler's records say which), as above. */
+    runnerLogForJob: {
+      handler: async (raw: unknown) => {
+        const dir = logsDir();
+        const jobId = optNum(obj(raw).jobId);
+        if (!dir || !jobId) return { error: "No runner logs are configured here." };
+        const found = await launcherForJob(dir, jobId);
+        const view = found ? await runnerLogView(dir, found.pool, found.file) : null;
+        return view ?? { error: "The scheduler's logs don't name a launcher log for that job." };
+      },
+    },
+    /** A job's GitHub log, fetched on demand (budgeted, cached), redacted. */
+    jobLog: {
+      timeoutMs: 120_000,
+      handler: (raw: unknown) => {
+        const r = obj(raw);
+        const jobId = optNum(r.jobId) ?? 0;
+        const rec = svc().history().job(jobId);
+        const repo = typeof r.repo === "string" ? r.repo : rec?.repo ?? "";
+        const title = rec ? `${rec.workflow} · ${rec.name}` : `job ${jobId}`;
+        return jobLogs!.get(repo, jobId, title, rec !== undefined);
+      },
     },
     clearToken: {
       handler: async () => {

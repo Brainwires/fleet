@@ -24,6 +24,8 @@ export interface MachineInfo {
   readonly dataDir: string;
   readonly spoolDir: string | null;
   readonly healthFile: string | null;
+  /** The runner scheduler's log folder (fleet_runner_log), or `null`. */
+  readonly logsDir?: string | null;
   readonly os: string;
 }
 
@@ -59,6 +61,7 @@ export function mcpCommand(m: MachineInfo, checkout = "<path to fleet>"): string
     m.dataDir,
     ...(m.spoolDir ? [m.spoolDir] : []),
     ...(m.healthFile ? [m.healthFile] : []),
+    ...(m.logsDir ? [m.logsDir] : []),
   ];
   const q = (s: string) => (/[\s"]/.test(s) ? `"${s.replace(/"/g, '\\"')}"` : s);
   return [
@@ -70,6 +73,7 @@ export function mcpCommand(m: MachineInfo, checkout = "<path to fleet>"): string
     q(m.dataDir),
     ...(m.spoolDir ? ["--hooks-dir", q(m.spoolDir)] : []),
     ...(m.healthFile ? ["--health-file", q(m.healthFile)] : []),
+    ...(m.logsDir ? ["--logs-dir", q(m.logsDir)] : []),
   ].join(" ");
 }
 
