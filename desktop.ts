@@ -126,6 +126,9 @@ const manager = createWindowManager({
 late.windows = manager;
 // A click on one of Fleet's notifications (the one that launched it too) opens the window.
 onNotificationClick(openWindow);
+// A click on a Fleet Notifier notification (lib/notifier.ts) runs `open -b <Fleet's id> --args
+// --show-window`: a running Fleet gets a reopen (onDockReopen), a stopped one starts with the flag.
+if (Deno.args.includes("--show-window")) openWindow();
 
 const fleet = await fleetService();
 late.service = fleet;

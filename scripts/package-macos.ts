@@ -63,6 +63,8 @@
  */
 
 import type { DesktopPackageArgs } from "denext/desktop";
+// Fleet: the notification helper embedded in each bundle before it is signed (tools/notifier.ts).
+import { embedNotifiers } from "../tools/notifier.ts";
 
 // Load denext/desktop with --node-modules-dir=none, so its own build dependencies (esbuild, ws)
 // come from Deno's cache whatever this project's node_modules mode is: in a pnpm workspace
@@ -660,6 +662,10 @@ async function main(): Promise<void> {
   const signingPlan = signingPlanNote(signing.identity);
   if (signingPlan) console.log(signingPlan);
   const artifacts = await buildArtifacts(opts, name);
+  // Fleet: Contents/Helpers/Fleet Notifier.app, before finishArtifacts signs each bundle
+  // inside-out, so its signature and notarization cover the helper.
+  await embedNotifiers(artifacts);
+  resealNeeded = true;
   const installers = await finishArtifacts(
     artifacts,
     opts,

@@ -294,6 +294,43 @@ Each kind can be turned off in the settings (`notifications`). Posted keys are k
 it back on doesn't replay the past. Pause notifications in the tray menu silences them all (the
 setting persists).
 
+### Fleet Notifier (macOS)
+
+The macOS package embeds a helper app, `Contents/Helpers/Fleet Notifier.app` (bundle id Fleet's +
+`.notifier`, Fleet's icon, no Dock icon, never a window), so shell scripts can post a notification
+whose click opens Fleet (an `osascript` notification belongs to Script Editor, and its click opens
+an untitled script). The runner watchdog's `alert_notify` uses it:
+
+```sh
+"…/Fleet.app/Contents/Helpers/Fleet Notifier.app/Contents/MacOS/fleet-notify" \
+  --title T --body B [--subtitle S] [--id KEY] [--url fleet:LINK] [--dry-run]
+```
+
+**First run: allow its notifications.** After installing a new Fleet, open Fleet once. It registers
+the helper with LaunchServices (a `ditto` or Finder copy registers only Fleet.app itself, and the
+notification center refuses an unregistered helper with no prompt), then starts the helper through
+LaunchServices to ask: macOS asks whether **Fleet Notifier** may send notifications. Choose
+**Allow** (to change it later: System Settings > Notifications > Fleet Notifier). Only an instance
+LaunchServices starts gets that prompt; a post exec'd from a shell while permission is undetermined
+starts one the same way (`open -n -g -a "…/Fleet Notifier.app" --args --request-authorization`) and
+waits up to 60 s for the answer. Until it is allowed, every post exits 3. The helper carries Fleet's
+icon as an `.icns` and, when Xcode's `actool` is there at packaging, as an asset catalog
+(`Assets.car`, `CFBundleIconName`) too.
+
+`--id` replaces an earlier notification with the same id (the watchdog passes its condition key). It
+exits once the post is accepted, within 2 s once allowed (the first run waits up to 60 s for the
+permission prompt's answer): 0 posted, 1 not accepted, 3 not authorized (denied, or the prompt not
+answered in time), 4 bad arguments. `--dry-run` validates and prints the notification as JSON,
+posting nothing. A click runs `open -b <Fleet's id> --args --show-window`: a running Fleet opens its
+window (a reopen), a stopped one starts with it shown. Fleet has no deep links yet, so `--url` is
+kept in the notification but not acted on.
+
+Where the watchdog notifies through the helper (the runner scheduler integration is configured and
+this bundle embeds it), Fleet leaves out its own "queued over 15 min" notice for a self-hosted
+pool's job: that is the watchdog's `stuck:<pool>` alert, shown once. Sources: `notifier/` (Swift),
+`tools/notifier.ts` (build + embed, called by `scripts/package-macos.ts` before signing),
+`lib/notifier.ts`.
+
 ## The shared rate limit
 
 Fleet usually runs on the same gh token as other tools (a runner scheduler, CI watchers), and so
@@ -684,6 +721,7 @@ this repo.
 | `lib/redact.ts`, `runner-logs.ts`      | Secrets out of log lines, ANSI; parsing launcher logs, scheduler lines, job log groups                   |
 | `lib/deno-logs.ts`, `logs.ts`          | Bounded, redacted reads of the scheduler's logs; GitHub job logs (budgeted, cached)                      |
 | `lib/notify.ts`                        | Which notifications to post, once each                                                                   |
+| `lib/notifier.ts`, `tools/notifier.ts` | Fleet Notifier (macOS helper app in `notifier/`): where it lives, whether the watchdog uses it; build    |
 | `lib/agent-snapshot.ts`                | The agents' `snapshot.json`, built from the poller's state                                               |
 | `lib/agent-files.ts`                   | The agent files' names, shared with the MCP server                                                       |
 | `lib/deno-host.ts`                     | gh, the data files, native notifications                                                                 |

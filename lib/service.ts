@@ -73,6 +73,11 @@ export interface ServiceDeps {
   readonly now?: () => number;
   /** Post a native notification (best effort). */
   readonly notify: (n: FleetNotification) => void | Promise<void>;
+  /**
+   * Whether the runner watchdog posts its alerts here through Fleet Notifier (lib/notifier.ts):
+   * Fleet then leaves out the notices those alerts already cover. Absent: never.
+   */
+  readonly watchdogNotifies?: () => boolean;
   /** The persisted state (no token in it). */
   readonly load: () => Promise<PersistedState | null>;
   readonly save: (s: PersistedState) => Promise<void>;
@@ -518,7 +523,8 @@ export function createFleetService(deps: ServiceDeps): FleetService {
 
   const notifyAndPersist = async () => {
     const snap = snapshot();
-    for (const n of pendingNotifications(snap, seen, startedAt)) {
+    const opts = { watchdogNotifies: deps.watchdogNotifies?.() === true };
+    for (const n of pendingNotifications(snap, seen, startedAt, undefined, opts)) {
       if (paused()) continue; // marked seen all the same: resuming doesn't replay them
       try {
         await deps.notify(n);

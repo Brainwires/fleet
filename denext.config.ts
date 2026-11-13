@@ -3,6 +3,7 @@ import { ALL_GH_PATHS } from "./lib/deno-host.ts";
 import { SECURITY_BIN } from "./lib/deno-hooks.ts";
 import { LOG_HOSTS } from "./lib/github.ts";
 import { internalGrants } from "./lib/build-grants.ts";
+import { LSREGISTER, OPEN_BIN } from "./lib/notifier.ts";
 import { INITIAL_MENU } from "./lib/tray-driver.ts";
 
 // Fleet: GitHub Actions jobs and self-hosted runner pools, live. One window plus a tray icon. The
@@ -68,9 +69,10 @@ export default {
       // URL fetched without the token; the pool detail's "View log"). The webhook receiver listens
       // on loopback, inside the loopback listen grant every desktop app has.
       netConnect: ["api.github.com", ...LOG_HOSTS],
-      // `gh auth token`, and a webhook secret from the macOS login keychain, by absolute path only;
-      // an internal build adds the runner scheduler's pool commands.
-      run: [...ALL_GH_PATHS, SECURITY_BIN, ...INTERNAL.run],
+      // `gh auth token`, a webhook secret from the macOS login keychain, and for the embedded Fleet
+      // Notifier (lib/notifier.ts) LaunchServices' lsregister and `open` (its permission instance),
+      // by absolute path only; an internal build adds the runner scheduler's pool commands.
+      run: [...ALL_GH_PATHS, SECURITY_BIN, LSREGISTER, OPEN_BIN, ...INTERNAL.run],
       // The settings, state, event log and webhook spool: the app's own data folder only
       // ($DENO_DESKTOP_DATA on the pinned runtime). No token is ever written there. An internal
       // build adds a spool folder its local config puts outside it.

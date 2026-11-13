@@ -14,6 +14,7 @@ import {
   loadState,
   postNotification,
   readJournal,
+  registerNotifierHelper,
   saveAgentSnapshot,
   saveHistory,
   saveLog,
@@ -48,6 +49,7 @@ import {
   tailSpool,
 } from "../lib/deno-hooks.ts";
 import { expandHome, settings } from "../lib/settings.ts";
+import { watchdogNotifies } from "../lib/notifier.ts";
 import type { PoolPaths } from "../lib/controls.ts";
 import { asRange } from "../lib/pool-detail.ts";
 import { createJobLogs, type JobLogs } from "../lib/logs.ts";
@@ -73,10 +75,20 @@ function start(host: DesktopExtensionHost): void {
   if (service) return;
   extHost = host;
   const dir = host.appSupportDir;
+  // The embedded Fleet Notifier, registered with LaunchServices once per build (a ditto install
+  // doesn't), then asked for its notification permission (the prompt shows at Fleet's launch).
+  void registerNotifierHelper(dir);
   service = createFleetService({
     ghToken: () => ghToken(),
     secrets: host.secureStore,
     notify: (n) => postNotification(n),
+    // The watchdog's alerts reach the user through Fleet Notifier when this bundle embeds it.
+    watchdogNotifies: () =>
+      watchdogNotifies(
+        Deno.execPath(),
+        settings().integrations.runnerScheduler !== null,
+        (p) => Deno.statSync(p).isFile,
+      ),
     load: () => loadState(dir),
     save: (s) => saveState(dir, s),
     loadLog: () => loadLog(dir),

@@ -7,6 +7,13 @@ import type { PersistedState } from "./poller.ts";
 import { type FleetSettings, LOCAL_CONFIG_FILE, SETTINGS_FILE } from "./settings.ts";
 import type { FleetEvent } from "./events.ts";
 import {
+  LSREGISTER,
+  NOTIFIER_STAMP_FILE,
+  notifierAuthorizationArgs,
+  OPEN_BIN,
+  registerNotifier,
+} from "./notifier.ts";
+import {
   AGENT_SNAPSHOT_FILE,
   HISTORY_FILE,
   JOURNAL_FILE,
@@ -348,4 +355,37 @@ export async function postNotification(n: FleetNotification): Promise<void> {
   await permissionAsked;
   const tag = `${NOTIFICATION_TAG_PREFIX}${n.key.replace(/[^A-Za-z0-9:_-]/g, "_").slice(0, 120)}`;
   await api.schedule({ title: n.title, body: n.body, at: Date.now(), tag });
+}
+
+/**
+ * Register the embedded Fleet Notifier with LaunchServices once per helper build (lib/notifier.ts
+ * registerNotifier), the stamp in the app's data folder, and ask for its notification permission.
+ * Best effort; macOS only.
+ */
+export async function registerNotifierHelper(dir: string): Promise<void> {
+  try {
+    await registerNotifier({
+      os: Deno.build.os,
+      execPath: Deno.execPath(),
+      mtime: async (p) => (await Deno.stat(p).catch(() => null))?.mtime?.getTime() ?? null,
+      readStamp: () => Deno.readTextFile(join(dir, NOTIFIER_STAMP_FILE)).catch(() => null),
+      writeStamp: (stamp) => Deno.writeTextFile(join(dir, NOTIFIER_STAMP_FILE), `${stamp}\n`),
+      lsregister: async (bundle) =>
+        (await new Deno.Command(LSREGISTER, {
+          args: ["-f", bundle],
+          stdout: "null",
+          stderr: "null",
+        })
+          .output()).success,
+      askPermission: async (bundle) => {
+        await new Deno.Command(OPEN_BIN, {
+          args: notifierAuthorizationArgs(bundle),
+          stdout: "null",
+          stderr: "null",
+        }).output();
+      },
+    });
+  } catch (err) {
+    console.error("fleet: notifier registration:", err instanceof Error ? err.name : "error");
+  }
 }

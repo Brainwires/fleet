@@ -2,7 +2,9 @@
 // queued, a job on a protected branch that failed. Each condition has a key, posted once: the keys
 // are remembered (and persisted by the caller), so a re-poll, a reload or a relaunch never repeats
 // one. A kind turned off in the settings (`notifications`) is still marked seen, so turning it back
-// on doesn't replay the past.
+// on doesn't replay the past. Where the runner watchdog posts its alerts through Fleet Notifier
+// (lib/notifier.ts), a job queued over 15 min on a self-hosted pool is the watchdog's `stuck:<pool>`
+// alert already: Fleet marks it seen and leaves its own notice out, so the condition shows once.
 
 import { jobWarning } from "./classify.ts";
 import type { Snapshot } from "./model.ts";
@@ -22,6 +24,56 @@ const FAILED = new Set(["failure", "timed_out", "startup_failure"]);
 /** At most this many separate "queued over 15 min" notices per poll; more become one summary. */
 export const MAX_QUEUED_NOTICES = 3;
 
+/** How the notices are chosen. */
+export interface NotifyOptions {
+  /**
+   * The watchdog notifies through Fleet Notifier: no "queued over 15 min" notice for a self-hosted
+   * pool's job (the watchdog's own alert covers it). GitHub-hosted jobs keep theirs.
+   */
+  readonly watchdogNotifies?: boolean;
+}
+
+/**
+ * The "queued over 15 min" notices: one per job, or one summary for more than
+ * {@linkcode MAX_QUEUED_NOTICES}. A self-hosted pool's job is the watchdog's `stuck:<pool>` alert
+ * when the watchdog notifies through Fleet Notifier: marked seen, not shown.
+ */
+function queuedNotices(
+  snap: Snapshot,
+  seen: SeenKeys,
+  ghNow: number,
+  on: boolean,
+  opts: NotifyOptions,
+  add: (n: FleetNotification, on: boolean) => void,
+): FleetNotification[] {
+  const now = snap.at;
+  const overdue = rowsOf(snap.queued).filter((r) =>
+    jobWarning(r, ghNow) === "queued-long" && !seen.has(`queued:${r.id}`)
+  );
+  const byWatchdog = (r: (typeof overdue)[number]) =>
+    opts.watchdogNotifies === true && r.target === "pool";
+  for (const r of overdue) if (byWatchdog(r)) seen.set(`queued:${r.id}`, now);
+  const late = overdue.filter((r) => !byWatchdog(r));
+  if (late.length <= MAX_QUEUED_NOTICES) {
+    for (const r of late) {
+      add({
+        key: `queued:${r.id}`,
+        title: "Job queued over 15 min",
+        body: `${r.name} is waiting for ${r.pool}.`,
+      }, on);
+    }
+    return [];
+  }
+  for (const r of late) seen.set(`queued:${r.id}`, now);
+  if (!on) return [];
+  const pools = [...new Set(late.map((r) => r.pool))].join(", ");
+  return [{
+    key: `queued-batch:${late.map((r) => r.id).join(",")}`,
+    title: `${late.length} jobs queued over 15 min`,
+    body: `Waiting for ${pools}.`,
+  }];
+}
+
 /** Remembered keys, epoch ms of posting (kept 48 h). */
 export type SeenKeys = Map<string, number>;
 
@@ -40,6 +92,7 @@ export function pendingNotifications(
   seen: SeenKeys,
   startedAt: number,
   prefs: FleetSettings["notifications"] = settings().notifications,
+  opts: NotifyOptions = {},
 ): FleetNotification[] {
   const now = snap.at;
   // Queue ages and completion times are GitHub's: compared on GitHub's clock.
@@ -65,28 +118,7 @@ export function pendingNotifications(
     }
   }
 
-  const late = rowsOf(snap.queued).filter((r) =>
-    jobWarning(r, ghNow) === "queued-long" && !seen.has(`queued:${r.id}`)
-  );
-  if (late.length > MAX_QUEUED_NOTICES) {
-    for (const r of late) seen.set(`queued:${r.id}`, now);
-    const pools = [...new Set(late.map((r) => r.pool))].join(", ");
-    if (prefs.queuedLong) {
-      out.push({
-        key: `queued-batch:${late.map((r) => r.id).join(",")}`,
-        title: `${late.length} jobs queued over 15 min`,
-        body: `Waiting for ${pools}.`,
-      });
-    }
-  } else {
-    for (const r of late) {
-      add({
-        key: `queued:${r.id}`,
-        title: "Job queued over 15 min",
-        body: `${r.name} is waiting for ${r.pool}.`,
-      }, prefs.queuedLong);
-    }
-  }
+  out.push(...queuedNotices(snap, seen, ghNow, prefs.queuedLong, opts, add));
 
   for (const f of snap.finished) {
     // A protected-branch failure only: by provenance (a fork PR's branch named `main` isn't the
