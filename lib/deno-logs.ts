@@ -128,6 +128,20 @@ export async function readBefore(
   return { size, start: start + firstNl, end, truncated: start > 0, lines };
 }
 
+/** The OS's path separator: `Deno.realPath` answers with it (`\\` on Windows). */
+const SEP = Deno.build.os === "windows" ? "\\" : "/";
+
+/**
+ * `real` is a file directly inside `dir` (both resolved by `Deno.realPath`): it starts with `dir`
+ * and one separator, and the rest is a plain name (no separator of either kind).
+ */
+export function directChildOf(real: string, dir: string, sep = SEP): boolean {
+  const prefix = dir.endsWith(sep) ? dir : dir + sep;
+  if (!real.startsWith(prefix)) return false;
+  const rest = real.slice(prefix.length);
+  return rest !== "" && !/[\\/]/.test(rest);
+}
+
 /**
  * A launcher log's path when `file` is one of `pool`'s inside `<logsDir>/jobs/` (a plain name, no
  * separators; the resolved path must stay in the folder), else `null`.
@@ -137,13 +151,15 @@ export async function launcherPath(
   pool: string,
   file: string,
 ): Promise<string | null> {
-  if (!LAUNCHER_LOG.test(file) || /[\\/]/.test(file) || file.startsWith(".")) return null;
+  // No separator of either kind, and none of the characters Windows gives a meaning in a name
+  // (`:` opens an alternate data stream), on every OS alike.
+  if (!LAUNCHER_LOG.test(file) || /[\\/:*?"<>|\0]/.test(file) || file.startsWith(".")) return null;
   if (parseLauncherName(file)?.pool !== pool) return null;
   const jobs = join(logsDir, "jobs");
   const path = join(jobs, file);
   try {
     const [real, dir] = await Promise.all([Deno.realPath(path), Deno.realPath(jobs)]);
-    if (!real.startsWith(dir.endsWith("/") ? dir : `${dir}/`)) return null;
+    if (!directChildOf(real, dir)) return null;
     const st = await Deno.lstat(path);
     return st.isFile ? real : null;
   } catch {
