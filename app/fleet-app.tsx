@@ -7,7 +7,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "denext";
 import { onDesktopEvent } from "denext/desktop/client";
-import { closeWindow, quitApp } from "denext/desktop/window";
+import { closeWindow } from "denext/desktop/window";
 import { openExternal } from "denext/mobile";
 import { type FleetEvent, LOG_LIMIT, mergeEvents } from "../lib/events.ts";
 import type { Snapshot } from "../lib/model.ts";
@@ -123,15 +123,15 @@ export function FleetApp() {
     void fleet.settingsShown().catch(() => {});
   }, [snap?.settingsRequested, needsSetup]);
 
-  // Cmd+W closes the window and Cmd+Q quits (macOS): an accessory app has no menu bar to own them.
+  // Cmd+W and Cmd+Q close the window (macOS): an accessory app has no menu bar to own them, and a
+  // quit Fleet didn't ask for closes to the tray anyway (lib/quit-guard.ts).
   useEffect(() => {
     const mac = /Mac/.test(navigator.userAgent);
     const onKey = (e: KeyboardEvent) => {
       const shortcut = windowShortcut(e, mac);
       if (!shortcut) return;
       e.preventDefault();
-      const done = shortcut === "close" ? closeWindow() : quitApp();
-      void done.catch((err) => console.error("fleet: shortcut:", errorText(err)));
+      void closeWindow().catch((err) => console.error("fleet: shortcut:", errorText(err)));
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);

@@ -5,7 +5,10 @@
 // else closed; the close button closes the window for good (`desktop.app.keepAlive` keeps the app
 // up with none: denext's src/desktop/app-windows.ts `applyKeepAlive` turns the runtime's
 // `quitOnLastWindowClosed` off, and window-registry.ts `closed` ends the app only without it), and
-// the tray, a reopen, a second launch or a notification click opens a fresh one. Only Quit quits.
+// the tray, a reopen, a second launch or a notification click opens a fresh one. Only the tray's
+// Quit quits: any other quit (the Dock's Quit, Cmd+Q, `osascript … quit`) closes the window and
+// leaves Fleet in the tray (lib/quit-guard.ts); the OS's session end always quits. On macOS the Dock
+// icon follows the window unless Fleet is installed under /Applications (lib/dock-policy.ts).
 // The window also shows until the first-run wizard is done, and the tray's Settings… opens it on the
 // Settings view. Start at login is opt-in: set only when the settings change it.
 import config from "./.deno-desktop/config.json" with { type: "json" };
@@ -14,6 +17,8 @@ import { fleetService } from "./desktop/fleet.ts";
 import { trayIcons } from "./lib/icons.ts";
 import type { Snapshot } from "./lib/model.ts";
 import { onNotificationClick } from "./lib/deno-host.ts";
+import { dockMode } from "./lib/dock-policy.ts";
+import { createQuitGuard } from "./lib/quit-guard.ts";
 import {
   createWindowManager,
   driveTray,
@@ -32,7 +37,7 @@ const WINDOW_SIZE = { width: 1320, height: 860 } as const;
 const MIN_SIZE = { width: 860, height: 560 } as const;
 
 /** What runtime events reach before it exists: the window manager, the backend service. */
-const late: { windows?: WindowManager; service?: FleetService } = {};
+const late: { windows?: WindowManager; service?: FleetService; hasTray?: boolean } = {};
 /** Open Fleet's window (or bring it up) from a runtime event; a failure is logged. */
 const openWindow = () => {
   try {
@@ -42,10 +47,27 @@ const openWindow = () => {
   }
 };
 
+/** Whether the Dock icon follows the window (macOS, not installed under /Applications). */
+const DOCK = dockMode(Deno.build.os, () => Deno.execPath(), (p) => Deno.realPathSync(p));
+
+/** Which quits quit: the tray's Quit and the session end; any other closes to the tray. */
+const quitGuard = createQuitGuard({
+  closeWindows: () => late.windows?.close(),
+  hasTray: () => late.hasTray === true,
+  later: (fn) => void setTimeout(fn, 0),
+});
+// Each quit's reason (`"session-end"` for logout / restart / shut down), for the guard. Added before
+// runDesktop, so it runs before denext's own `beforequit` listener asks the guards.
+(Deno as unknown as {
+  desktop?: { addEventListener?(type: string, fn: (e: Event) => void): void };
+}).desktop?.addEventListener?.("beforequit", (e) => {
+  quitGuard.noteQuitEvent((e as Event & { reason?: unknown }).reason);
+});
+
 const app = await runDesktop({
   importMetaUrl: import.meta.url,
   ...(await resolveDesktopCapabilities(config, { base: import.meta.url })),
-  // A reopen (Fleet opened again from Finder or Launchpad while it runs; it has no Dock icon) and a
+  // A reopen (a Dock click, or Fleet opened again from Finder or Launchpad while it runs) and a
   // second launch (singleInstance): Fleet's window, through the manager (close tracking), so the
   // runtime opens nothing itself.
   onDockReopen: () => (openWindow(), undefined),
@@ -58,10 +80,17 @@ const desktopApi = (Deno as unknown as {
   desktop?: { launchAtLogin?: LoginItemApi; quit?: () => void };
 }).desktop;
 
+/** Fleet's own quit (the tray's Quit; closing the window with no tray): the guard lets it go. */
 const quit = () => {
-  if (runtime.quit) void runtime.quit();
-  else desktopApi?.quit?.();
+  quitGuard.beginIntendedQuit();
+  if (runtime.quit) {
+    void runtime.quit().then((quitting) => {
+      if (!quitting) quitGuard.endIntendedQuit();
+    }, () => quitGuard.endIntendedQuit());
+  } else desktopApi?.quit?.();
 };
+late.hasTray = app.tray != null;
+app.onBeforeQuit(() => quitGuard.guard());
 
 let tray: TrayDriver | undefined;
 const manager = createWindowManager({
@@ -81,6 +110,10 @@ const manager = createWindowManager({
     } catch { /* a runtime without it */ }
     return w satisfies FleetWindow;
   },
+  // The Dock icon follows the window only outside /Applications (no Recents entry there).
+  ...(DOCK === "follow-window"
+    ? { setActivationPolicy: (p: "regular" | "accessory") => app.setActivationPolicy(p) }
+    : {}),
 }, {
   onChange: () => tray?.refreshMenu(),
   // No page reads now: the backend polls at the hidden rate until a window opens again. With no

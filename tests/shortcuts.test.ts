@@ -1,5 +1,6 @@
-// The window's own shortcuts (lib/shortcuts.ts): Cmd+W closes and Cmd+Q quits on macOS, where the
-// accessory app has no menu bar to own them; nothing elsewhere or with other modifiers.
+// The window's own shortcuts (lib/shortcuts.ts): Cmd+W and Cmd+Q close the window on macOS (Cmd+Q
+// closes to the tray, like the Dock's Quit), where the accessory app has no menu bar to own them;
+// nothing elsewhere or with other modifiers.
 
 import "./fixture-settings.ts";
 
@@ -15,10 +16,11 @@ const key = (k: string, mods: Partial<ShortcutKey> = {}): ShortcutKey => ({
   ...mods,
 });
 
-Deno.test("shortcuts: Cmd+W closes the window and Cmd+Q quits, on macOS", () => {
+Deno.test("shortcuts: Cmd+W and Cmd+Q close the window (Fleet stays in the tray), on macOS", () => {
   assertEquals(windowShortcut(key("w"), true), "close");
   assertEquals(windowShortcut(key("W"), true), "close");
-  assertEquals(windowShortcut(key("q"), true), "quit");
+  assertEquals(windowShortcut(key("q"), true), "close");
+  assertEquals(windowShortcut(key("Q"), true), "close");
 });
 
 Deno.test("shortcuts: none off macOS, without Cmd, with another modifier, or for other keys", () => {
