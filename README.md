@@ -152,9 +152,13 @@ with `~/`.
 ## The window
 
 - **Header**: a 3 px severity stripe (grey, amber, red), the watched owners, running and queued
-  counts, why it isn't green, the last poll, the poll interval, API requests left (amber below
-  1,500, red below 800), the webhook state (`hooks: live`, `live (via receiver)`,
-  `stale (last delivery N min ago)` or `off`), Refresh and Settings.
+  counts, why it isn't green, how current the data is (`live · last event 2m ago` while webhooks are
+  live, else `updated N ago` from the later of the last poll and the last delivery, muted when a
+  poll is overdue or webhooks went quiet with jobs active), the poll interval, API requests left
+  (amber below 1,500, red below 800), the webhook state (`hooks: live`, `live (via receiver)`,
+  `stale (last delivery N min ago)` while jobs are active, `quiet (…)` with nothing running, or
+  `off`), Refresh and Settings. With webhooks live, empty Running and Queued lanes carry a green
+  live dot.
 - **Pool cards**: one card per runner pool, then GitHub-hosted. The list follows the live data,
   rebuilt on every poll: without a pool-health variable, the organizations' self-hosted runners
   grouped by their custom labels (ok while one runner is online); with one

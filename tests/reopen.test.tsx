@@ -239,3 +239,50 @@ Deno.test("reopen: Refresh asks the backend to poll and shows its answer", async
     rt.restore();
   }
 });
+
+for (const type of ["focus", "pageshow"] as const) {
+  Deno.test(`reopen: a window's ${type} reads the state, even before visibility flips`, async () => {
+    const busy = await busySnapshot();
+    const rt = fakeDesktop(busy);
+    try {
+      const screen = await render(<FleetApp />);
+      await settle(screen);
+      rt.doc.visibilityState = "hidden";
+      rt.doc.hasFocus = () => false;
+      rt.doc.dispatchEvent(new Event("visibilitychange"));
+      await settle(screen);
+      rt.quietly(idleSnapshot(busy, NOW + 90_000));
+
+      // Brought to the front: the engine hasn't fired visibilitychange (yet).
+      rt.calls.length = 0;
+      rt.doc.hasFocus = () => true;
+      globalThis.dispatchEvent(new Event(type));
+      await settle(screen);
+      assert(rt.calls.includes("snapshot"), `${type} reads the state: ${rt.calls.join(", ")}`);
+      assert(text(screen).includes("Nothing running."));
+      await screen.unmount();
+    } finally {
+      rt.restore();
+    }
+  });
+}
+
+Deno.test("reopen: a focus while the window stays hidden and unfocused reads nothing", async () => {
+  const busy = await busySnapshot();
+  const rt = fakeDesktop(busy);
+  try {
+    const screen = await render(<FleetApp />);
+    await settle(screen);
+    rt.doc.visibilityState = "hidden";
+    rt.doc.hasFocus = () => false;
+    rt.doc.dispatchEvent(new Event("visibilitychange"));
+    await settle(screen);
+    rt.calls.length = 0;
+    globalThis.dispatchEvent(new Event("focus"));
+    await settle(screen);
+    assert(!rt.calls.includes("snapshot"), `no read: ${rt.calls.join(", ")}`);
+    await screen.unmount();
+  } finally {
+    rt.restore();
+  }
+});

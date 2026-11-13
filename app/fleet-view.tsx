@@ -19,6 +19,7 @@ import {
 import { EventLog } from "./event-log.tsx";
 import { type ControlHandlers, PoolControls, RunControls } from "./controls.tsx";
 import type { FinishedJob, JobRow, PoolCard, RepoGroup, RunGroup, Snapshot } from "../lib/model.ts";
+import { type FreshState, statusFreshness } from "../lib/status-line.ts";
 
 /** The view's props. */
 export interface FleetViewProps {
@@ -348,6 +349,22 @@ function RunBlock(
   );
 }
 
+/** An empty lane's line: a live dot while webhooks are live, muted while the data is behind. */
+function EmptyLane({ text, fresh }: { text: string; fresh?: FreshState }) {
+  if (fresh === "live") {
+    return (
+      <p class="empty empty-live" title="Live: GitHub webhooks deliver changes as they happen.">
+        <span class="live-dot" aria-hidden="true" />
+        {text}
+      </p>
+    );
+  }
+  if (fresh === "behind") {
+    return <p class="empty empty-stale" title="Fleet's data may be behind.">{text}</p>;
+  }
+  return <p class="empty">{text}</p>;
+}
+
 function LaneView(
   props: {
     title: string;
@@ -355,6 +372,8 @@ function LaneView(
     now: number;
     onOpen: (u: string) => void;
     empty: string;
+    /** How current the data is: an empty lane says it's live, or that it may be behind. */
+    fresh?: FreshState;
     controls?: ControlHandlers;
     /** Empty: shrink to a narrow column so the other lane gets the width. */
     collapsible?: boolean;
@@ -368,7 +387,7 @@ function LaneView(
         {props.title} <span class="num lane-count">{count}</span>
       </h2>
       {props.groups.length === 0
-        ? <p class="empty">{props.empty}</p>
+        ? <EmptyLane text={props.empty} fresh={props.fresh} />
         : props.groups.map((g) => (
           <div class="repo" key={g.repo}>
             <h3 class="repo-name">{shortRepo(g.repo)}</h3>
@@ -456,29 +475,68 @@ function AlertLine({ a }: { a: Snapshot["alerts"][number] }) {
   );
 }
 
-/** "hooks: live / stale (last delivery N min ago) / off". */
-function HooksBadge({ hooks, now }: { hooks: Snapshot["hooks"]; now: number }) {
+/**
+ * "hooks: live / stale (last delivery N min ago) / off"; "quiet" instead of "stale" when nothing is
+ * running or queued (no delivery was due: not a fault).
+ */
+function HooksBadge(
+  { hooks, now, quiet }: { hooks: Snapshot["hooks"]; now: number; quiet: boolean },
+) {
   const via = hooks.via === "spool" ? " (via receiver)" : "";
+  const last = hooks.lastDeliveryAt === null
+    ? "no delivery yet"
+    : `last delivery ${Math.floor((now - hooks.lastDeliveryAt) / 60_000)} min ago`;
   const text = hooks.state === "live"
     ? `hooks: live${via}`
     : hooks.state === "stale"
-    ? `hooks: stale (${
-      hooks.lastDeliveryAt === null
-        ? "no delivery yet"
-        : `last delivery ${Math.floor((now - hooks.lastDeliveryAt) / 60_000)} min ago`
-    })`
+    ? `hooks: ${quiet ? "quiet" : "stale"} (${last})`
     : "hooks: off";
+  const cls = hooks.state === "stale" && quiet ? "quiet" : hooks.state;
   return (
-    <span class={`hooks hooks-${hooks.state}`} title="GitHub webhooks (polling reconciles)">
+    <span class={`hooks hooks-${cls}`} title="GitHub webhooks (polling reconciles)">
       <span class="hooks-dot" aria-hidden="true" />
       {text}
     </span>
   );
 }
 
+/**
+ * How current the data is: "live · last event 2m ago" while webhooks are live, else "updated 4m
+ * ago" (the later of the last poll and the last delivery), muted when a poll is overdue or webhooks
+ * went quiet with jobs active.
+ */
+function Freshness({ snapshot, now }: { snapshot: Snapshot; now: number }) {
+  const f = statusFreshness(snapshot, now);
+  const p = snapshot.poll;
+  const polled = p.lastSuccessAt === null
+    ? "no poll yet"
+    : `last poll ${formatAgo(p.lastSuccessAt, now)}`;
+  if (f.state === "pending" || f.updatedAt === null) return <span>polling…</span>;
+  if (f.state === "live") {
+    return (
+      <span
+        class="status-live"
+        title={`GitHub webhooks deliver changes as they happen; polling reconciles (${polled}).`}
+      >
+        <span class="live-dot" aria-hidden="true" />
+        live · last event {formatAgo(snapshot.hooks.lastDeliveryAt ?? f.updatedAt, now)}
+      </span>
+    );
+  }
+  if (f.state === "behind") {
+    return (
+      <span class="status-stale" title={`Fleet's data may be behind (${polled}).`}>
+        updated {formatAgo(f.updatedAt, now)}
+      </span>
+    );
+  }
+  return <span title={polled}>updated {formatAgo(f.updatedAt, now)}</span>;
+}
+
 /** The status line: last poll, back-off, rate limit. */
 function StatusLine({ snapshot, now }: { snapshot: Snapshot; now: number }) {
   const p = snapshot.poll;
+  const fresh = statusFreshness(snapshot, now);
   const rate = snapshot.rate;
   // Amber below 1,500 left (polling slowed), red below 800 (the runner scheduler's share at risk).
   const rateClass = rate === null
@@ -498,13 +556,9 @@ function StatusLine({ snapshot, now }: { snapshot: Snapshot; now: number }) {
         )
         : !p.ok
         ? <span class="status-bad">poll failed: {p.message}</span>
-        : (
-          <span>
-            {p.lastSuccessAt === null ? "polling…" : `updated ${formatAgo(p.lastSuccessAt, now)}`}
-          </span>
-        )}
+        : <Freshness snapshot={snapshot} now={now} />}
       <span class="muted">every {Math.round(p.intervalMs / 1000)}s</span>
-      <HooksBadge hooks={snapshot.hooks} now={now} />
+      <HooksBadge hooks={snapshot.hooks} now={now} quiet={fresh.hooksQuiet} />
       {rate
         ? (
           <span
@@ -533,6 +587,8 @@ export function FleetView(props: FleetViewProps) {
   const busy = runnersByPool(s.running);
   const github = s.pools.find((p) => p.id === "github");
   const hosts = s.pools.filter((p) => p.id !== "github");
+  // The status line's clock is this machine's (poll and delivery times are local).
+  const fresh = statusFreshness(s, localNow).state;
   return (
     <div class={`fleet sev-${sum.severity}`}>
       <div class="stripe" aria-hidden="true" />
@@ -668,6 +724,7 @@ export function FleetView(props: FleetViewProps) {
           now={now}
           onOpen={onOpen}
           empty="Nothing running."
+          fresh={fresh}
           controls={props.controls}
         />
         <LaneView
@@ -676,6 +733,7 @@ export function FleetView(props: FleetViewProps) {
           now={now}
           onOpen={onOpen}
           empty="Nothing queued."
+          fresh={fresh}
           controls={props.controls}
           collapsible
         />
