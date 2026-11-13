@@ -1086,6 +1086,40 @@ a:hover {
 .log-head .lane-title {
   margin: 0;
 }
+/* Collapsed: only the header row stays, showing just "Event log N"; the lanes take the height. */
+.log-collapsed {
+  height: auto;
+}
+.log-collapsed .log-head {
+  border-bottom: 0;
+}
+.log-toggle {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+.log-toggle:hover {
+  background: var(--surface-2);
+}
+.log-toggle:focus-visible {
+  outline: 2px solid var(--accent, var(--text));
+  outline-offset: 1px;
+}
+.log-chevron {
+  display: inline-block;
+  width: 0.8em;
+  color: var(--text-2);
+}
 .log-filters {
   display: flex;
   gap: 8px;

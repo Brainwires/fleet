@@ -63,6 +63,26 @@ export interface EventLogProps {
 /** Within this many px of the bottom counts as "at the bottom" (follow new lines). */
 const STICK_PX = 24;
 
+/** Where the pane remembers being collapsed (a per-window convenience; it reads open when unset). */
+const COLLAPSED_KEY = "fleet.eventLog.collapsed";
+
+/** Whether the pane was left collapsed; storage can be missing or throw (private mode, tests). */
+export function readCollapsed(): boolean {
+  try {
+    return globalThis.localStorage?.getItem(COLLAPSED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeCollapsed(collapsed: boolean): void {
+  try {
+    globalThis.localStorage?.setItem(COLLAPSED_KEY, collapsed ? "1" : "0");
+  } catch {
+    // Not stored: the pane still toggles for this window.
+  }
+}
+
 /**
  * The pane, memoized: the window's 1 s clock re-renders the lanes, never these (up to 2,000) lines;
  * it re-renders only when the events, the link handler or its own filters change.
@@ -71,6 +91,7 @@ export const EventLog = memo(function EventLog({ events, onOpen }: EventLogProps
   const [severity, setSeverity] = useState<LogFilter["severity"]>("all");
   const [repo, setRepo] = useState("");
   const [query, setQuery] = useState("");
+  const [collapsed, setCollapsed] = useState(readCollapsed);
   const list = useRef<HTMLDivElement | null>(null);
   const stick = useRef(true);
   const shown = useMemo(
@@ -90,75 +111,96 @@ export const EventLog = memo(function EventLog({ events, onOpen }: EventLogProps
   }, [lastSeq, severity, repo, query]);
   useEffect(() => {
     stick.current = true;
-  }, [severity, repo, query]);
+  }, [severity, repo, query, collapsed]);
+
+  const toggle = () => {
+    const next = !collapsed;
+    setCollapsed(next);
+    writeCollapsed(next);
+  };
 
   return (
-    <section class="log" aria-label="Event log">
+    <section class={`log${collapsed ? " log-collapsed" : ""}`} aria-label="Event log">
       <header class="log-head">
         <h2 class="lane-title">
-          Event log <span class="num lane-count">{shown.length}</span>
-        </h2>
-        <div class="log-filters">
-          <div class="seg" role="group" aria-label="Severity">
-            <button
-              type="button"
-              class={`seg-btn${severity === "all" ? " is-on" : ""}`}
-              aria-pressed={severity === "all"}
-              onClick={() => setSeverity("all")}
-            >
-              All
-            </button>
-            <button
-              type="button"
-              class={`seg-btn${severity === "problems" ? " is-on" : ""}`}
-              aria-pressed={severity === "problems"}
-              onClick={() => setSeverity("problems")}
-            >
-              Problems
-            </button>
-          </div>
-          {
-            /* Uncontrolled: denext/testing's render() crashes on a select with `value` or
-              `defaultValue` (initSelect iterates `options`, which its test DOM lacks). */
-          }
-          <select
-            class="log-select"
-            aria-label="Repository"
-            onChange={(e) => setRepo((e.target as HTMLSelectElement).value)}
+          <button
+            type="button"
+            class="log-toggle"
+            aria-expanded={!collapsed}
+            aria-controls="fleet-event-log-lines"
+            title={collapsed ? "Show the event log" : "Collapse the event log"}
+            onClick={toggle}
           >
-            <option value="">All repos</option>
-            {repos.map((r) => <option key={r} value={r}>{shortRepo(r)}</option>)}
-          </select>
-          <input
-            class="log-search"
-            type="search"
-            aria-label="Search the log"
-            placeholder="Search"
-            value={query}
-            onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
-          />
-        </div>
+            <span class="log-chevron" aria-hidden="true">{collapsed ? "▸" : "▾"}</span>
+            Event log <span class="num lane-count">{shown.length}</span>
+          </button>
+        </h2>
+        {collapsed ? null : (
+          <div class="log-filters">
+            <div class="seg" role="group" aria-label="Severity">
+              <button
+                type="button"
+                class={`seg-btn${severity === "all" ? " is-on" : ""}`}
+                aria-pressed={severity === "all"}
+                onClick={() => setSeverity("all")}
+              >
+                All
+              </button>
+              <button
+                type="button"
+                class={`seg-btn${severity === "problems" ? " is-on" : ""}`}
+                aria-pressed={severity === "problems"}
+                onClick={() => setSeverity("problems")}
+              >
+                Problems
+              </button>
+            </div>
+            {
+              /* Uncontrolled: denext/testing's render() crashes on a select with `value` or
+              `defaultValue` (initSelect iterates `options`, which its test DOM lacks). */
+            }
+            <select
+              class="log-select"
+              aria-label="Repository"
+              onChange={(e) => setRepo((e.target as HTMLSelectElement).value)}
+            >
+              <option value="">All repos</option>
+              {repos.map((r) => <option key={r} value={r}>{shortRepo(r)}</option>)}
+            </select>
+            <input
+              class="log-search"
+              type="search"
+              aria-label="Search the log"
+              placeholder="Search"
+              value={query}
+              onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
+            />
+          </div>
+        )}
       </header>
-      <div
-        class="log-lines"
-        ref={list}
-        role="log"
-        aria-live="polite"
-        onScroll={() => {
-          const el = list.current;
-          if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < STICK_PX;
-        }}
-      >
-        {shown.length === 0
-          ? (
-            <p class="empty">
-              {events.length === 0
-                ? "No events yet: the first poll records the current state; changes appear here."
-                : "No events match."}
-            </p>
-          )
-          : shown.map((e) => <EventLine key={e.seq} e={e} onOpen={onOpen} />)}
-      </div>
+      {collapsed ? null : (
+        <div
+          class="log-lines"
+          id="fleet-event-log-lines"
+          ref={list}
+          role="log"
+          aria-live="polite"
+          onScroll={() => {
+            const el = list.current;
+            if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < STICK_PX;
+          }}
+        >
+          {shown.length === 0
+            ? (
+              <p class="empty">
+                {events.length === 0
+                  ? "No events yet: the first poll records the current state; changes appear here."
+                  : "No events match."}
+              </p>
+            )
+            : shown.map((e) => <EventLine key={e.seq} e={e} onOpen={onOpen} />)}
+        </div>
+      )}
     </section>
   );
 });
