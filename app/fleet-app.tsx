@@ -3,13 +3,11 @@
 // seconds while visible, which also tells the backend to poll GitHub at the visible rate), a 1 s
 // clock for the ticking times (stopped while the window is hidden), the first-run wizard until
 // Fleet is set up, the token screen when a set-up Fleet has no token, and the Settings view (the
-// header's button, or the tray's Settings…). GitHub links from the main view open in the in-app
-// GitHub browser (app/web-panel/) where this window hosts web views, else in the system browser.
+// header's button, or the tray's Settings…).
 
-import { type ReactNode, useCallback, useEffect, useRef, useState } from "denext";
+import { useCallback, useEffect, useRef, useState } from "denext";
 import { onDesktopEvent } from "denext/desktop/client";
 import { closeWindow } from "denext/desktop/window";
-import { onAppMenuItem, setAppMenu } from "denext/desktop/app";
 import { openExternal } from "denext/mobile";
 import { type FleetEvent, LOG_LIMIT, mergeEvents } from "../lib/events.ts";
 import type { Snapshot } from "../lib/model.ts";
@@ -21,10 +19,7 @@ import { TokenScreen } from "./token-screen.tsx";
 import { type MachineInfo, type SettingsApi, SettingsView, SetupWizard } from "./settings-view.tsx";
 import type { FleetSettings } from "../lib/settings.ts";
 import { visibleClock } from "./visible-clock.ts";
-import { browserShortcut, windowShortcut } from "../lib/shortcuts.ts";
-import { GitHubBrowser, isGitHubUrl } from "./web-panel/github-browser.ts";
-import { GitHubPanel } from "./web-panel/github-panel.tsx";
-import { connectBrowserMenu } from "./web-panel/browser-menu.ts";
+import { windowShortcut } from "../lib/shortcuts.ts";
 import { type LogsApi, PoolDetailView } from "./pool-detail.tsx";
 import type { PoolDetail } from "../lib/pool-detail.ts";
 import type { HistoryRange } from "../lib/history.ts";
@@ -41,20 +36,10 @@ const LOGS: LogsApi = {
 /** How often the page reads the (in-process) snapshot while visible. */
 const READ_MS = 5000;
 
-/** Open a github.com URL in the system browser (the screens the GitHub panel can't show over). */
-function openInBrowser(url: string): void {
-  if (!isGitHubUrl(url)) return;
+/** Open a github.com URL in the system browser. */
+function openUrl(url: string): void {
+  if (!url.startsWith("https://github.com/")) return;
   void openExternal(url).catch((err) => console.error("fleet: open:", errorText(err)));
-}
-
-const isMac = () => typeof navigator !== "undefined" && /Mac/.test(navigator.userAgent);
-
-/** The view lost the keyboard: focus the panel when nothing of Fleet's took it, so keys reach us. */
-function takeKeyboardBack(): void {
-  if (typeof document === "undefined") return;
-  const active = document.activeElement;
-  if (active && active !== document.body) return;
-  document.querySelector<HTMLElement>(".webpanel")?.focus();
 }
 
 const visibleNow = () => typeof document === "undefined" || document.visibilityState === "visible";
@@ -83,22 +68,6 @@ export function FleetApp() {
   const [range, setRange] = useState<HistoryRange>("24h");
   const [detail, setDetail] = useState<PoolDetail | null>(null);
   const [detailError, setDetailError] = useState("");
-  /** The in-app GitHub browser (one web view for the page's life) and what its panel shows. */
-  const [browser] = useState(() =>
-    new GitHubBrowser({ openExternal, onViewBlur: takeKeyboardBack })
-  );
-  const [web, setWeb] = useState(browser.state);
-  useEffect(() => {
-    const stop = browser.subscribe(setWeb);
-    const stopMenu = connectBrowserMenu(browser, { setAppMenu, onAppMenuItem }, isMac());
-    return () => {
-      stop();
-      stopMenu();
-      browser.dispose();
-    };
-  }, [browser]);
-  /** A GitHub link from the main view: the panel, or the system browser without web views. */
-  const openUrl = useCallback((url: string) => void browser.open(url), [browser]);
 
   /** Run a control: the backend checks it and asks in a system dialog; show its outcome. */
   const act = useCallback(async (call: () => Promise<ControlResult>) => {
@@ -192,19 +161,10 @@ export function FleetApp() {
   }, [snap?.settingsRequested, needsSetup]);
 
   // Cmd+W and Cmd+Q close the window (macOS): an accessory app has no menu bar to own them, and a
-  // quit Fleet didn't ask for closes to the tray anyway (lib/quit-guard.ts). While the GitHub panel
-  // shows, Cmd+[ / Cmd+] (Ctrl off macOS) go back / forward and Esc returns to Fleet's view: these
-  // reach the page only while the keyboard is in Fleet's HTML (the app menu carries back / forward
-  // while the web view has it: app/web-panel/browser-menu.ts).
+  // quit Fleet didn't ask for closes to the tray anyway (lib/quit-guard.ts).
   useEffect(() => {
     const mac = /Mac/.test(navigator.userAgent);
     const onKey = (e: KeyboardEvent) => {
-      const nav = browser.showing ? browserShortcut(e, mac) : null;
-      if (nav) {
-        e.preventDefault();
-        browser.command(nav, "page");
-        return;
-      }
       const shortcut = windowShortcut(e, mac);
       if (!shortcut) return;
       e.preventDefault();
@@ -212,14 +172,7 @@ export function FleetApp() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [browser]);
-
-  // The native web view draws above all HTML: hidden while a screen the panel doesn't show over
-  // (loading, the wizard, the token screen, Settings) replaces the dashboard / pool screens.
-  const covered = !snap || snap.auth === "pending" || needsSetup || screen === "wizard" ||
-    snap.auth === "needs-token" || snap.auth === "invalid" ||
-    (screen === "settings" && detailPool === null);
-  useEffect(() => browser.setCovered(covered), [browser, covered]);
+  }, []);
 
   useEffect(() => {
     void read();
@@ -282,7 +235,7 @@ export function FleetApp() {
     },
     tokenInfo: () => fleet.tokenInfo(),
     ownerRepos: (owner, kind) => fleet.ownerRepos({ owner, kind }),
-    onOpen: openInBrowser,
+    onOpen: openUrl,
   };
   if (needsSetup || screen === "wizard") {
     if (!config) return <div class="loading" aria-busy="true">Loading the settings…</div>;
@@ -298,18 +251,10 @@ export function FleetApp() {
     );
   }
   if (snap.auth === "needs-token" || snap.auth === "invalid") {
-    return <TokenScreen auth={snap.auth} {...signIn} onOpen={openInBrowser} />;
+    return <TokenScreen auth={snap.auth} {...signIn} onOpen={openUrl} />;
   }
-  // The GitHub panel shows over the dashboard and the pool screens (their links open in it), which
-  // stay mounted underneath with their state.
-  const withPanel = (content: ReactNode) => (
-    <>
-      {web.open ? <GitHubPanel browser={browser} state={web} mac={isMac()} /> : null}
-      <div class="main-host" hidden={web.open}>{content}</div>
-    </>
-  );
   if (detailPool !== null) {
-    return withPanel(
+    return (
       <PoolDetailView
         key={detailPool}
         pool={detailPool}
@@ -331,7 +276,7 @@ export function FleetApp() {
             message,
           }
           : { onControl: (c: ControlRequest) => void act(() => fleet.control(c)), message }}
-      />,
+      />
     );
   }
   if (screen === "settings") {
@@ -348,7 +293,7 @@ export function FleetApp() {
       />
     );
   }
-  const main = (
+  return (
     <FleetView
       snapshot={snap}
       now={now}
@@ -395,5 +340,4 @@ export function FleetApp() {
       }}
     />
   );
-  return withPanel(main);
 }
