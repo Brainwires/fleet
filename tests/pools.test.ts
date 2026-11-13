@@ -3,6 +3,8 @@
 // to the right host; the list is rebuilt from the data (a pool leaves and joins on the next poll);
 // a label with one pool behaves as before. No network.
 
+import "./fixture-settings.ts";
+
 import { assertEquals } from "@std/assert";
 import { classifyJob } from "../lib/classify.ts";
 import type { GhJob, GhRunner } from "../lib/github-types.ts";
@@ -12,9 +14,10 @@ import type { JobRow } from "../lib/model.ts";
 import {
   currentPools,
   derivePools,
+  indexRunners,
   poolFromLabels,
   poolFromRunnerName,
-  POOLS,
+  seedPools,
   setPools,
 } from "../lib/pools.ts";
 import { poolCards } from "../lib/snapshot.ts";
@@ -103,10 +106,12 @@ const docOf = (h: HealthState) => (h.state === "ok" || h.state === "stale" ? h.d
 function withPools<T>(h: HealthState, runners: GhRunner[] | null, fn: () => T): T {
   const defs = derivePools(docOf(h), runners);
   if (defs) setPools(defs);
+  indexRunners(null);
   try {
     return fn();
   } finally {
-    setPools(POOLS);
+    setPools(seedPools());
+    indexRunners(null);
   }
 }
 
@@ -191,7 +196,7 @@ Deno.test("pools: the list follows the data — a pool leaves, a new one joins",
   });
   // No data yet: keep the current list (the static one at first).
   assertEquals(derivePools(null, null), null);
-  assertEquals(currentPools(), POOLS);
+  assertEquals(currentPools(), seedPools());
   // Once set, lookups follow it: a pool gone from the list is no runner's pool any more.
   withPools(variable(rest), null, () => {
     assertEquals(poolFromRunnerName("denext-win-x64-brain-1-17944"), "win-x64");

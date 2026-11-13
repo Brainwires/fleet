@@ -6,6 +6,8 @@
 // up with none: denext's src/desktop/app-windows.ts `applyKeepAlive` turns the runtime's
 // `quitOnLastWindowClosed` off, and window-registry.ts `closed` ends the app only without it), and
 // the tray, a reopen, a second launch or a notification click opens a fresh one. Only Quit quits.
+// The window also shows until the first-run wizard is done, and the tray's Settings… opens it on the
+// Settings view. Start at login is opt-in: set only when the settings change it.
 import config from "./.deno-desktop/config.json" with { type: "json" };
 import { resolveDesktopCapabilities, runDesktop } from "denext/desktop";
 import { fleetService } from "./desktop/fleet.ts";
@@ -15,10 +17,10 @@ import { onNotificationClick } from "./lib/deno-host.ts";
 import {
   createWindowManager,
   driveTray,
-  ensureLoginDefault,
   type FleetWindow,
   type LoginItemApi,
-  loginOn,
+  readLoginItem,
+  setLoginItem,
   type TrayDriver,
   WINDOW_KEY,
   type WindowManager,
@@ -95,15 +97,41 @@ onNotificationClick(openWindow);
 const fleet = await fleetService();
 late.service = fleet;
 
+// Start at login follows the settings, applied only when they change it (never at launch). The
+// tray's own toggle sets the OS first, then records it (`fromTray`): not set twice.
+let fromTray = false;
+fleet.onSettings((next, previous) => {
+  if (fromTray || next.startAtLogin === previous.startAtLogin) return;
+  void setLoginItem(desktopApi?.launchAtLogin, next.startAtLogin).then((on) => {
+    if (tray) {
+      tray.startAtLogin = on;
+      tray.refreshMenu();
+    }
+  });
+});
+
 if (app.tray) {
   // Per OS: a macOS template (black + alpha; status by shape), Windows / Linux colour art.
   const icons = await trayIcons(Deno.build.os);
   tray = driveTray(app.tray, icons, manager, {
     refresh: () => fleet.refresh(),
+    openSettings: () => {
+      fleet.requestSettings();
+      openWindow();
+    },
     setNotificationsPaused: (p) => fleet.setNotificationsPaused(p),
     setStartAtLogin: async (on) => {
-      const api = desktopApi?.launchAtLogin;
-      return api ? loginOn(await api.set(on)) : null;
+      const state = await setLoginItem(desktopApi?.launchAtLogin, on);
+      // Kept in the settings, so the Settings view agrees (the change itself is already made).
+      if (state !== null && fleet.settings().startAtLogin !== state) {
+        fromTray = true;
+        try {
+          await fleet.saveSettings({ ...fleet.settings(), startAtLogin: state });
+        } finally {
+          fromTray = false;
+        }
+      }
+      return state;
     },
     quit,
   }, (err) => console.error("fleet: tray:", err instanceof Error ? err.name : "error"));
@@ -114,22 +142,19 @@ if (app.tray) {
   openWindow();
 }
 
-// Once the token lookup is done: show the window on the first launch or when a token is needed,
-// else close the launch's hidden window (nothing stays hidden: Fleet runs in the tray alone), and
-// turn start at login on the first time (the user wants Fleet always running).
+// Once the token lookup is done: show the window while Fleet isn't set up (the first-run wizard) or
+// needs a token, else close the launch's hidden window (nothing stays hidden: Fleet runs in the tray
+// alone). The menu's start-at-login checkmark is the OS's state.
 let decided = false;
 const decide = async (snap: Snapshot) => {
   if (decided || snap.auth === "pending") return;
   decided = true;
   const prefs = fleet.prefs();
-  if (!prefs.launched || snap.auth === "needs-token" || snap.auth === "invalid") openWindow();
-  else if (tray) manager.closeHidden();
+  if (snap.setupComplete === false || snap.auth === "needs-token" || snap.auth === "invalid") {
+    openWindow();
+  } else if (tray) manager.closeHidden();
   if (!prefs.launched) await fleet.setPrefs({ launched: true });
-  const login = await ensureLoginDefault(
-    desktopApi?.launchAtLogin,
-    prefs.loginDefaulted === true,
-    () => fleet.setPrefs({ loginDefaulted: true }),
-  );
+  const login = await readLoginItem(desktopApi?.launchAtLogin);
   if (tray) {
     tray.startAtLogin = login;
     tray.refreshMenu();

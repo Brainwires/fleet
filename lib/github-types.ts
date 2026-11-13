@@ -1,12 +1,14 @@
 // The slices of GitHub's REST responses Fleet reads. Everything else in a response is ignored.
 
-/** `GET /orgs/{org}/repos` item. */
+/** `GET /orgs/{org}/repos` (or `/user/repos`) item. */
 export interface GhRepo {
   readonly full_name: string;
   readonly archived?: boolean;
   readonly disabled?: boolean;
   readonly pushed_at?: string | null;
   readonly default_branch?: string;
+  readonly private?: boolean;
+  readonly owner?: { readonly login?: string } | null;
 }
 
 /** A workflow run (`GET /repos/{repo}/actions/runs`). */
@@ -90,7 +92,8 @@ export interface GhRunner {
   readonly name: string;
   readonly status: string;
   readonly busy: boolean;
-  readonly labels?: readonly { readonly name: string }[];
+  /** `read-only`: GitHub's own (self-hosted, OS, architecture); `custom`: the owner's. */
+  readonly labels?: readonly { readonly name: string; readonly type?: string }[];
 }
 
 /** `GET /orgs/{org}/actions/runners` body. */

@@ -7,7 +7,7 @@
 //   again every 30 min;
 // - run completed with its conclusion; a burst of cancelled jobs from one run in one round is ONE
 //   line ("run N cancelled (14 jobs)");
-// - pool health changes and new alerts from DENEXT_POOL_HEALTH.
+// - pool health changes and new alerts from the pool-health variable.
 //
 // The first observation (and the first after a restart with state older than RESEED_MS) only
 // records: no flood of "queued" / "started" lines for everything already in flight.
@@ -41,7 +41,7 @@ export interface FleetEvent {
   readonly at: number;
   readonly sev: EventSeverity;
   readonly kind: EventKind;
-  /** `Brainwires/denext`, or `""` for a pool event. */
+  /** `owner/name`, or `""` for a pool event. */
   readonly repo: string;
   readonly workflow: string;
   readonly job: string | null;

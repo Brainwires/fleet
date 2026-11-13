@@ -1,13 +1,15 @@
-// On the Mac mini the watchdog's own ~/.denext-runners/health.json is local and fresher than the org
-// variable it publishes: when it is newer, its pools' health wins (paused from the scheduler's
-// paused-<pool> files); slots and busy stay the variable's. Its `pools` keys are the scheduler's pool
-// names (each with its label, slots and runner prefix from a current watchdog): they become the doc's
-// per-pool `hosts`, which the pool list and the per-host cards read. The label-keyed `pools` entry
-// merges every local pool on that label the way the watchdog publishes it (ok while any is).
+// Where the runner scheduler runs, its watchdog's own health file (the runner scheduler
+// integration's `localHealthFile`) is local and fresher than the org variable it publishes: when it
+// is newer, its pools' health wins (paused from the scheduler's paused-<pool> files); slots and busy
+// stay the variable's. Its `pools` keys are the scheduler's pool names (each with its label, slots
+// and runner prefix from a current watchdog): they become the doc's per-pool `hosts`, which the pool
+// list and the per-host cards read. The label-keyed `pools` entry merges every local pool on that
+// label the way the watchdog publishes it (ok while any is).
 // Pure: the files come in as values.
 
 import type { HealthState, HostHealth, PoolHealth, PoolHealthDoc } from "./health.ts";
-import { POOLS } from "./pools.ts";
+import { seedPools } from "./pools.ts";
+import { settings } from "./settings.ts";
 
 type LocalPool = {
   healthy?: unknown;
@@ -34,7 +36,8 @@ export function mergeLocalHealth(
   const checkedAt = l.checked_at_epoch * 1000;
   const base = variable.state === "ok" || variable.state === "stale" ? variable.doc : null;
   if (base && base.checkedAt >= checkedAt) return variable;
-  const known = new Map(POOLS.map((p) => [p.id, p]));
+  const known = new Map(seedPools().map((p) => [p.id, p]));
+  const prefix = settings().integrations.runnerScheduler?.runnerNamePrefix ?? "";
   const hosts: Record<string, HostHealth> = {};
   for (const [id, raw] of Object.entries(l.pools)) {
     const p = raw as LocalPool;
@@ -50,7 +53,8 @@ export function mergeLocalHealth(
       busy: prev?.busy ?? null,
       paused: paused.has(id),
       label,
-      runnerPrefix: text(p.runner_prefix) ?? known.get(id)?.runnerPrefix ?? `denext-${id}-`,
+      runnerPrefix: text(p.runner_prefix) ?? known.get(id)?.runnerPrefix ??
+        (prefix ? `${prefix}${id}-` : null),
     };
   }
   const byLabel = new Map<string, HostHealth[]>();

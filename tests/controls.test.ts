@@ -3,6 +3,8 @@
 // built only from allowlisted paths, pools and durations. Nothing here calls GitHub or runs a
 // script.
 
+import { TEST_POOL_PATHS } from "./fixture-settings.ts";
+
 import { assert, assertEquals, assertFalse, assertStringIncludes } from "@std/assert";
 import {
   checkDispatch,
@@ -12,7 +14,6 @@ import {
   isProtectedBranch,
   parseDispatchInputs,
   poolCommand,
-  poolPaths,
   poolPrograms,
   validRef,
   validRepo,
@@ -50,8 +51,8 @@ Deno.test("cancel: refused outright on a default branch, or the repo's own defau
     { ...RUN, branch: "trunk", repoDefaultBranch: "trunk" },
   );
   assertFalse(own.allowed);
-  assert(isProtectedBranch("main"));
-  assertFalse(isProtectedBranch("train/4.17"));
+  assert(isProtectedBranch("Brainwires/denext", "main"));
+  assertFalse(isProtectedBranch("Brainwires/denext", "train/4.17"));
   // Re-runs on a default branch are fine.
   assert(
     checkRunControl({ kind: "rerun-failed", repo: "Brainwires/denext", runId: 1 }, {
@@ -214,10 +215,10 @@ Deno.test("dispatch inputs: required, choices, booleans, no extras", () => {
 });
 
 Deno.test("pool controls: allowlisted paths and pools, bounded pauses, no shell", () => {
-  const p = poolPaths("/Users/me");
+  const p = TEST_POOL_PATHS;
   assertEquals(poolPrograms(p), [
-    "/Users/me/Source/Brainwires/denext-internal/ops/runners/pause-pool.sh",
-    "/Users/me/Source/Brainwires/denext-internal/ops/runners/watchdog.sh",
+    "/opt/test-ops/pause-pool.sh",
+    "/opt/test-ops/watchdog.sh",
     "/bin/launchctl",
   ]);
   const pause = poolCommand(
@@ -237,7 +238,7 @@ Deno.test("pool controls: allowlisted paths and pools, bounded pauses, no shell"
   const kick = poolCommand({ kind: "restart-scheduler" }, p, 501);
   assert(kick.ok && kick.command.program === "/bin/launchctl");
   if (kick.ok) {
-    assertEquals(kick.command.args, ["kickstart", "-k", "gui/501/com.brainwires.denext-runners"]);
+    assertEquals(kick.command.args, ["kickstart", "-k", "gui/501/org.example.runners"]);
   }
   const wd = poolCommand({ kind: "watchdog-pass" }, p, 501);
   assert(wd.ok && wd.command.args.length === 0 && wd.command.program === p.watchdog);

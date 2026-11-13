@@ -4,6 +4,7 @@
 
 import type { FleetNotification } from "./notify.ts";
 import type { PersistedState } from "./poller.ts";
+import { type FleetSettings, LOCAL_CONFIG_FILE, SETTINGS_FILE } from "./settings.ts";
 import {
   AGENT_SNAPSHOT_FILE,
   JOURNAL_FILE,
@@ -58,7 +59,7 @@ export async function ghToken(os: string = Deno.build.os): Promise<string | null
 
 /** The state file's name in the app's data folder. */
 export const STATE_FILE = "fleet-state.json";
-/** Data files: the owner only (CI state names our infrastructure). */
+/** Data files: the owner only (CI state names the owners' infrastructure). */
 export const FILE_MODE = 0o600;
 /** The data folder: the owner only. */
 export const DIR_MODE = 0o700;
@@ -106,6 +107,39 @@ export async function loadState(dir: string): Promise<PersistedState | null> {
 /** Write the persisted state (atomically: a temp file renamed over it). */
 export function saveState(dir: string, state: PersistedState): Promise<void> {
   return writeJson(dir, STATE_FILE, state);
+}
+
+/**
+ * A JSON file's value: `null` when it doesn't exist, the string `"unreadable"` when it exists but
+ * can't be read or parsed (so validation reports it, and it is never mistaken for "no file").
+ */
+async function readJsonFile(path: string): Promise<unknown> {
+  let text: string;
+  try {
+    text = await Deno.readTextFile(path);
+  } catch (err) {
+    return err instanceof Deno.errors.NotFound ? null : "unreadable";
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    return "unreadable";
+  }
+}
+
+/** The settings file and the machine's local config, as found (see settings.ts startupSettings). */
+export async function loadSettingsFiles(
+  dir: string,
+): Promise<{ settingsRaw: unknown; localConfigRaw: unknown }> {
+  return {
+    settingsRaw: await readJsonFile(join(dir, SETTINGS_FILE)),
+    localConfigRaw: await readJsonFile(join(dir, LOCAL_CONFIG_FILE)),
+  };
+}
+
+/** Write the settings (0600, atomically). */
+export function saveSettings(dir: string, s: FleetSettings): Promise<void> {
+  return writeJson(dir, SETTINGS_FILE, s, 2);
 }
 
 /** Read the event log file (`null` when missing or unreadable). */
@@ -194,12 +228,18 @@ export async function journalLastSeq(dir: string): Promise<number> {
  * Write JSON atomically: a fresh temp file with a random name (0600, created exclusively, so
  * nothing pre-placed is written through), renamed over the target.
  */
-async function writeJson(dir: string, name: string, data: unknown): Promise<void> {
+async function writeJson(
+  dir: string,
+  name: string,
+  data: unknown,
+  indent?: number,
+): Promise<void> {
   await ensureDir(dir);
   const target = join(dir, name);
   const tmp = `${target}.${crypto.randomUUID()}.tmp`;
   try {
-    await Deno.writeTextFile(tmp, JSON.stringify(data), { createNew: true, mode: FILE_MODE });
+    const text = JSON.stringify(data, null, indent) + (indent ? "\n" : "");
+    await Deno.writeTextFile(tmp, text, { createNew: true, mode: FILE_MODE });
     await Deno.rename(tmp, target);
   } catch (err) {
     await Deno.remove(tmp).catch(() => {});

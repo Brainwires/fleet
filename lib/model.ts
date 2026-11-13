@@ -14,7 +14,7 @@ export interface JobRow {
   readonly url: string | null;
   readonly lane: Lane;
   readonly target: JobTarget;
-  /** The pool's short name (`mac-arm`, an unknown `denext-*` label as is), or `github`. */
+  /** The pool's short name (`mac-arm`, an unknown pool label as is), or `github`. */
   readonly pool: string;
   /** The runner's name while running. */
   readonly runner: string | null;
@@ -34,7 +34,7 @@ export interface JobRow {
   readonly capacityWait?: boolean;
   /**
    * A runner-host job (a GitHub-hosted job that only hosts a self-hosted runner): what it hosts,
-   * `hosting gh-intel-helper-1 · idle`. Present means never late.
+   * `hosting helper-1 · idle`. Present means never late.
    */
   readonly hosting?: string;
   /** Running on a runner a GitHub-hosted helper registered (pool is still the runner's pool). */
@@ -52,8 +52,8 @@ export interface RunGroup {
   readonly event: string;
   readonly url: string;
   /**
-   * The run is on a branch that must stay green (`development-denext`, `development`, `main`):
-   * the name, from this repo, not a PR (a fork PR's `main` is not).
+   * The run is on a protected branch (settings `branches.rules`; by default the repo's own
+   * default branch): the name, from this repo, not a PR (a fork PR's `main` is not).
    */
   readonly defaultBranch: boolean;
   /** A fork PR: the fork's owner ("fork PR from <owner>"). Absent for this repo's own runs. */
@@ -179,8 +179,14 @@ export interface Snapshot {
   readonly finished: readonly FinishedJob[];
   readonly alerts: readonly AlertRow[];
   readonly summary: Summary;
-  /** The repos polled this round (core + any with activity). */
+  /** The repos polled this round (pinned + any with activity). */
   readonly repos: readonly string[];
+  /** The watched owners' logins (the header names them). */
+  readonly owners?: readonly string[];
+  /** The first-run wizard is done (`false`: the window shows it). */
+  readonly setupComplete?: boolean;
+  /** The tray asked for the Settings view (the page shows it, then says so). */
+  readonly settingsRequested?: boolean;
   /** The event log's last sequence number (the page fetches newer events when it grows). */
   readonly eventSeq: number;
   /** Native notifications paused from the tray. */

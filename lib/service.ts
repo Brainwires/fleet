@@ -22,6 +22,22 @@ import type { HealthState } from "./health.ts";
 import { type HookDelivery, HOOKS_STALE_MS, hooksState, isStaleDelivery } from "./hooks.ts";
 import { backfillEvents, backfillFrom, dropLogged } from "./backfill.ts";
 import { AGENT_HEARTBEAT_MS, type AgentSnapshot, buildAgentSnapshot } from "./agent-snapshot.ts";
+import {
+  applySettings,
+  type FleetSettings,
+  ownerLogins,
+  settings as activeSettings,
+  type SettingsResult,
+  startupSettings,
+  validateSettings,
+} from "./settings.ts";
+import {
+  discoverToken,
+  listOwnerRepos,
+  type RepoChoice,
+  type TokenInfo,
+  tokenKind,
+} from "./discover.ts";
 /** A page that hasn't said it's visible for this long counts as hidden (it may be suspended). */
 export const VISIBLE_TTL_MS = 30_000;
 /** The secure-store key of a pasted token. */
@@ -65,8 +81,19 @@ export interface ServiceDeps {
   readonly readSpool?: (since: number) => Promise<HookDelivery[]>;
   /** The journal's last `seq`, so the log never numbers below it after a restart. */
   readonly journalLastSeq?: () => Promise<number>;
-  /** The Mac mini's local pool health, merged over the variable's. */
+  /**
+   * The watchdog's local pool health, merged over the variable's (a fixed reader, for tests); see
+   * `localHealthFor` for one that follows the settings.
+   */
   readonly localHealth?: (variable: HealthState) => Promise<HealthState>;
+  /** The local health reader the settings call for (the runner scheduler integration's), if any. */
+  readonly localHealthFor?: (
+    s: FleetSettings,
+  ) => ((variable: HealthState) => Promise<HealthState>) | undefined;
+  /** The settings file and the machine's local config (raw), for startup. Absent: the defaults. */
+  readonly loadSettings?: () => Promise<{ settingsRaw: unknown; localConfigRaw: unknown }>;
+  /** Write the settings file. */
+  readonly saveSettings?: (s: FleetSettings) => Promise<void>;
   readonly setTimeout?: (fn: () => void, ms: number) => number;
   readonly clearTimeout?: (id: number) => void;
   /** Each GitHub request's deadline (tests shorten it; default the client's 20 s). */
@@ -121,6 +148,22 @@ export interface FleetService {
   setPrefs(p: Partial<FleetPrefs>): Promise<void>;
   /** The GitHub client and poller for controls (`null` without a token / before start). */
   github(): { client: GitHubClient; poller: Poller; canWrite: boolean } | null;
+  /** The settings in force (loaded by `start()`). */
+  settings(): FleetSettings;
+  /**
+   * Validate, save and apply new settings; the watched repos are re-read and a poll follows.
+   * Resolves the problems instead when they don't validate (nothing changes then).
+   */
+  saveSettings(raw: unknown): Promise<SettingsResult>;
+  /** Called after settings were applied (`previous`: what was in force before). */
+  onSettings(fn: (s: FleetSettings, previous: FleetSettings) => void): () => void;
+  /** Ask the window for the Settings view (the tray's Settings…); `settingsShown` clears it. */
+  requestSettings(): void;
+  settingsShown(): void;
+  /** Who the token is and what it may do (the wizard's sign-in step). */
+  tokenInfo(): Promise<TokenInfo>;
+  /** An owner's repos, for the wizard's repo step. */
+  ownerRepos(owner: string, kind: "org" | "user"): Promise<RepoChoice[]>;
   /** Stop the timers. */
   stop(): void;
 }
@@ -183,6 +226,12 @@ export function createFleetService(deps: ServiceDeps): FleetService {
   let heartbeat: number | null = null;
   let journalChain: Promise<void> = Promise.resolve();
   const paused = () => prefs.notificationsPaused === true;
+  /** The token in use's kind (never the token): for the wizard's scope check. */
+  let currentKind = tokenKind(null);
+  let settingsRequested = false;
+  const settingsListeners = new Set<(s: FleetSettings, previous: FleetSettings) => void>();
+  let settingsLoaded: Promise<void> | null = null;
+  const localHealth = () => deps.localHealth ?? deps.localHealthFor?.(activeSettings());
 
   const visible = () => now() < visibleUntil;
   /** Now on GitHub's clock (the API's Date headers), for comparisons with GitHub's timestamps. */
@@ -219,6 +268,9 @@ export function createFleetService(deps: ServiceDeps): FleetService {
     alerts: [],
     summary: { running: 0, queued: 0, severity: "ok", reasons: [] },
     repos: [],
+    owners: ownerLogins(),
+    setupComplete: activeSettings().setupComplete,
+    settingsRequested,
     eventSeq: log.lastSeq,
     notificationsPaused: paused(),
     hooks: { state: hooks(), lastDeliveryAt: lastDelivery, via: hooksVia },
@@ -232,6 +284,8 @@ export function createFleetService(deps: ServiceDeps): FleetService {
     poller.auth = auth;
     return {
       ...poller.snapshot(),
+      setupComplete: activeSettings().setupComplete,
+      settingsRequested,
       eventSeq: log.lastSeq,
       notificationsPaused: paused(),
       hooks: { state: hooks(), lastDeliveryAt: lastDelivery, via: hooksVia },
@@ -275,8 +329,10 @@ export function createFleetService(deps: ServiceDeps): FleetService {
       now,
       durations,
       publicOnly: token === null,
-      ...(deps.localHealth ? { localHealth: deps.localHealth } : {}),
+      // Read each round, so a settings change takes effect without a new poller.
+      localHealth: (v) => localHealth()?.(v) ?? Promise.resolve(v),
     });
+    currentKind = tokenKind(token);
     auth = state;
     lastPoll = -Infinity;
   };
@@ -432,6 +488,22 @@ export function createFleetService(deps: ServiceDeps): FleetService {
     return current;
   };
 
+  /** The startup settings: the file, else the machine's local config (written), else defaults. */
+  const loadSettings = () =>
+    settingsLoaded ??= (async () => {
+      if (!deps.loadSettings) return;
+      const raw = await deps.loadSettings().catch(() => ({
+        settingsRaw: null,
+        localConfigRaw: null,
+      }));
+      const st = startupSettings(raw);
+      for (const p of st.problems) warn(`fleet: settings: ${p}`);
+      applySettings(st.settings);
+      if (st.write) {await deps.saveSettings?.(st.settings).catch(() =>
+          warn("fleet: settings: not saved")
+        );}
+    })();
+
   const loadState = () => loading ??= loadStateOnce();
   const loadStateOnce = async () => {
     const s = await deps.load().catch(() => null);
@@ -509,6 +581,7 @@ export function createFleetService(deps: ServiceDeps): FleetService {
 
   return {
     async start() {
+      await loadSettings();
       await loadState();
       await backfill();
       if (!(await tryGh())) {
@@ -615,6 +688,49 @@ export function createFleetService(deps: ServiceDeps): FleetService {
       await persist();
     },
     github: () => (client && poller ? { client, poller, canWrite: auth !== "public" } : null),
+    settings: () => activeSettings(),
+    async saveSettings(raw) {
+      const r = validateSettings(raw);
+      if (!r.ok) return r;
+      const previous = activeSettings();
+      try {
+        await deps.saveSettings?.(r.settings);
+      } catch {
+        return { ok: false, errors: ["the settings file couldn't be written"] };
+      }
+      applySettings(r.settings);
+      const watched = (s: FleetSettings) => JSON.stringify([s.owners, s.repos]);
+      if (watched(previous) !== watched(r.settings)) poller?.resetRepos();
+      for (const fn of settingsListeners) {
+        try {
+          fn(r.settings, previous);
+        } catch {
+          // A listener's failure is its own.
+        }
+      }
+      emit();
+      if (poller) void pollNow();
+      return r;
+    },
+    onSettings(fn) {
+      settingsListeners.add(fn);
+      return () => settingsListeners.delete(fn);
+    },
+    requestSettings() {
+      settingsRequested = true;
+      emit();
+    },
+    settingsShown() {
+      if (!settingsRequested) return;
+      settingsRequested = false;
+      emit();
+    },
+    tokenInfo: () =>
+      discoverToken(auth === "public" ? null : client, auth === "public" ? "none" : currentKind),
+    async ownerRepos(owner, kind) {
+      if (!client) return [];
+      return await listOwnerRepos(client, owner, kind).catch(() => []);
+    },
     stop() {
       stopped = true;
       if (timer !== null) clearT(timer);

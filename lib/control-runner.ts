@@ -40,7 +40,7 @@ export interface ControlDeps {
   github(): { client: GitHubClient; poller: Poller; canWrite: boolean } | null;
   confirm: ConfirmFn;
   log(e: Omit<NewEvent, "at" | "user">): Promise<void>;
-  /** The pool scripts on this machine, or `null` (not the Mac mini). */
+  /** The pool commands on this machine (the runner scheduler integration), or `null`. */
   poolPaths?: PoolPaths | null;
   uid?: number;
   /** Run an exact program with argv (no shell); its exit code and first output lines. */
@@ -284,7 +284,13 @@ async function dispatch(
     return { ok: false, message: `Couldn't resolve ${c.ref}.` };
   }
   const control = { ...c, inputs: inputs.inputs };
-  const check = checkDispatch(control, { workflow: wf.name, ref: c.ref, sha, sameShaRuns });
+  const check = checkDispatch(control, {
+    workflow: wf.name,
+    ref: c.ref,
+    sha,
+    sameShaRuns,
+    repoDefaultBranch: gh.poller.defaultBranch(c.repo),
+  });
   const base = { repo: c.repo, workflow: wf.name, job: null, url: null, branch: c.ref };
   if (!check.allowed) {
     await deps.log({ ...base, sev: "warn", kind: "action", text: `refused: ${check.refusal}` });
@@ -330,12 +336,12 @@ export function parsePoolControl(raw: unknown): PoolControl | null {
   return null;
 }
 
-/** Run a pool control (the Mac mini only). */
+/** Run a pool control (the runner scheduler integration only). */
 export async function runPoolControl(deps: ControlDeps, raw: unknown): Promise<ControlResult> {
   if (!deps.poolPaths || !deps.runProgram) {
     return {
       ok: false,
-      message: "Pool controls run only on the machine with the runner scheduler.",
+      message: "Pool controls need the runner scheduler integration on this machine.",
     };
   }
   const c = parsePoolControl(raw);

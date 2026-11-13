@@ -1,24 +1,26 @@
 // Controls, with their guardrails as hard rules (pure, unit-tested). Every control is checked here
 // first; the backend then asks for confirmation in a native dialog naming exactly what will happen,
-// and only then calls GitHub (or, on the Mac mini, the runner scripts) and logs the action to the
-// event log as the user's.
+// and only then calls GitHub (or, with the runner scheduler integration, its scripts) and logs the
+// action to the event log as the user's.
 //
-// - Cancel is refused outright on a default branch (development-denext, development, main, or the
-//   repo's own default_branch): those must stay green. By provenance, not name: a fork PR's (or any
-//   PR's) branch named `main` is not the repo's `main`, so cancelling it is allowed.
+// - Cancel on a protected branch (settings `branches.rules`: by default each repo's own default
+//   branch) warns or is refused, per the rule. By provenance, not name: a fork PR's (or any PR's)
+//   branch named `main` is not the repo's `main`, so cancelling it is a plain cancel.
 // - Every dialog names the full owner/repo, who started the run and whether it is a fork PR; run,
 //   job and branch names are quoted, stripped of control characters and capped (they are text
 //   anyone who can open a PR chooses).
-// - Controls act on the org's own repos only (ORG/*).
+// - Controls act on the watched repos only (the configured owners', past the allow / deny lists).
 // - Re-run on a release branch (rel/*) warns that a failed attempt on a release commit blocks its
 //   tag, so the fix is a new commit.
-// - Dispatch is refused when the workflow already has a run on the same commit SHA, unless every
-//   such run was cancelled (then it warns).
+// - Dispatch when the workflow already has a live run on the same commit SHA warns or is refused,
+//   per the protecting rule (else `branches.otherDuplicateDispatch`); a cancelled one only warns.
 // - Pool commands run only exact absolute paths with argv built here (no shell, no free text but a
 //   sanitized reason), for known pools only; nothing restarts a VM or deletes anything.
 
 import { PR_EVENTS } from "./classify.ts";
-import { currentPools, DEFAULT_BRANCHES, ORG } from "./pools.ts";
+import { currentPools } from "./pools.ts";
+import { duplicateDispatchPolicy, protectingRule } from "./branches.ts";
+import { type BranchRule, expandHome, repoWatched, type SchedulerControls } from "./settings.ts";
 
 /** A GitHub control. */
 export type GitHubControl =
@@ -82,18 +84,22 @@ export interface ControlCheck {
 
 const RELEASE = /^rel\//;
 
-/** Whether a branch NAME is one that must stay green (see isProtectedRun for a run). */
-export function isProtectedBranch(branch: string, repoDefault?: string | null): boolean {
-  return DEFAULT_BRANCHES.has(branch) || (!!repoDefault && branch === repoDefault);
+/** Whether a branch NAME of `repo` is protected (see protectedRunRule for a run). */
+export function isProtectedBranch(
+  repo: string,
+  branch: string,
+  repoDefault?: string | null,
+): boolean {
+  return protectingRule(repo, branch, repoDefault) !== undefined;
 }
 
 /**
- * Whether a run is on a branch that must stay green: a protected name, from the repo itself, not a
- * PR event (a fork PR from a branch named `main` is not).
+ * The rule protecting a run's branch: a protected name, from the repo itself, not a PR event (a
+ * fork PR from a branch named `main` is not on `main`); `undefined` when none.
  */
-export function isProtectedRun(run: RunFacts): boolean {
-  return isProtectedBranch(run.branch, run.repoDefaultBranch) && run.fork !== true &&
-    !PR_EVENTS.has(run.event ?? "");
+export function protectedRunRule(repo: string, run: RunFacts): BranchRule | undefined {
+  if (run.fork === true || PR_EVENTS.has(run.event ?? "")) return undefined;
+  return protectingRule(repo, run.branch, run.repoDefaultBranch);
 }
 
 /** Names in dialogs are at most this long. */
@@ -145,17 +151,25 @@ export function checkRunControl(
   switch (c.kind) {
     case "cancel-run": {
       const message = `Cancel run ${run.id} ${on}, ${jobsText(run.jobs)}?`;
-      if (isProtectedRun(run)) {
+      const rule = protectedRunRule(c.repo, run);
+      if (rule?.cancel === "refuse") {
         return {
           allowed: false,
           refusal: `Cancel is refused on ${dialogText(run.branch)}: ${
             short(c.repo)
-          }'s default branch must stay green.`,
+          }'s protected branch must stay green.`,
           message,
           facts,
           warnings,
           confirmLabel: "Cancel run",
         };
+      }
+      if (rule) {
+        warnings.push(
+          `${quoted(run.branch)} is a protected branch of ${
+            short(c.repo)
+          }: a cancelled run leaves it without a result until the next one.`,
+        );
       }
       return { allowed: true, message, facts, warnings, confirmLabel: "Cancel run" };
     }
@@ -197,13 +211,22 @@ export function checkDispatch(
   })${inputs.length ? ` with ${inputs.map(([k, v]) => `${k}=${quoted(v)}`).join(", ")}` : ""}?`;
   const live = d.sameShaRuns.filter((r) => r.conclusion !== "cancelled");
   if (live.length > 0) {
-    return {
-      allowed: false,
-      refusal: `This commit already has run ${live[0].id}; a second run on one SHA isn't allowed.`,
-      message,
-      warnings: [],
-      confirmLabel: "Dispatch",
-    };
+    const policy = duplicateDispatchPolicy(c.repo, d.ref, d.repoDefaultBranch);
+    if (policy === "refuse") {
+      return {
+        allowed: false,
+        refusal: `This commit already has run ${
+          live[0].id
+        }; a second run on one SHA isn't allowed.`,
+        message,
+        warnings: [],
+        confirmLabel: "Dispatch",
+      };
+    }
+    const warnings = policy === "warn"
+      ? [`This commit already has run ${live[0].id}; this starts a second run on the same SHA.`]
+      : [];
+    return { allowed: true, message, warnings, confirmLabel: "Dispatch" };
   }
   const warnings = d.sameShaRuns.length
     ? [`This commit had run ${d.sameShaRuns[0].id}, cancelled; a new run takes its place.`]
@@ -232,14 +255,11 @@ export function controlRequest(c: GitHubControl): { path: string; body?: unknown
 }
 
 /**
- * One of the org's repos (`${ORG}/<name>`), as a name GitHub would accept (and nothing that could
- * reach a path or shell). Controls never act outside the org.
+ * A watched repo (a configured owner's, past the allow / deny lists), as a name GitHub would accept
+ * (and nothing that could reach a path or shell). Controls never act outside them.
  */
 export function validRepo(repo: unknown): repo is string {
-  if (typeof repo !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(repo) || repo.includes("..")) {
-    return false;
-  }
-  return repo.slice(0, repo.indexOf("/")) === ORG;
+  return typeof repo === "string" && repoWatched(repo);
 }
 
 /** A git ref for a dispatch: a branch or tag name, no spaces, no `..`, no leading `-`. */
@@ -383,23 +403,31 @@ export function checkInputs(
   return { ok: true, inputs };
 }
 
-// ---- pool controls (the Mac mini only) ----
+// ---- pool controls (the runner scheduler integration) ----
 
-/** The runner scripts' paths on this machine (absolute; baked as --allow-run). */
+/** The pool commands' programs on this machine (absolute; baked as --allow-run). */
 export interface PoolPaths {
   readonly pausePool: string;
+  /** `""`: no watchdog pass offered. */
   readonly watchdog: string;
   readonly launchctl: string;
+  /** The scheduler's launchd label (`""`: no restart offered). */
+  readonly launchdLabel: string;
 }
 
-/** The paths, from $HOME (the ops checkout's fixed place). */
-export function poolPaths(home: string): PoolPaths {
-  const ops = `${home}/Source/Brainwires/denext-internal/ops/runners`;
-  return {
-    pausePool: `${ops}/pause-pool.sh`,
-    watchdog: `${ops}/watchdog.sh`,
-    launchctl: "/bin/launchctl",
-  };
+/** launchd's control tool. */
+export const LAUNCHCTL = "/bin/launchctl";
+
+/** The integration's controls with `~/` expanded, or `null` (not configured, or no home for `~/`). */
+export function poolPaths(
+  controls: SchedulerControls | null,
+  home: string | null,
+): PoolPaths | null {
+  if (!controls) return null;
+  const pausePool = expandHome(controls.pausePool, home);
+  const watchdog = controls.watchdog ? expandHome(controls.watchdog, home) : "";
+  if (!pausePool || watchdog === null) return null;
+  return { pausePool, watchdog, launchctl: LAUNCHCTL, launchdLabel: controls.launchdLabel };
 }
 
 /** A pool command. */
@@ -411,7 +439,6 @@ export type PoolControl =
 
 /** Pause durations offered (pause-pool.sh caps a pause at 180 s; its own expiry voids it). */
 export const PAUSE_SECONDS = [60, 120, 180] as const;
-export const SCHEDULER_LABEL = "com.brainwires.denext-runners";
 
 /** A command to run: an exact program and argv (no shell). */
 export interface PoolCommand {
@@ -466,18 +493,20 @@ export function poolCommand(
         },
       };
     case "restart-scheduler":
+      if (!paths.launchdLabel) return { ok: false, message: "no scheduler to restart here" };
       if (!Number.isInteger(uid) || uid < 0) return { ok: false, message: "no user id" };
       return {
         ok: true,
         command: {
           program: paths.launchctl,
-          args: ["kickstart", "-k", `gui/${uid}/${SCHEDULER_LABEL}`],
+          args: ["kickstart", "-k", `gui/${uid}/${paths.launchdLabel}`],
           message:
             "Restart the runner scheduler (launchctl kickstart -k)? Running jobs are not ended; launchers are adopted.",
           confirmLabel: "Restart scheduler",
         },
       };
     case "watchdog-pass":
+      if (!paths.watchdog) return { ok: false, message: "no watchdog configured here" };
       return {
         ok: true,
         command: {
@@ -492,5 +521,9 @@ export function poolCommand(
 
 /** The programs pool controls may run, for the baked --allow-run. */
 export function poolPrograms(paths: PoolPaths): string[] {
-  return [paths.pausePool, paths.watchdog, paths.launchctl];
+  return [
+    paths.pausePool,
+    ...(paths.watchdog ? [paths.watchdog] : []),
+    ...(paths.launchdLabel ? [paths.launchctl] : []),
+  ];
 }

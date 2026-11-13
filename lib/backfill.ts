@@ -1,6 +1,6 @@
 // The back-fill: what happened while Fleet was closed, from the webhook spool
-// (`~/.denext-runners/hooks/events.jsonl` and its rotated `.1`), which the launchd receiver keeps
-// writing whether Fleet runs or not. At startup (and when the spool is first found) the job queued /
+// (`<spool>/events.jsonl` and its rotated `.1`), which a standalone receiver keeps writing whether
+// Fleet runs or not. At startup (and when the spool is first found) the job queued /
 // started / finished lines and run completions newer than the log's last line become log lines at
 // their real times, marked `backfill`, de-duplicated against the log, capped. Pure: no clock, no I/O.
 //

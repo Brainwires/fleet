@@ -46,6 +46,8 @@ export interface SnapshotInput {
   readonly finished: readonly FinishedJob[];
   readonly usual: UsualLookup;
   readonly repos: readonly string[];
+  /** The watched owners' logins. */
+  readonly owners?: readonly string[];
 }
 
 /** Every job row of a lane. */
@@ -94,11 +96,13 @@ export function poolCards(
     const id = poolIdOfLabel(label);
     if (!ids.includes(id)) ids.push(id);
   }
-  // Online, busy runners per pool from the org's runner list (ephemeral runners register per job).
+  // Online, busy runners per pool from the orgs' runner lists (ephemeral runners register per job).
   const busyRunners = new Map<string, number>();
+  const onlineRunners = new Map<string, number>();
   for (const r of runners ?? []) {
     const id = poolFromRunnerName(r.name);
     if (id && r.busy) busyRunners.set(id, (busyRunners.get(id) ?? 0) + 1);
+    if (id && r.status === "online") onlineRunners.set(id, (onlineRunners.get(id) ?? 0) + 1);
   }
   const cards: PoolCard[] = ids.map((id) => {
     const def = defs.find((p) => p.id === id);
@@ -116,6 +120,11 @@ export function poolCards(
       reason = h.reason;
     } else if (sh) {
       reason = "health is stale";
+    } else if (def?.labels && runners) {
+      // A pool grouped from the runners, with no health variable: its runners say.
+      const online = onlineRunners.get(id) ?? 0;
+      state = online > 0 ? "ok" : "unhealthy";
+      reason = online > 0 ? "" : "no runner online";
     }
     const ownBusy = Math.max(run, busyRunners.get(id) ?? 0);
     const perHost = host !== null || !shared;
@@ -250,6 +259,7 @@ export function buildSnapshot(input: SnapshotInput): Snapshot {
     alerts,
     summary,
     repos: input.repos,
+    owners: input.owners ?? [],
     eventSeq: 0,
     notificationsPaused: false,
     hooks: { state: "off", lastDeliveryAt: null },

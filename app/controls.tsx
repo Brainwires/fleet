@@ -28,8 +28,10 @@ export type PoolRequest =
 /** The control handlers the view gets (absent: no controls shown). */
 export interface ControlHandlers {
   readonly onControl: (c: ControlRequest) => void;
-  /** Present only on the machine with the runner scheduler. */
+  /** Present only with the runner scheduler integration on this machine. */
   readonly onPool?: (c: PoolRequest) => void;
+  /** Which scheduler-wide commands it offers (absent: both). */
+  readonly scheduler?: { readonly restart: boolean; readonly watchdog: boolean };
   readonly onDispatch?: () => void;
   /** The last control's outcome. */
   readonly message?: { readonly ok: boolean; readonly text: string } | null;
@@ -69,7 +71,7 @@ export function RunControls(
   );
 }
 
-/** A pool card's buttons (the Mac mini only). */
+/** A pool card's buttons (the runner scheduler integration only). */
 export function PoolControls(
   { pool, paused, onPool }: { pool: string; paused: boolean; onPool: (c: PoolRequest) => void },
 ) {

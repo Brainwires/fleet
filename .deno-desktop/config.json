@@ -50,6 +50,10 @@
           "separator": true
         },
         {
+          "id": "settings",
+          "label": "Settings…"
+        },
+        {
           "id": "pause-notifications",
           "label": "Pause notifications",
           "checked": false
@@ -88,14 +92,10 @@
         "/usr/bin/gh",
         "/usr/local/bin/gh",
         "C:\\Program Files\\GitHub CLI\\gh.exe",
-        "/usr/bin/security",
-        "/Users/nightness/Source/Brainwires/denext-internal/ops/runners/pause-pool.sh",
-        "/Users/nightness/Source/Brainwires/denext-internal/ops/runners/watchdog.sh",
-        "/bin/launchctl"
+        "/usr/bin/security"
       ],
       "write": [
-        "$APPDATA",
-        "/Users/nightness/.denext-runners/hooks"
+        "$APPDATA"
       ]
     }
   }

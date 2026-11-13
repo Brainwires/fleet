@@ -1,6 +1,6 @@
-// The GitHub webhook receiver: `POST /github/hooks` on 127.0.0.1:8789, behind the Cloudflare tunnel
-// `denext-ci-hooks` (ci-hooks.denext.dev). A web-standard Request → Response handler, so the tests
-// drive it without a socket.
+// The GitHub webhook receiver: `POST /github/hooks` on 127.0.0.1 (port 8789 by default), behind a
+// public endpoint such as a tunnel (docs/webhooks.md). A web-standard Request → Response handler, so
+// the tests drive it without a socket.
 //
 // In order, before anything is parsed:
 // 1. one route: anything but `POST /github/hooks` is 404;
@@ -253,7 +253,7 @@ export function payloadRepo(p: Record<string, unknown>): string | null {
 }
 
 /**
- * One line of the receiver's spool (`~/.denext-runners/hooks/events.jsonl`, written by the
+ * One line of the receiver's spool (`<spool>/events.jsonl`, written by the
  * receiver after verifying the signature) as a delivery, or `null` for anything else.
  */
 export function spoolLine(line: string): HookDelivery | null {

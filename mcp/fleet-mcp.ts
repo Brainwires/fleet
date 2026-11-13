@@ -1,19 +1,20 @@
 // Fleet's MCP server for agents: CI state from Fleet's cache instead of each agent polling the
-// GitHub API (whose 5,000-an-hour budget the runner scheduler shares). A zero-dependency MCP server
-// over stdio (newline-delimited JSON-RPC 2.0). READ-ONLY over the files the Fleet app writes in
-// its data folder (snapshot.json, the fleet-events.jsonl journal) plus the watchdog's
-// ~/.denext-runners/health.json and the webhook spool's folder: no network, no GitHub API, no
-// token, no environment, no subprocess. Run it with exactly:
+// GitHub API (whose 5,000-an-hour budget other tools, such as a runner scheduler, may share). A
+// zero-dependency MCP server over stdio (newline-delimited JSON-RPC 2.0). READ-ONLY over the files
+// the Fleet app writes in its data folder (snapshot.json, the fleet-events.jsonl journal), plus,
+// when given, the webhook spool's folder and a runner watchdog's local health file: no network, no
+// GitHub API, no token, no environment, no subprocess. Run it with exactly:
 //
-//   deno run --no-config --no-prompt \
-//     --allow-read=<data dir>,<~/.denext-runners/hooks>,<~/.denext-runners/health.json> \
-//     mcp/fleet-mcp.ts --data-dir <data dir> --hooks-dir <…/hooks> --health-file <…/health.json>
+//   deno run --no-config --no-prompt --allow-read=<data dir>[,<spool dir>][,<health file>] \
+//     mcp/fleet-mcp.ts --data-dir <data dir> [--hooks-dir <spool dir>] [--health-file <file>]
 //
-// (`deno task mcp` does, for this Mac's paths.) Tools: fleet_status, fleet_runs, fleet_jobs,
-// fleet_events, fleet_wait. Every answer carries its freshness (`as_of`, `stale`, `warning`).
+// (`deno task mcp` does, for macOS's data folder; the Settings view shows the command for this
+// machine.) Tools: fleet_status, fleet_runs, fleet_jobs, fleet_events, fleet_wait. Every answer
+// carries its freshness (`as_of`, `stale`, `warning`); fleet_status names the watched owners.
 
 import {
   AGENT_SNAPSHOT_FILE,
+  APP_ID,
   JOURNAL_FILE,
   JOURNAL_OLD_FILE,
   LOG_FILE,
@@ -48,12 +49,12 @@ const PROGRESS_MS = 25_000;
 
 /** Where the files are. */
 export interface FleetPaths {
-  /** The Fleet app's data folder (`~/Library/Application Support/dev.brainwires.fleet`). */
+  /** The Fleet app's data folder (on macOS `~/Library/Application Support/<app id>`). */
   readonly dataDir: string;
-  /** The webhook spool's folder (`~/.denext-runners/hooks`): a wake-up source for fleet_wait. */
-  readonly hooksDir: string;
-  /** The watchdog's local health file (`~/.denext-runners/health.json`). */
-  readonly healthFile: string;
+  /** The webhook spool's folder (a wake-up source for fleet_wait), or `null`. */
+  readonly hooksDir: string | null;
+  /** A runner watchdog's local health file, or `null`. */
+  readonly healthFile: string | null;
 }
 
 const join = (dir: string, name: string) => (dir.endsWith("/") ? dir + name : `${dir}/${name}`);
@@ -189,14 +190,16 @@ export class FleetFiles {
     return out;
   }
 
-  /** The watchdog's health.json, or `null`. */
+  /** The watchdog's health file, or `null`. */
   async watchdog(): Promise<WatchdogFile | null> {
+    if (!this.paths.healthFile) return null;
     const raw = await readJson(this.paths.healthFile);
     return typeof raw === "object" && raw !== null ? raw as WatchdogFile : null;
   }
 
   /** When the webhook spool was last written (epoch ms), or `null`. */
   async hooksSpoolAt(): Promise<number | null> {
+    if (!this.paths.hooksDir) return null;
     try {
       return (await Deno.stat(join(this.paths.hooksDir, "events.jsonl"))).mtime?.getTime() ?? null;
     } catch {
@@ -209,7 +212,7 @@ export class FleetFiles {
 
 const repoProp = {
   type: "string",
-  description: "Repo, `Brainwires/denext` or just `denext`.",
+  description: "Repo, `owner/name` or just `name` (any watched owner).",
 };
 
 /** Said in the instructions and the descriptions of every tool that returns CI text. */
@@ -223,10 +226,11 @@ export const TOOLS = [
   {
     name: "fleet_status",
     description:
-      "Brainwires CI at a glance from the Fleet app's cache (no GitHub API call): every runner pool " +
-      "and host (health, slots, busy, paused), running and queued job counts with the oldest queue " +
-      "wait, the GitHub rate budget left, webhook state, the watchdog's local health, and whether " +
-      "Fleet is running. Check `stale` / `warning` first: when stale, fall back to gh.",
+      "GitHub Actions at a glance from the Fleet app's cache (no GitHub API call): the owners Fleet " +
+      "watches (`owners`), every self-hosted runner pool and host (health, slots, busy, paused), " +
+      "running and queued job counts with the oldest queue wait, the GitHub rate budget left, " +
+      "webhook state, a runner watchdog's local health when configured, and whether Fleet is " +
+      "running. Check `stale` / `warning` first: when stale, fall back to gh.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -381,6 +385,7 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
     const watchers: Deno.FsWatcher[] = [];
     if (options.watch !== false) {
       for (const dir of [files.paths.dataDir, files.paths.hooksDir]) {
+        if (!dir) continue;
         try {
           const watcher = Deno.watchFs(dir, { recursive: false });
           watchers.push(watcher);
@@ -481,10 +486,10 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: "fleet", version: SERVER_VERSION },
           instructions:
-            "Read Brainwires CI state (runs, jobs, runner pools, events) from the Fleet app's " +
-            "cache instead of polling the GitHub API: the REST budget is shared with the runner " +
-            "scheduler. Use fleet_wait instead of watch loops. Every answer has `as_of` and " +
-            "`stale`; when stale, fall back to gh. " + UNTRUSTED_NOTE,
+            "Read GitHub Actions state (runs, jobs, runner pools, events) for the owners the Fleet " +
+            "app watches (fleet_status lists them) from its cache instead of polling the GitHub " +
+            "API, whose rate budget other tools share. Use fleet_wait instead of watch loops. " +
+            "Every answer has `as_of` and `stale`; when stale, fall back to gh. " + UNTRUSTED_NOTE,
         });
       }
       case "ping":
@@ -570,7 +575,10 @@ export async function serveStdio(files: FleetFiles, options: ServerOptions = {})
   await out;
 }
 
-/** The paths from the arguments (`--data-dir`, `--hooks-dir`, `--health-file`), HOME's otherwise. */
+/**
+ * The paths from the arguments: `--data-dir` (else macOS's data folder under HOME, when HOME is
+ * granted), and the optional `--hooks-dir` and `--health-file`.
+ */
 export function pathsFromArgs(args: readonly string[]): FleetPaths | string {
   const get = (flag: string): string | undefined => {
     for (let i = 0; i < args.length; i++) {
@@ -585,14 +593,15 @@ export function pathsFromArgs(args: readonly string[]): FleetPaths | string {
     home = Deno.env.get("HOME");
   }
   const dataDir = get("--data-dir") ??
-    (home ? `${home}/Library/Application Support/dev.brainwires.fleet` : undefined);
-  const hooksDir = get("--hooks-dir") ?? (home ? `${home}/.denext-runners/hooks` : undefined);
-  const healthFile = get("--health-file") ??
-    (home ? `${home}/.denext-runners/health.json` : undefined);
-  if (!dataDir || !hooksDir || !healthFile) {
-    return "usage: fleet-mcp.ts --data-dir <dir> --hooks-dir <dir> --health-file <file>";
+    (home ? `${home}/Library/Application Support/${APP_ID}` : undefined);
+  if (!dataDir) {
+    return "usage: fleet-mcp.ts --data-dir <dir> [--hooks-dir <dir>] [--health-file <file>]";
   }
-  return { dataDir, hooksDir, healthFile };
+  return {
+    dataDir,
+    hooksDir: get("--hooks-dir") ?? null,
+    healthFile: get("--health-file") ?? null,
+  };
 }
 
 if (import.meta.main) {

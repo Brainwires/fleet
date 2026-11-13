@@ -1,5 +1,7 @@
-// The poller: one round reads the org's repos (every 10 min), the active runs of the watched repos,
-// each active run's jobs, the org's runners and the pool-health variable, then builds a Snapshot.
+// The poller: one round reads the owners' repos (every 10 min), the active runs of the watched
+// repos, each active run's jobs, the orgs' self-hosted runners and (when configured) the pool-health
+// variable, then builds a Snapshot. Who and what is watched comes from the settings
+// (lib/settings.ts).
 // Runs that leave the active set get one last jobs read, so their conclusions reach "recently
 // finished" and their lengths the usual-length history. Every GitHub call goes through the
 // injected client (ETag cache, rate limit, back-off); a failed call keeps the last good data.
@@ -21,14 +23,18 @@ import type {
 import { type HealthState, type HostHealth, parsePoolHealth } from "./health.ts";
 import type { AuthState, FinishedJob, Snapshot } from "./model.ts";
 import {
-  CORE_REPOS,
+  currentPools,
   derivePools,
   GITHUB_POOL,
-  ORG,
+  groupRunners,
+  indexRunners,
+  pinnedRepos,
   poolFromLabels,
   poolFromRunnerName,
   setPools,
 } from "./pools.ts";
+import { knownDefaultBranch, rememberDefaultBranches } from "./branches.ts";
+import { ownerLogins, repoWatched, settings } from "./settings.ts";
 import { buildSnapshot } from "./snapshot.ts";
 import { AGENT_FINISHED_KEEP_MS, type KnownRun } from "./agent-snapshot.ts";
 import { type HookDelivery, payloadRepo } from "./hooks.ts";
@@ -77,9 +83,6 @@ const MAX_JOB_PAGES = 3;
 /** Requests in flight at once. */
 const CONCURRENCY = 6;
 
-/** The org variable. */
-export const HEALTH_VARIABLE = "DENEXT_POOL_HEALTH";
-
 /** What survives a relaunch (no token). */
 export interface PersistedState {
   readonly durations: Record<string, number[]>;
@@ -98,9 +101,9 @@ export interface PollerOptions {
   readonly now?: () => number;
   /** Lengths learned before (from {@linkcode PersistedState}). */
   readonly durations?: Record<string, number[]>;
-  /** Unauthenticated: only the core repos, no org endpoints. */
+  /** Unauthenticated: only the pinned and allowed repos, no owner endpoints. */
   readonly publicOnly?: boolean;
-  /** The Mac mini's local health (fresher than the variable), merged over it. */
+  /** The watchdog's local health (fresher than the variable), merged over it. */
   readonly localHealth?: (variable: HealthState) => Promise<HealthState>;
 }
 
@@ -203,31 +206,69 @@ export class Poller {
     }
   }
 
+  /** Every page of a repo list (at most 10). */
+  async #repoPages(first: string): Promise<GhRepo[] | null> {
+    const all: GhRepo[] = [];
+    let url: string | null = first;
+    for (let page = 0; url && page < 10; page++) {
+      const r: { body: GhRepo[]; next: string | null } | null = await this.#get<GhRepo[]>(url);
+      if (!r) return page === 0 ? null : all;
+      all.push(...r.body);
+      url = r.next;
+    }
+    return all;
+  }
+
+  /** One owner's repos: an org's list, or a user's (their own repos, private ones included). */
+  async #ownerRepos(login: string, kind: "org" | "user"): Promise<GhRepo[]> {
+    if (kind === "org") {
+      return await this.#repoPages(`/orgs/${login}/repos?per_page=100&type=all`)
+        .catch((err) => {
+          if (err instanceof GitHubError && err.kind === "not-found") return null;
+          throw err;
+        }) ?? [];
+    }
+    const lower = login.toLowerCase();
+    const mine = (await this.#repoPages("/user/repos?per_page=100&affiliation=owner") ?? [])
+      .filter((r) => r.full_name.toLowerCase().startsWith(`${lower}/`));
+    if (mine.length) return mine;
+    // Another user (or a token that can't list its own): their public repos.
+    return await this.#repoPages(`/users/${login}/repos?per_page=100&type=owner`).catch((err) => {
+      if (err instanceof GitHubError && err.kind === "not-found") return null;
+      throw err;
+    }) ?? [];
+  }
+
   async #refreshRepos(): Promise<boolean> {
     if (this.#publicOnly) return false;
     if (this.#now() - this.#reposAt < REPOS_REFRESH_MS) return false;
     const all: GhRepo[] = [];
-    let url: string | null = `/orgs/${ORG}/repos?per_page=100&type=all`;
-    for (let page = 0; url && page < 10; page++) {
-      const r: { body: GhRepo[]; next: string | null } | null = await this.#get<GhRepo[]>(url);
-      if (!r) break;
-      all.push(...r.body);
-      url = r.next;
-    }
-    if (all.length) this.#repos = all.filter((r) => !r.archived && !r.disabled);
+    for (const o of settings().owners) all.push(...await this.#ownerRepos(o.login, o.kind));
+    rememberDefaultBranches(
+      all.flatMap((r) => (r.default_branch ? [[r.full_name, r.default_branch] as const] : [])),
+    );
+    if (all.length) {
+      this.#repos = all.filter((r) => !r.archived && !r.disabled && repoWatched(r.full_name));
+    } else if (settings().owners.length === 0) this.#repos = [];
     this.#reposAt = this.#now();
     return true;
   }
 
-  /** The repos to poll this round: the core ones, hot ones, and every repo on a sweep. */
+  /** The repos always candidates, even without a repo list: the pinned ones, then the allowed. */
+  #fixedRepos(): string[] {
+    const s = settings();
+    return [...pinnedRepos(), ...s.repos.allow].filter((r) => repoWatched(r, s));
+  }
+
   /**
    * The repos to poll this round: every repo on a sweep (the repo list's 10-minute refresh), else
    * those active in the last {@linkcode IDLE_AFTER_POLLS} polls, and idle ones every
-   * {@linkcode IDLE_POLL_MS}. The core repos are always candidates, even without the repo list.
+   * {@linkcode IDLE_POLL_MS}. The pinned (and allowed) repos are always candidates, even without
+   * the repo list.
    */
   #reposToPoll(sweep: boolean): string[] {
     const now = this.#now();
-    const all = new Set([...CORE_REPOS, ...this.#repos.map((r) => r.full_name)]);
+    const all = new Set([...this.#fixedRepos(), ...this.#repos.map((r) => r.full_name)]);
     return [...all].filter((repo) =>
       sweep || (this.#idle.get(repo) ?? 0) < IDLE_AFTER_POLLS ||
       now - (this.#polledAt.get(repo) ?? -Infinity) >= IDLE_POLL_MS
@@ -315,12 +356,18 @@ export class Poller {
   }
 
   async #readHealth(): Promise<void> {
+    const hv = settings().pools.healthVariable;
+    if (!hv) {
+      // No pool-health variable configured: pools and their state come from the runners.
+      this.#health = { state: "unavailable", message: "" };
+      return;
+    }
     if (this.#publicOnly) {
       this.#health = { state: "unavailable", message: "pool health needs a token" };
       return;
     }
     try {
-      const r = await this.#get<GhVariable>(`/orgs/${ORG}/actions/variables/${HEALTH_VARIABLE}`);
+      const r = await this.#get<GhVariable>(`/orgs/${hv.org}/actions/variables/${hv.name}`);
       this.#health = r
         ? parsePoolHealth(typeof r.body.value === "string" ? r.body.value : "", this.#now())
         : { state: "unavailable", message: "pool health unavailable (no access)" };
@@ -331,10 +378,24 @@ export class Poller {
     }
   }
 
+  /** The orgs' self-hosted runners (users' repo-level runners aren't listed). */
   async #readRunners(): Promise<void> {
     if (this.#publicOnly) return;
-    const r = await this.#get<GhRunnerList>(`/orgs/${ORG}/actions/runners?per_page=100`);
-    if (r) this.#runners = [...r.body.runners];
+    const orgs = settings().owners.filter((o) => o.kind === "org");
+    if (orgs.length === 0) {
+      this.#runners = null;
+      return;
+    }
+    const lists = await Promise.all(
+      orgs.map((o) =>
+        this.#get<GhRunnerList>(`/orgs/${o.login}/actions/runners?per_page=100`).catch((err) => {
+          if (err instanceof GitHubError && err.kind === "not-found") return null;
+          throw err;
+        })
+      ),
+    );
+    const got = lists.filter((r) => r !== null);
+    if (got.length) this.#runners = got.flatMap((r) => r.body.runners);
   }
 
   /**
@@ -350,7 +411,10 @@ export class Poller {
       this.#notePolled(repos, polled);
       // Runs of repos not polled this round stay as they were.
       const polledSet = new Set(repos);
-      const kept = [...this.#runs.values()].filter((a) => !polledSet.has(a.repo));
+      // A repo no longer watched (the settings changed) drops out.
+      const kept = [...this.#runs.values()].filter((a) =>
+        !polledSet.has(a.repo) && repoWatched(a.repo)
+      );
       const active = [...polled, ...kept];
       const activeIds = new Set(active.map((a) => a.run.id));
       // Runs that finished since the last round: one last jobs read.
@@ -386,13 +450,14 @@ export class Poller {
       if (this.#localHealth) {
         this.#health = await this.#localHealth(this.#health).catch(() => this.#health);
       }
-      // The pool list follows the data: a pool the watchdog stops reporting leaves the cards.
+      // The pool list follows the data: a pool the watchdog stops reporting (or whose runners all
+      // leave) leaves the cards.
       const h = this.#health;
-      const pools = derivePools(
-        h.state === "ok" || h.state === "stale" ? h.doc : null,
-        this.#runners,
-      );
+      const pools = settings().pools.healthVariable
+        ? derivePools(h.state === "ok" || h.state === "stale" ? h.doc : null, this.#runners)
+        : groupRunners(this.#runners);
       if (pools) setPools(pools);
+      indexRunners(this.#runners, currentPools());
       this.#prune();
       this.#ok = true;
       this.#lastError = "";
@@ -442,7 +507,7 @@ export class Poller {
    */
   applyHook(d: HookDelivery): boolean {
     const repo = payloadRepo(d.payload);
-    if (!repo || !/^[\w.-]+\/[\w.-]+$/.test(repo)) return false;
+    if (!repo || !/^[\w.-]+\/[\w.-]+$/.test(repo) || !repoWatched(repo)) return false;
     if (d.event === "workflow_run") {
       const run = asRun(d.payload.workflow_run);
       if (!run) return false;
@@ -538,7 +603,7 @@ export class Poller {
     return out;
   }
 
-  /** The watchdog's per-host health (the variable, or the mini's local file merged over it). */
+  /** The watchdog's per-host health (the variable, or its local file merged over it). */
   hosts(): Readonly<Record<string, HostHealth>> {
     const h = this.#health;
     return h.state === "ok" || h.state === "stale" ? h.doc.hosts ?? {} : {};
@@ -555,14 +620,23 @@ export class Poller {
     return a ? { repo: a.repo, run: a.run, jobs: this.#jobs.get(runId) ?? [] } : undefined;
   }
 
-  /** A repo's default branch from the org list, when known. */
+  /** A repo's default branch from the owners' repo lists, when known. */
   defaultBranch(repo: string): string | null {
-    return this.#repos.find((r) => r.full_name === repo)?.default_branch ?? null;
+    return this.#repos.find((r) => r.full_name === repo)?.default_branch ??
+      knownDefaultBranch(repo);
   }
 
-  /** The watched repos (core + the org's non-archived ones). */
+  /** The watched repos (pinned and allowed, then the owners' non-archived ones). */
   repoNames(): string[] {
-    return [...new Set([...CORE_REPOS, ...this.#repos.map((r) => r.full_name)])];
+    return [...new Set([...this.#fixedRepos(), ...this.#repos.map((r) => r.full_name)])];
+  }
+
+  /** Forget the repo list, so the next poll re-reads it (the owners changed). */
+  resetRepos(): void {
+    this.#reposAt = -Infinity;
+    this.#repos = [];
+    this.#idle.clear();
+    this.#polledAt.clear();
   }
 
   /** Forget the finished runs once the event log has seen them. */
@@ -631,7 +705,7 @@ export class Poller {
 
   /** The page's snapshot now. */
   snapshot(): Snapshot {
-    const repos = new Set(CORE_REPOS);
+    const repos = new Set(pinnedRepos());
     for (const a of this.#runs.values()) repos.add(a.repo);
     return buildSnapshot({
       now: this.#now(),
@@ -653,6 +727,7 @@ export class Poller {
       finished: [...this.#finished.values()],
       usual: this.usual,
       repos: [...repos],
+      owners: ownerLogins(),
     });
   }
 

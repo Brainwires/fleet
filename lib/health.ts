@@ -1,5 +1,5 @@
-// DENEXT_POOL_HEALTH: the org variable the runner watchdog publishes (ops/runners/README.md).
-// Schema v1: {"v":1,"checked_at":epoch,"pools":{"<label>":{ok,reason,since,slots,busy,paused}},
+// The pool-health variable: an org Actions variable a runner watchdog publishes (settings
+// `pools.healthVariable`; the schema is documented in docs/pool-health.md). Schema v1: {"v":1,"checked_at":epoch,"pools":{"<label>":{ok,reason,since,slots,busy,paused}},
 // "hosts":{"<pool>":{label,ok,reason,since,slots,busy,paused,runner_prefix}},"alerts":[{at,pool,msg}]}.
 // `pools` merges the pools that share a label; `hosts` (newer watchdogs) keeps each pool apart. The variable may be missing (404), garbage, or stale (the watchdog
 // down); every case parses to a result the UI can show, never a throw.
@@ -15,11 +15,11 @@ export interface PoolHealth {
   readonly paused: boolean;
 }
 
-/** One pool (host) as published, unmerged: the `hosts` map, or the Mac mini's health.json. */
+/** One pool (host) as published, unmerged: the `hosts` map, or the watchdog's local health file. */
 export interface HostHealth extends PoolHealth {
   /** The runs-on label (`null` when the source doesn't say). */
   readonly label: string | null;
-  /** The runner-name prefix (`denext-win-x64-brain-`), `null` when the source doesn't say. */
+  /** The runner-name prefix (`acme-win-x64-b-`), `null` when the source doesn't say. */
   readonly runnerPrefix: string | null;
 }
 

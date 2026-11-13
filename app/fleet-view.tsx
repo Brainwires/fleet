@@ -30,10 +30,22 @@ export interface FleetViewProps {
   readonly refreshing?: boolean;
   /** The event log, oldest first. */
   readonly events?: readonly FleetEvent[];
-  /** Controls (cancel, re-run, dispatch; pools on the Mac mini). Absent: none shown. */
+  /** Controls (cancel, re-run, dispatch; pools with the scheduler integration). Absent: none. */
   readonly controls?: ControlHandlers;
   /** The dispatch panel, when open (rendered above the lanes). */
   readonly dispatchPanel?: unknown;
+  /** Open the Settings view (the header's Settings button). Absent: no button. */
+  readonly onSettings?: () => void;
+}
+
+/** The header's owner line: the watched owners (`a, b`), then `· Actions`. */
+export function ownerLine(owners: readonly string[] | undefined): string {
+  const list = owners ?? [];
+  if (list.length === 0) return "GitHub Actions";
+  const shown = list.length > 3
+    ? `${list.slice(0, 3).join(", ")} +${list.length - 3}`
+    : list.join(", ");
+  return `${shown} · Actions`;
 }
 
 /** A link that leaves the app: an anchor (copyable, focusable) whose click goes to `onOpen`. */
@@ -490,7 +502,7 @@ export function FleetView(props: FleetViewProps) {
       <header class="top">
         <div class="brand">
           <span class="wordmark">Fleet</span>
-          <span class="org">Brainwires · Actions</span>
+          <span class="org" title={(s.owners ?? []).join(", ")}>{ownerLine(s.owners)}</span>
         </div>
         <div class="counts" aria-live="polite">
           <span class="count count-run">
@@ -521,6 +533,13 @@ export function FleetView(props: FleetViewProps) {
           >
             {props.refreshing ? "Refreshing…" : "Refresh"}
           </button>
+          {props.onSettings
+            ? (
+              <button type="button" class="btn" onClick={props.onSettings}>
+                Settings
+              </button>
+            )
+            : null}
         </div>
       </header>
 
@@ -549,24 +568,34 @@ export function FleetView(props: FleetViewProps) {
             )
             : null}
         </div>
-        {props.controls?.onPool
+        {props.controls?.onPool &&
+            (props.controls.scheduler?.restart !== false ||
+              props.controls.scheduler?.watchdog !== false)
           ? (
             <p class="pool-fleet">
               <span class="muted small">Runner scheduler (this machine):</span>
-              <button
-                type="button"
-                class="ctl"
-                onClick={() => props.controls!.onPool!({ kind: "restart-scheduler" })}
-              >
-                Restart scheduler
-              </button>
-              <button
-                type="button"
-                class="ctl"
-                onClick={() => props.controls!.onPool!({ kind: "watchdog-pass" })}
-              >
-                Run watchdog pass now
-              </button>
+              {props.controls.scheduler?.restart !== false
+                ? (
+                  <button
+                    type="button"
+                    class="ctl"
+                    onClick={() => props.controls!.onPool!({ kind: "restart-scheduler" })}
+                  >
+                    Restart scheduler
+                  </button>
+                )
+                : null}
+              {props.controls.scheduler?.watchdog !== false
+                ? (
+                  <button
+                    type="button"
+                    class="ctl"
+                    onClick={() => props.controls!.onPool!({ kind: "watchdog-pass" })}
+                  >
+                    Run watchdog pass now
+                  </button>
+                )
+                : null}
             </p>
           )
           : null}
@@ -619,7 +648,9 @@ export function FleetView(props: FleetViewProps) {
                 <p class="empty">
                   {s.health.state === "ok" || s.health.state === "stale"
                     ? "No recent alerts."
-                    : "No alerts (pool health unavailable)."}
+                    : s.health.message
+                    ? "No alerts (pool health unavailable)."
+                    : "No alerts."}
                 </p>
               )
               : (

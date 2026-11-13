@@ -159,6 +159,8 @@ export interface AgentSnapshot {
   /** When the backend last wrote the file (every update, and a heartbeat while it runs). */
   readonly written_at: string;
   readonly source: "poll" | "hook";
+  /** The owners Fleet watches (absent in a file from an older build). */
+  readonly owners?: readonly string[];
   readonly auth: string;
   readonly poll: {
     readonly ok: boolean;
@@ -311,6 +313,7 @@ export function buildAgentSnapshot(input: AgentSnapshotInput): AgentSnapshot {
     updated_at: iso(input.updatedAt) ?? new Date(input.now).toISOString(),
     written_at: new Date(input.now).toISOString(),
     source: input.source,
+    owners: [...(s.owners ?? [])],
     auth: s.auth,
     poll: {
       ok: s.poll.ok,

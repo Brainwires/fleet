@@ -1,24 +1,19 @@
 import type { DenextConfig } from "denext/server";
 import { ALL_GH_PATHS } from "./lib/deno-host.ts";
-import { HOOKS_LOG_DIR, SECURITY_BIN } from "./lib/deno-hooks.ts";
-import { poolPaths, poolPrograms } from "./lib/controls.ts";
+import { SECURITY_BIN } from "./lib/deno-hooks.ts";
+import { internalGrants } from "./lib/build-grants.ts";
 import { INITIAL_MENU } from "./lib/tray-driver.ts";
 
-// Fleet: the Brainwires org's GitHub Actions jobs and our self-hosted runner pools, live. One
-// window plus a tray icon. The backend is the `fleet` desktop extension (desktop/fleet.ts), which
-// runs in the app's Deno process and is the only code that holds the GitHub token.
-const HOME = Deno.env.get("HOME");
-// The pool controls' exact programs, only when the build machine has the runner scheduler's ops
-// checkout (the Mac mini): pause-pool.sh, watchdog.sh, /bin/launchctl. Elsewhere none.
-const POOL_PROGRAMS = (() => {
-  if (!HOME) return [];
-  const paths = poolPaths(HOME);
-  try {
-    return Deno.statSync(paths.pausePool).isFile ? poolPrograms(paths) : [];
-  } catch {
-    return [];
-  }
-})();
+// Fleet: GitHub Actions jobs and self-hosted runner pools, live. One window plus a tray icon. The
+// backend is the `fleet` desktop extension (desktop/fleet.ts), which runs in the app's Deno process
+// and is the only code that holds the GitHub token.
+//
+// A release build bakes only what every install needs. An internal build (FLEET_INTERNAL=1, e.g.
+// `denext task desktop:package:internal`) also bakes the grants the build machine's local config
+// (`fleet-local-config.json`, or $FLEET_LOCAL_CONFIG) calls for: the runner scheduler's pool
+// commands and a webhook spool outside the data folder (lib/build-grants.ts). It refuses to build
+// without that config, so an internal build never silently ships without its controls.
+const INTERNAL = internalGrants();
 
 export default {
   desktop: {
@@ -61,24 +56,23 @@ export default {
     capabilities: {
       // The pasted token, in the `fleet` extension's own namespace (host.secureStore).
       secureStore: true,
-      // Pool unhealthy, queued over 15 min, a default-branch job failed.
+      // Pool unhealthy, queued over 15 min, a protected-branch job failed.
       notifications: true,
-      // Start at login (a tray toggle, on at the first run).
+      // Start at login (opt-in: the wizard, the Settings view or the tray).
       launchAtLogin: true,
       extensions: ["./desktop/fleet.ts"],
     },
     extraPermissions: {
-      // The GitHub API, outbound only. The webhook receiver listens on 127.0.0.1:8789, inside the
+      // The GitHub API, outbound only. The webhook receiver listens on loopback, inside the
       // loopback listen grant every desktop app has.
       netConnect: ["api.github.com"],
-      // `gh auth token`, and the webhook secret from the login keychain (the Mac mini only), by
-      // absolute path only.
-      run: [...ALL_GH_PATHS, SECURITY_BIN, ...POOL_PROGRAMS],
-      // fleet-state.json (usual job lengths, notifications already posted): the app's own data
-      // folder only ($DENO_DESKTOP_DATA on the pinned runtime). No token is ever written there.
-      // The webhook log the runner scheduler reads (~/.denext-runners/hooks, the build machine's
-      // home: the receiver only runs on the Mac mini, where Fleet is built for itself).
-      write: ["$APPDATA", ...(HOME ? [`${HOME}/${HOOKS_LOG_DIR}`] : [])],
+      // `gh auth token`, and a webhook secret from the macOS login keychain, by absolute path only;
+      // an internal build adds the runner scheduler's pool commands.
+      run: [...ALL_GH_PATHS, SECURITY_BIN, ...INTERNAL.run],
+      // The settings, state, event log and webhook spool: the app's own data folder only
+      // ($DENO_DESKTOP_DATA on the pinned runtime). No token is ever written there. An internal
+      // build adds a spool folder its local config puts outside it.
+      write: ["$APPDATA", ...INTERNAL.write],
     },
   },
 } satisfies DenextConfig;

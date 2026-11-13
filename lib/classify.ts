@@ -3,16 +3,18 @@
 import type { GhJob, GhRun } from "./github-types.ts";
 import type { JobRow, JobTarget, Lane, PoolCard, RepoGroup, RunGroup } from "./model.ts";
 import {
-  CORE_REPOS,
-  DEFAULT_BRANCHES,
   GITHUB_POOL,
   hostRuleOfRunner,
   hostSlot,
+  isPoolLabel,
+  isSelfHostedRunner,
+  pinnedRepos,
   poolFromLabels,
   poolFromRunnerName,
   runnerHostRule,
   runnerIsSlot,
 } from "./pools.ts";
+import { isProtectedName } from "./branches.ts";
 
 /** A job queued longer than this is late (15 min). */
 export const QUEUED_WARN_MS = 15 * 60_000;
@@ -54,10 +56,14 @@ export interface JobClass {
   readonly pool: string;
 }
 
+/** GitHub's runner group for its hosted runners (a job on any other group is self-hosted). */
+const GITHUB_GROUP = "GitHub Actions";
+
 /**
- * Classify an active job: running on our pool (runner `denext-*`, pool from its `denext-…` label),
- * running GitHub-hosted, queued for our pool (labels include `self-hosted` / `denext-*`), or queued
- * GitHub-hosted. `null` for a completed job.
+ * Classify an active job: running on a self-hosted pool (a registered runner of the owners, a
+ * scheduler-named or runner-host runner, or a non-GitHub runner group; pool from the runner, else
+ * its labels), running GitHub-hosted, queued for a pool (labels include `self-hosted` or a pool's
+ * label), or queued GitHub-hosted. `null` for a completed job.
  */
 export function classifyJob(job: GhJob): JobClass | null {
   const lane = laneOf(job.status);
@@ -66,7 +72,8 @@ export function classifyJob(job: GhJob): JobClass | null {
   const labelPool = poolFromLabels(labels);
   if (lane === "running") {
     const runner = job.runner_name ?? "";
-    if (runner.startsWith("denext-") || hostRuleOfRunner(runner)) {
+    const group = job.runner_group_name;
+    if (isSelfHostedRunner(runner) || (runner && group && group !== GITHUB_GROUP)) {
       return {
         lane,
         target: "pool",
@@ -86,9 +93,9 @@ export function classifyJob(job: GhJob): JobClass | null {
   return { lane, target: "github", pool: GITHUB_POOL };
 }
 
-/** A GitHub-hosted job's image: its first runs-on label not ours (`ubuntu-22.04`), or `null`. */
+/** A GitHub-hosted job's image: its first runs-on label not a pool's (`ubuntu-22.04`), or `null`. */
 export function githubImage(labels: readonly string[] | undefined): string | null {
-  return (labels ?? []).find((l) => l !== "self-hosted" && !l.startsWith("denext-")) ?? null;
+  return (labels ?? []).find((l) => l !== "self-hosted" && !isPoolLabel(l)) ?? null;
 }
 
 /** Parse an ISO time to epoch ms (`null` for missing / garbage). */
@@ -173,8 +180,8 @@ export interface RunProvenance {
    */
   readonly untrusted: boolean;
   /**
-   * The run is ON a default branch: a protected name, the head commit from this very repo, and not
-   * a PR event (a fork's branch named `main` is not our `main`).
+   * The run is ON a protected branch (settings `branches.rules`): a protected name, the head commit
+   * from this very repo, and not a PR event (a fork's branch named `main` is not the repo's `main`).
    */
   readonly defaultBranch: boolean;
 }
@@ -196,7 +203,7 @@ export function runProvenance(
     : null;
   const login = run.triggering_actor?.login ?? run.actor?.login;
   const branch = run.head_branch ?? "";
-  const protectedName = DEFAULT_BRANCHES.has(branch) || (!!repoDefault && branch === repoDefault);
+  const protectedName = isProtectedName(own, branch, repoDefault);
   return {
     event,
     actor: typeof login === "string" ? login : null,
@@ -235,10 +242,11 @@ function runHeader(a: ActiveRun): Omit<RunGroup, "jobs" | "pendingJobs"> {
   };
 }
 
-/** Repo order: the core repos first (in their order), then alphabetical. */
+/** Repo order: the pinned repos first (in their order), then alphabetical. */
 export function repoOrder(a: string, b: string): number {
-  const ia = CORE_REPOS.indexOf(a);
-  const ib = CORE_REPOS.indexOf(b);
+  const pinned = pinnedRepos();
+  const ia = pinned.indexOf(a);
+  const ib = pinned.indexOf(b);
   if (ia !== -1 || ib !== -1) return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
   return a.localeCompare(b);
 }
@@ -250,9 +258,9 @@ interface RunnerJob {
 }
 
 /**
- * What a runner-host job hosts: `hosting gh-intel-helper-1 · idle`, or `… · running <repo> ·
+ * What a runner-host job hosts: `hosting helper-1 · idle`, or `… · running <repo> ·
  * <workflow> · <job>` once a running job's runner is the one of its slot (`helper (1)` ↔
- * `gh-intel-helper-1-…`). Without a registered runner yet the slot's prefix stands in.
+ * `helper-1-…`). Without a registered runner yet the slot's prefix stands in.
  */
 function hostingText(
   rule: ReturnType<typeof runnerHostRule> & object,

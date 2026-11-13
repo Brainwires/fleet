@@ -131,7 +131,7 @@ function optStrings(a: Args, k: string): string[] | undefined {
   return v as string[];
 }
 
-/** `Brainwires/denext`, or `denext` for any owner. Case-insensitive. */
+/** `owner/name`, or `name` for any owner. Case-insensitive. */
 export function repoMatches(filter: string, repo: string): boolean {
   const f = filter.toLowerCase();
   const r = repo.toLowerCase();
@@ -155,7 +155,7 @@ const isFailed = (c: string | null) => c !== null && FAILED_CONCLUSIONS.has(c);
 
 // ---- fleet_status ----
 
-/** The watchdog's local health file (`~/.denext-runners/health.json`), as read. */
+/** A runner watchdog's local health file, as read. */
 export interface WatchdogFile {
   readonly checked_at_epoch?: unknown;
   readonly pools?: Record<string, unknown>;
@@ -203,6 +203,7 @@ export function statusResult(
   }
   return {
     ...fresh,
+    owners: snap.owners ?? [],
     fleet: {
       auth: snap.auth,
       poll: snap.poll,

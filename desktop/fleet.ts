@@ -9,10 +9,12 @@ import {
   ghToken,
   journalLastSeq,
   loadLog,
+  loadSettingsFiles,
   loadState,
   postNotification,
   saveAgentSnapshot,
   saveLog,
+  saveSettings,
   saveState,
 } from "../lib/deno-host.ts";
 import { CHANGED_EVENT, type Snapshot } from "../lib/model.ts";
@@ -23,20 +25,24 @@ import {
   runControl,
   runPoolControl,
 } from "../lib/control-runner.ts";
-import { localPoolPaths, readLocalHealth, runProgram } from "../lib/deno-pools.ts";
+import { home, localHealthReader, localPoolPaths, runProgram } from "../lib/deno-pools.ts";
 import {
-  hooksAvailable,
+  hooksUnavailable,
   readHookSecret,
   readSpoolSince,
   type Receiver,
   recentSpoolIds,
+  spoolDirOf,
   startReceiver,
   tailSpool,
 } from "../lib/deno-hooks.ts";
+import { expandHome, settings } from "../lib/settings.ts";
+import type { PoolPaths } from "../lib/controls.ts";
 
 let service: FleetService | undefined;
 let extHost: DesktopExtensionHost | undefined;
-const pools = localPoolPaths();
+/** The pool commands the settings configure here (the runner scheduler integration), or `null`. */
+const pools = (): PoolPaths | null => localPoolPaths(settings().integrations.runnerScheduler);
 /** Test builds: controls show their dialogs and send nothing (set in the environment at launch). */
 const DRY_RUN = (() => {
   try {
@@ -65,8 +71,11 @@ function start(host: DesktopExtensionHost): void {
     appendJournal: (events) => appendJournal(dir, events),
     journalLastSeq: () => journalLastSeq(dir),
     // What happened while Fleet was closed: the receiver's spool, read once at startup.
-    readSpool: (since) => readSpoolSince(since),
-    ...(pools ? { localHealth: readLocalHealth } : {}),
+    readSpool: (since) => readSpoolSince(since, spoolDirOf(settings().webhooks, dir)),
+    // The runner scheduler integration's local health file, when the settings name one.
+    localHealthFor: (s) => localHealthReader(s.integrations.runnerScheduler),
+    loadSettings: () => loadSettingsFiles(dir),
+    saveSettings: (s) => saveSettings(dir, s),
   });
   service.onChange(() => {
     try {
@@ -76,8 +85,10 @@ function start(host: DesktopExtensionHost): void {
     }
   });
   for (const fn of waiting.splice(0)) fn(service);
-  service.start().catch((err) => console.error("fleet: start failed:", errName(err)));
-  void startHooks(service);
+  const started = service.start();
+  started.catch((err) => console.error("fleet: start failed:", errName(err)));
+  // Webhooks follow the settings loaded by start() (a change applies at the next launch).
+  void started.then(() => startHooks(service!, dir), () => {});
   host.onAppQuit(() => {
     stopSpool?.();
     return receiver?.stop();
@@ -88,29 +99,42 @@ let receiver: Receiver | null = null;
 let stopSpool: (() => void) | undefined;
 
 /**
- * GitHub webhooks, only on the machine that runs the tunnel and holds the secret (the Mac mini):
- * deliveries feed the same state and log as polling, which then only reconciles.
+ * GitHub webhooks, when the settings turn them on and this machine has what they need (the secret;
+ * the endpoint's launchd job when one is required): deliveries feed the same state and log as
+ * polling, which then only reconciles.
  */
-async function startHooks(s: FleetService): Promise<void> {
-  if (!(await hooksAvailable())) return;
-  const secret = await readHookSecret();
+async function startHooks(s: FleetService, dataDir: string): Promise<void> {
+  const cfg = s.settings().webhooks;
+  if (!cfg.enabled) return;
+  const why = await hooksUnavailable(cfg, extHost?.secureStore);
+  if (why) {
+    console.warn(`fleet: hooks: off (${why})`);
+    return;
+  }
+  const secret = await readHookSecret(cfg, extHost?.secureStore);
   if (!secret) {
     console.warn("fleet: hooks: the webhook secret is unreadable or shorter than 32 characters");
     return;
   }
+  const spoolDir = spoolDirOf(cfg, dataDir);
   // The ids already spooled: a replay of one after a restart is still a duplicate.
-  const seen = await recentSpoolIds().catch(() => []);
+  const seen = await recentSpoolIds(spoolDir).catch(() => []);
   receiver = startReceiver(secret, {
     onDelivery: (d) => void s.applyHook(d),
     onVerified: (_event, at) => s.hookVerified(at),
     onReject: (why) => console.warn(`fleet: hooks: rejected ${why}`),
-  }, { seen, clockOffset: () => s.github()?.client.clockOffset() ?? 0 });
+  }, {
+    seen,
+    port: cfg.port,
+    spoolDir,
+    clockOffset: () => s.github()?.client.clockOffset() ?? 0,
+  });
   if (receiver) {
     s.setHooksEnabled(true, "listener");
     return void s.backfill();
   }
-  // The port is held by the receiver (the launchd service, or `denext task hooks`): read its spool.
-  const tail = await tailSpool((d) => void s.applyHook(d), undefined, undefined, seen);
+  // The port is held by the standalone receiver (a service, or `denext task hooks`): read its spool.
+  const tail = await tailSpool((d) => void s.applyHook(d), spoolDir, undefined, seen);
   if (tail) {
     stopSpool = tail.stop;
     // Start from the spool's newest delivery, not "no delivery yet": the receiver has been live
@@ -119,7 +143,9 @@ async function startHooks(s: FleetService): Promise<void> {
     s.setHooksEnabled(true, "spool");
     void s.backfill();
   } else {
-    console.warn("fleet: hooks: 127.0.0.1:8789 is taken and there is no spool; polling only");
+    console.warn(
+      `fleet: hooks: 127.0.0.1:${cfg.port} is taken and there is no spool; polling only`,
+    );
     s.setHooksEnabled(false);
   }
 }
@@ -150,7 +176,7 @@ function controlDeps(): ControlDeps {
       return await extHost.confirm(o);
     },
     log: (e) => s.logAction(e),
-    poolPaths: pools,
+    poolPaths: pools(),
     uid: Deno.uid() ?? -1,
     runProgram,
     dryRun: DRY_RUN,
@@ -201,7 +227,55 @@ export default defineDesktopExtension({
     },
     retryGh: { handler: () => svc().retryGh() },
     /** What the page may offer: GitHub controls (always; a token is checked on confirm), pools here. */
-    capabilities: { handler: () => ({ pools: pools !== null }) },
+    capabilities: {
+      handler: () => {
+        const p = pools();
+        return { pools: p !== null, restart: !!p?.launchdLabel, watchdog: !!p?.watchdog };
+      },
+    },
+    /** The settings, and what the Settings view shows about this machine. */
+    settings: {
+      handler: () => {
+        const s = svc().settings();
+        const dir = extHost?.appSupportDir ?? "";
+        const sched = s.integrations.runnerScheduler;
+        const healthFile = sched?.localHealthFile
+          ? expandHome(sched.localHealthFile, home())
+          : null;
+        return {
+          settings: s,
+          machine: {
+            dataDir: dir,
+            spoolDir: s.webhooks.enabled ? spoolDirOf(s.webhooks, dir) : null,
+            healthFile,
+            os: Deno.build.os,
+          },
+        };
+      },
+    },
+    /** New settings: validated, saved (0600) and applied; the problems when they don't validate. */
+    saveSettings: {
+      timeoutMs: 60_000,
+      handler: (raw: unknown) => svc().saveSettings(obj(raw).settings),
+    },
+    /** The token's account, scopes and organizations (the wizard's sign-in step). */
+    tokenInfo: { timeoutMs: 60_000, handler: () => svc().tokenInfo() },
+    /** An owner's repos with their default branches (the wizard's repo step). */
+    ownerRepos: {
+      timeoutMs: 120_000,
+      handler: (raw: unknown) => {
+        const r = obj(raw);
+        const owner = typeof r.owner === "string" ? r.owner : "";
+        return svc().ownerRepos(owner, r.kind === "user" ? "user" : "org");
+      },
+    },
+    /** The page showed the Settings view the tray asked for. */
+    settingsShown: {
+      handler: () => {
+        svc().settingsShown();
+        return null;
+      },
+    },
     /** The watched repos, for the dispatch form. */
     repos: { handler: () => svc().github()?.poller.repoNames() ?? [] },
     /** A repo's dispatchable workflows and their inputs (from the workflow YAML). */
@@ -211,7 +285,7 @@ export default defineDesktopExtension({
     },
     /** A GitHub control: guardrails, the OS confirm dialog, then the request. */
     control: { timeoutMs: false, handler: (raw: unknown) => runControl(controlDeps(), raw) },
-    /** A pool control (the Mac mini only): guardrails, the OS confirm dialog, then the script. */
+    /** A pool control (the runner scheduler integration): guardrails, the OS dialog, the script. */
     poolControl: {
       timeoutMs: false,
       handler: (raw: unknown) => runPoolControl(controlDeps(), raw),

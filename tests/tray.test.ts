@@ -8,10 +8,11 @@ import { trayText } from "../lib/snapshot.ts";
 import {
   createWindowManager,
   driveTray,
-  ensureLoginDefault,
   INITIAL_MENU,
   loginOn,
   MENU,
+  readLoginItem,
+  setLoginItem,
   summaryLine,
   trayMenu,
   WINDOW_KEY,
@@ -219,6 +220,7 @@ Deno.test("tray menu: open/close, the summary as a disabled item, toggles, quit"
     { id: MENU.toggle, label: "Open Fleet" },
     { id: MENU.summary, label: "2 running · 1 queued", disabled: true },
     { separator: true },
+    { id: MENU.settings, label: "Settings…" },
     { id: MENU.pause, label: "Pause notifications", checked: true },
     { id: MENU.login, label: "Start at login", checked: true },
     { id: MENU.refresh, label: "Refresh now" },
@@ -228,7 +230,7 @@ Deno.test("tray menu: open/close, the summary as a disabled item, toggles, quit"
   assertEquals(
     trayMenu({ windowVisible: true, summary: "x", notificationsPaused: false, startAtLogin: null })
       .map((i) => "id" in i ? i.id : "-"),
-    [MENU.toggle, MENU.summary, "-", MENU.pause, MENU.refresh, "-", MENU.quit],
+    [MENU.toggle, MENU.summary, "-", MENU.settings, MENU.pause, MENU.refresh, "-", MENU.quit],
   );
   assertEquals(
     (trayMenu({
@@ -258,6 +260,7 @@ Deno.test("tray: click opens / closes the window; menu items reach their actions
       return Promise.resolve();
     },
     setStartAtLogin: (on) => Promise.resolve((calls.push(`login:${on}`), on)),
+    openSettings: () => void calls.push("settings"),
     quit: () => calls.push("quit"),
   });
   d.startAtLogin = false;
@@ -303,6 +306,7 @@ Deno.test("tray: tooltip text, red icon on alert, no update when nothing changed
     refresh: () => Promise.resolve(),
     setNotificationsPaused: () => Promise.resolve(),
     setStartAtLogin: () => Promise.resolve(null),
+    openSettings: () => {},
     quit: () => {},
   });
   const ok = snap();
@@ -327,26 +331,28 @@ Deno.test("tray: tooltip text, red icon on alert, no update when nothing changed
   );
 });
 
-Deno.test("start at login: on at the first run, never forced again; states", async () => {
+Deno.test("start at login: opt-in; never turned on by itself; states", async () => {
   const calls: string[] = [];
   let state = "disabled";
   const api = {
-    get: () => Promise.resolve(state),
+    get: () => Promise.resolve((calls.push("get"), state)),
     set: (on: boolean) =>
       Promise.resolve((calls.push(`set:${on}`), state = on ? "enabled" : "disabled")),
   };
-  let defaulted = false;
-  assertEquals(
-    await ensureLoginDefault(api, defaulted, () => Promise.resolve(void (defaulted = true))),
-    true,
-  );
-  assertEquals(calls, ["set:true"]);
-  assert(defaulted);
-  // The user turned it off: a later launch respects that.
-  state = "disabled";
-  assertEquals(await ensureLoginDefault(api, defaulted, () => Promise.resolve()), false);
-  assertEquals(calls, ["set:true"]);
-  assertEquals(await ensureLoginDefault(undefined, false, () => Promise.resolve()), null);
+  // Reading it (every launch) never sets it.
+  assertEquals(await readLoginItem(api), false);
+  assertEquals(calls, ["get"]);
+  // Only an explicit choice does.
+  assertEquals(await setLoginItem(api, true), true);
+  assertEquals(calls, ["get", "set:true"]);
+  assertEquals(await readLoginItem(undefined), null);
+  assertEquals(await setLoginItem(undefined, true), null);
+  const broken = {
+    get: () => Promise.reject(new Error("x")),
+    set: () => Promise.reject(new Error("x")),
+  };
+  assertEquals(await readLoginItem(broken), null);
+  assertEquals(await setLoginItem(broken, false), null);
   assertEquals(loginOn("requires-approval"), true);
   assertEquals(loginOn("not-supported"), null);
 });
@@ -388,6 +394,7 @@ Deno.test("tray: a window that can't open is reported, the tray carries on", () 
     refresh: () => Promise.resolve(void calls.push("refresh")),
     setNotificationsPaused: () => Promise.resolve(),
     setStartAtLogin: () => Promise.resolve(null),
+    openSettings: () => {},
     quit: () => {},
   }, (err) => errors.push(err));
   t.click();

@@ -4,7 +4,7 @@
 
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { listWorkflows, runControl, runPoolControl } from "../lib/control-runner.ts";
-import { poolPaths } from "../lib/controls.ts";
+import { TEST_POOL_PATHS } from "./fixture-settings.ts";
 import { createGitHubClient } from "../lib/github.ts";
 import type { GhRunList } from "../lib/github-types.ts";
 import { Poller } from "../lib/poller.ts";
@@ -182,7 +182,7 @@ Deno.test("dispatch: only workflow_dispatch workflows; same-SHA refused; confirm
 Deno.test("pool control: only on the scheduler's machine; confirmed first; exact program", async () => {
   const s = await setup();
   const ran: string[] = [];
-  const paths = poolPaths("/Users/me");
+  const paths = TEST_POOL_PATHS;
   const deps = {
     ...s.deps,
     poolPaths: paths,
@@ -228,7 +228,7 @@ Deno.test("dry run: the dialog shows and says so; nothing is sent even when conf
   const pool = await runPoolControl(
     {
       ...deps,
-      poolPaths: poolPaths("/Users/me"),
+      poolPaths: TEST_POOL_PATHS,
       uid: 501,
       runProgram: (p) => (ran.push(p), Promise.resolve({ code: 0, out: "" })),
     },

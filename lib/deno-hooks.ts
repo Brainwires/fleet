@@ -1,7 +1,8 @@
-// The webhook receiver on the real machine: only on the Mac mini that runs the Cloudflare tunnel
-// (`com.brainwires.denext-ci-hooks-tunnel`) and holds the webhook secret in its login keychain.
-// Anywhere else it stays off and Fleet polls as before. The secret is read into memory by running
-// `/usr/bin/security` (an exact path); it is never logged, written, or shown.
+// The webhook receiver on the real machine, as the settings' `webhooks` section configures it: on
+// only when enabled, with the secret readable (the macOS login keychain through `/usr/bin/security`,
+// or the extension's own secure store) and, when the settings name one, the public endpoint's launchd
+// job file present. Anywhere else it stays off and Fleet polls. The secret is read into memory only;
+// it is never logged, written, or shown.
 
 import {
   createHookHandler,
@@ -13,17 +14,15 @@ import {
   type SpoolCursor,
   spoolLine,
 } from "./hooks.ts";
+import { expandHome, type WebhookSettings } from "./settings.ts";
 
-/** The keychain item. */
-export const SECRET_SERVICE = "denext-ci-hooks";
-export const SECRET_ACCOUNT = "github-webhook-secret";
-/** The tunnel's launchd label. */
-export const TUNNEL_LABEL = "com.brainwires.denext-ci-hooks-tunnel";
 /** The keychain tool, by absolute path (baked as Fleet's only extra --allow-run besides gh). */
 export const SECURITY_BIN = "/usr/bin/security";
-/** The scheduler-facing log, relative to $HOME. */
-export const HOOKS_LOG_DIR = ".denext-runners/hooks";
+/** The spool's folder in the app's data folder, when the settings name none. */
+export const DEFAULT_SPOOL_SUBDIR = "hooks";
 export const HOOKS_LOG = "events.jsonl";
+/** The secure-store key of the webhook secret (`secret.source: "secure-store"`). */
+export const WEBHOOK_SECRET_KEY = "github-webhook-secret";
 /** Rotate at this size, keeping this many files (events.jsonl and events.jsonl.1). */
 export const ROTATE_BYTES = 20 * 1024 * 1024;
 /** The shortest webhook secret accepted (GitHub's HMAC key; a short one is guessable offline). */
@@ -62,40 +61,80 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-/** Whether this machine receives the hooks: macOS, the tunnel's launchd job, the keychain item. */
-export async function hooksAvailable(): Promise<boolean> {
-  if (Deno.build.os !== "darwin") return false;
-  const h = home();
-  const plist = `${TUNNEL_LABEL}.plist`;
-  const tunnel = (h && await exists(`${h}/Library/LaunchAgents/${plist}`)) ||
-    await exists(`/Library/LaunchDaemons/${plist}`) ||
-    await exists(`/Library/LaunchAgents/${plist}`);
-  if (!tunnel) return false;
+/** The spool folder the settings name (`~/` expanded), else `hooks/` in `dataDir`; `null`: none. */
+export function spoolDirOf(cfg: WebhookSettings, dataDir: string | null): string | null {
+  if (cfg.spoolDir) return expandHome(cfg.spoolDir, home());
+  return dataDir ? `${dataDir.replace(/[\\/]$/, "")}/${DEFAULT_SPOOL_SUBDIR}` : null;
+}
+
+/** Where a launchd job file for `label` may be (the user's agents, then the system's). */
+export function launchdJobPaths(label: string, h: string | null = home()): string[] {
+  const plist = `${label}.plist`;
+  return [
+    ...(h ? [`${h}/Library/LaunchAgents/${plist}`] : []),
+    `/Library/LaunchDaemons/${plist}`,
+    `/Library/LaunchAgents/${plist}`,
+  ];
+}
+
+/** A secret store (the extension's `host.secureStore`). */
+export interface SecretReader {
+  get(key: string): Promise<string | null>;
+}
+
+/**
+ * Why webhooks are off on this machine, or `null` when they can turn on: enabled, the launchd job
+ * file present when one is required (macOS), and the secret's item present.
+ */
+export async function hooksUnavailable(
+  cfg: WebhookSettings,
+  store?: SecretReader,
+): Promise<string | null> {
+  if (!cfg.enabled) return "webhooks are off in the settings";
+  if (cfg.requireLaunchdJob) {
+    if (Deno.build.os !== "darwin") return "a launchd job is required, and this isn't macOS";
+    let found = false;
+    for (const p of launchdJobPaths(cfg.requireLaunchdJob)) if (await exists(p)) found = true;
+    if (!found) return "the required launchd job file isn't installed";
+  }
+  if (cfg.secret.source === "secure-store") {
+    return (await store?.get(WEBHOOK_SECRET_KEY).catch(() => null))
+      ? null
+      : "no webhook secret stored";
+  }
+  if (Deno.build.os !== "darwin") return "the keychain secret works on macOS only";
   try {
     // Without -w: only whether the item exists (its attributes go to /dev/null, never the secret).
     const r = await new Deno.Command(SECURITY_BIN, {
-      args: ["find-generic-password", "-s", SECRET_SERVICE, "-a", SECRET_ACCOUNT],
+      args: ["find-generic-password", "-s", cfg.secret.service, "-a", cfg.secret.account],
       stdin: "null",
       stdout: "null",
       stderr: "null",
     }).output();
-    return r.success;
+    return r.success ? null : "the keychain item isn't there";
   } catch {
-    return false;
+    return "the keychain couldn't be read";
   }
 }
 
-/** A secret as read from the keychain, if it is long enough to use (never logged either way). */
+/** A secret as read, if it is long enough to use (never logged either way). */
 export function usableSecret(raw: string): string | null {
   const s = raw.replace(/\r?\n$/, "");
   return s.length >= MIN_SECRET_LENGTH ? s : null;
 }
 
 /** The webhook secret, into memory only; `null` when it can't be read or is too short. */
-export async function readHookSecret(): Promise<string | null> {
+export async function readHookSecret(
+  cfg: WebhookSettings,
+  store?: SecretReader,
+): Promise<string | null> {
+  if (cfg.secret.source === "secure-store") {
+    const v = await store?.get(WEBHOOK_SECRET_KEY).catch(() => null);
+    return v ? usableSecret(v) : null;
+  }
   try {
     const r = await new Deno.Command(SECURITY_BIN, {
-      args: ["find-generic-password", "-s", SECRET_SERVICE, "-a", SECRET_ACCOUNT, "-w"],
+      args: ["find-generic-password", "-s", cfg.secret.service, "-a", cfg.secret.account, "-w"],
       stdin: "null",
       stdout: "piped",
       stderr: "null",
@@ -107,8 +146,8 @@ export async function readHookSecret(): Promise<string | null> {
   }
 }
 
-/** Append one verified delivery to ~/.denext-runners/hooks/events.jsonl, rotating at 20 MB. */
-export async function appendHookLine(d: HookDelivery, dir = defaultLogDir()): Promise<void> {
+/** Append one verified delivery to the spool's events.jsonl, rotating at 20 MB. */
+export async function appendHookLine(d: HookDelivery, dir: string | null): Promise<void> {
   if (!dir) return;
   await ensureDir(dir);
   const path = `${dir}/${HOOKS_LOG}`;
@@ -127,11 +166,6 @@ export async function appendHookLine(d: HookDelivery, dir = defaultLogDir()): Pr
   await Deno.writeTextFile(path, line, { append: true, mode: 0o600 });
 }
 
-function defaultLogDir(): string | null {
-  const h = home();
-  return h ? `${h}/${HOOKS_LOG_DIR}` : null;
-}
-
 /**
  * The spool's deliveries received after `sinceMs` (the rotated `.1` first, then the live file),
  * oldest first, each id once: the back-fill's input. Lines are skipped by their leading
@@ -140,7 +174,7 @@ function defaultLogDir(): string | null {
  */
 export async function readSpoolSince(
   sinceMs: number,
-  dir = defaultLogDir(),
+  dir: string | null,
 ): Promise<HookDelivery[]> {
   if (!dir) return [];
   const out: HookDelivery[] = [];
@@ -171,7 +205,10 @@ export async function readSpoolSince(
  * accepted twice. Ids are read with a pattern from each line's head (no JSON parse); `[]` without a
  * spool.
  */
-export async function recentSpoolIds(dir = defaultLogDir(), max = DEDUPE_KEEP): Promise<string[]> {
+export async function recentSpoolIds(
+  dir: string | null,
+  max: number = DEDUPE_KEEP,
+): Promise<string[]> {
   if (!dir) return [];
   const ids: string[] = [];
   for (const path of [`${dir}/${HOOKS_LOG}.1`, `${dir}/${HOOKS_LOG}`]) {
@@ -202,7 +239,7 @@ function leadingReceivedAt(line: string): number | null {
  * file's), or `null`: the "last delivery" a tail starts with, so a restart during a quiet spell
  * doesn't read as "no delivery yet".
  */
-export async function lastSpoolDeliveryAt(dir = defaultLogDir()): Promise<number | null> {
+export async function lastSpoolDeliveryAt(dir: string | null): Promise<number | null> {
   if (!dir) return null;
   for (const path of [`${dir}/${HOOKS_LOG}`, `${dir}/${HOOKS_LOG}.1`]) {
     const at = await lastLineAt(path);
@@ -261,7 +298,7 @@ async function lastLineAt(path: string): Promise<number | null> {
  */
 export async function tailSpool(
   onDelivery: (d: HookDelivery) => void,
-  dir = defaultLogDir(),
+  dir: string | null,
   everyMs = 2000,
   seen: Iterable<string> = [],
 ): Promise<{ stop: () => void; lastDeliveryAt: number | null } | null> {
@@ -329,11 +366,13 @@ export interface ReceiverOptions {
   readonly seen?: Iterable<string>;
   /** GitHub's clock minus ours (ms), for the replay window. */
   readonly clockOffset?: () => number;
+  /** The spool folder every verified delivery is appended to (`null`: none). */
+  readonly spoolDir?: string | null;
 }
 
 /**
- * Start the receiver on 127.0.0.1:8789 (loopback only), or `null` when the port is taken or the
- * listen is refused.
+ * Start the receiver on 127.0.0.1 (loopback only; port 8789 unless the options say), or `null` when
+ * the port is taken or the listen is refused.
  */
 export function startReceiver(
   secret: string,
@@ -347,7 +386,7 @@ export function startReceiver(
     ...(options.clockOffset ? { clockOffset: options.clockOffset } : {}),
     onDelivery: (d) => {
       hooks.onDelivery(d);
-      appendHookLine(d).catch(() => hooks.onReject?.("log-write"));
+      appendHookLine(d, options.spoolDir ?? null).catch(() => hooks.onReject?.("log-write"));
     },
     onVerified: hooks.onVerified,
     onReject: hooks.onReject,

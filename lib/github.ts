@@ -94,6 +94,11 @@ export interface GitHubClient {
   evict(match: (url: string) => boolean): void;
   /** ETag cache entries held. */
   cacheSize(): number;
+  /**
+   * The token's OAuth scopes (`X-OAuth-Scopes`) from the last response that reported them: a
+   * classic or OAuth token's; `null` until seen (a fine-grained token never reports any).
+   */
+  scopes(): string[] | null;
 }
 
 interface CacheEntry {
@@ -190,6 +195,11 @@ export function createGitHubClient(options: GitHubClientOptions): GitHubClient {
     }
   };
 
+  let scopes: string[] | null = null;
+  const readScopes = (h: Headers) => {
+    const v = h.get("x-oauth-scopes");
+    if (v !== null) scopes = v.split(",").map((x) => x.trim()).filter(Boolean);
+  };
   const readRate = (h: Headers) => {
     const remaining = Number(h.get("x-ratelimit-remaining"));
     const limit = Number(h.get("x-ratelimit-limit"));
@@ -241,6 +251,7 @@ export function createGitHubClient(options: GitHubClientOptions): GitHubClient {
         const res = await doFetch(url, { headers, signal });
         readClock(res.headers, sentAt, now());
         readRate(res.headers);
+        readScopes(res.headers);
         if (res.status !== 304) count();
         if (res.status === 304 && hit) {
           await res.body?.cancel();
@@ -327,6 +338,7 @@ export function createGitHubClient(options: GitHubClientOptions): GitHubClient {
       for (const url of [...cache.keys()]) if (match(url)) cache.delete(url);
     },
     cacheSize: () => cache.size,
+    scopes: () => scopes,
   };
 }
 

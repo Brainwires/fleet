@@ -1,11 +1,14 @@
-// Pool controls and local health on the Mac mini: only where the runner scheduler's ops checkout is
-// (pause-pool.sh at its fixed place). Programs run by exact path with argv (no shell).
+// The runner scheduler integration on the real machine (settings `integrations.runnerScheduler`):
+// its pool commands, only when the configured pause script exists here, and the watchdog's local
+// health file merged over the variable. Programs run by exact path with argv (no shell).
 
 import { type PoolPaths, poolPaths } from "./controls.ts";
 import type { HealthState } from "./health.ts";
 import { mergeLocalHealth } from "./local-health.ts";
+import { expandHome, type RunnerSchedulerIntegration } from "./settings.ts";
 
-function home(): string | null {
+/** $HOME, or `null`. */
+export function home(): string | null {
   try {
     return Deno.env.get("HOME") ?? null;
   } catch {
@@ -13,11 +16,10 @@ function home(): string | null {
   }
 }
 
-/** The pool scripts' paths when this is the machine with the scheduler, else `null`. */
-export function localPoolPaths(): PoolPaths | null {
-  const h = home();
-  if (Deno.build.os !== "darwin" || !h) return null;
-  const p = poolPaths(h);
+/** The pool commands when the integration configures them and the pause script exists here. */
+export function localPoolPaths(sched: RunnerSchedulerIntegration | null): PoolPaths | null {
+  const p = poolPaths(sched?.controls ?? null, home());
+  if (!p) return null;
   try {
     return Deno.statSync(p.pausePool).isFile ? p : null;
   } catch {
@@ -25,24 +27,41 @@ export function localPoolPaths(): PoolPaths | null {
   }
 }
 
+/**
+ * The integration's local health reader (its `localHealthFile`, paused from `paused-<pool>` files
+ * in `pausedDir`), or `undefined` when it has none.
+ */
+export function localHealthReader(
+  sched: RunnerSchedulerIntegration | null,
+): ((variable: HealthState) => Promise<HealthState>) | undefined {
+  if (!sched?.localHealthFile) return undefined;
+  const file = expandHome(sched.localHealthFile, home());
+  const pausedDir = sched.pausedDir ? expandHome(sched.pausedDir, home()) : null;
+  if (!file) return undefined;
+  return (variable) => readLocalHealth(variable, file, pausedDir);
+}
+
 /** The local health file merged over the variable's state (unchanged when unreadable). */
-export async function readLocalHealth(variable: HealthState): Promise<HealthState> {
-  const h = home();
-  if (!h) return variable;
-  const dir = `${h}/.denext-runners`;
+export async function readLocalHealth(
+  variable: HealthState,
+  file: string,
+  pausedDir: string | null,
+): Promise<HealthState> {
   let json: unknown;
   try {
-    json = JSON.parse(await Deno.readTextFile(`${dir}/health.json`));
+    json = JSON.parse(await Deno.readTextFile(file));
   } catch {
     return variable;
   }
   const paused = new Set<string>();
-  try {
-    for await (const e of Deno.readDir(dir)) {
-      if (e.isFile && e.name.startsWith("paused-")) paused.add(e.name.slice("paused-".length));
+  if (pausedDir) {
+    try {
+      for await (const e of Deno.readDir(pausedDir)) {
+        if (e.isFile && e.name.startsWith("paused-")) paused.add(e.name.slice("paused-".length));
+      }
+    } catch {
+      // No pauses readable: none shown.
     }
-  } catch {
-    // No pauses readable: none shown.
   }
   return mergeLocalHealth(variable, json, paused, Date.now());
 }

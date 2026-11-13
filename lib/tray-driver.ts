@@ -5,8 +5,8 @@
 // and macOS has no opt-out. The window comes to the front through its focus(), which activates the
 // app without changing the policy. Closing the window destroys it (Fleet stays in the tray), and
 // opening makes a fresh one. A click on the icon
-// opens / closes the window; the menu opens / closes it, shows the summary, pauses notifications,
-// toggles start at login, polls now and quits.
+// opens / closes the window; the menu opens / closes it, shows the summary, opens the Settings view,
+// pauses notifications, toggles start at login, polls now and quits.
 //
 // No Deno or DOM APIs: it works over slices of denext's DesktopRuntime, so the tests use fakes.
 
@@ -17,6 +17,7 @@ import { trayText } from "./snapshot.ts";
 export const MENU = {
   toggle: "toggle",
   summary: "summary",
+  settings: "settings",
   pause: "pause-notifications",
   login: "start-at-login",
   refresh: "refresh",
@@ -44,6 +45,7 @@ export function trayMenu(s: MenuState): TrayMenuItem[] {
     { id: MENU.toggle, label: s.windowVisible ? "Close Fleet" : "Open Fleet" },
     { id: MENU.summary, label: s.summary, disabled: true },
     { separator: true },
+    { id: MENU.settings, label: "Settings…" },
     { id: MENU.pause, label: "Pause notifications", checked: s.notificationsPaused },
     ...(s.startAtLogin === null
       ? []
@@ -64,6 +66,7 @@ export const INITIAL_MENU: TrayMenuItem[] = trayMenu({
 
 /** The tray summary line for a snapshot. */
 export function summaryLine(snap: Snapshot): string {
+  if (snap.setupComplete === false) return "Set up Fleet";
   if (snap.auth === "needs-token" || snap.auth === "invalid") return "Sign in to GitHub";
   if (snap.auth === "pending") return "Starting…";
   return `${snap.summary.running} running · ${snap.summary.queued} queued`;
@@ -186,6 +189,8 @@ export interface TrayIcons {
 /** What the tray asks of the app. */
 export interface TrayActions {
   refresh(): Promise<void>;
+  /** Open the window on the Settings view. */
+  openSettings(): void;
   setNotificationsPaused(paused: boolean): Promise<void>;
   /** Turn start at login on / off; resolves the state after (`null`: unavailable). */
   setStartAtLogin(on: boolean): Promise<boolean | null>;
@@ -259,7 +264,13 @@ export function driveTray(
     tray.onMenuItem((id) => {
       if (id === MENU.toggle) toggle();
       else if (id === MENU.refresh) void actions.refresh().catch(onError);
-      else if (id === MENU.pause) {
+      else if (id === MENU.settings) {
+        try {
+          actions.openSettings();
+        } catch (err) {
+          onError(err);
+        }
+      } else if (id === MENU.pause) {
         void actions.setNotificationsPaused(!(last?.notificationsPaused ?? false)).catch(onError);
       } else if (id === MENU.login) {
         void actions.setStartAtLogin(!(driver.startAtLogin ?? false)).then((on) => {
@@ -274,7 +285,9 @@ export function driveTray(
     startAtLogin: null,
     update(snap) {
       last = snap;
-      const tip = snap.auth === "needs-token" || snap.auth === "invalid"
+      const tip = snap.setupComplete === false
+        ? "Fleet: set up"
+        : snap.auth === "needs-token" || snap.auth === "invalid"
         ? "Fleet: sign in to GitHub"
         : trayText(snap.summary);
       const alert = trayAlert(snap);
@@ -313,23 +326,28 @@ export function loginOn(state: string): boolean | null {
 }
 
 /**
- * Start at login, defaulting ON at the first run (the user wants Fleet always running): once
- * `defaulted` is set it's never forced again, so the user's "off" sticks.
+ * Start at login is opt-in (settings `startAtLogin`, set in the wizard, the Settings view or the
+ * tray): nothing turns it on by itself. The OS's state now, for the menu's checkmark.
  *
- * @returns The state after, or `null` without the API.
+ * @returns The state, or `null` without the API.
  */
-export async function ensureLoginDefault(
+export async function readLoginItem(api: LoginItemApi | undefined): Promise<boolean | null> {
+  if (!api) return null;
+  try {
+    return loginOn(await api.get());
+  } catch {
+    return null;
+  }
+}
+
+/** Turn start at login on / off; the state after, or `null` without the API (or on a failure). */
+export async function setLoginItem(
   api: LoginItemApi | undefined,
-  defaulted: boolean,
-  markDefaulted: () => Promise<void>,
+  on: boolean,
 ): Promise<boolean | null> {
   if (!api) return null;
   try {
-    if (!defaulted) {
-      await markDefaulted();
-      return loginOn(await api.set(true));
-    }
-    return loginOn(await api.get());
+    return loginOn(await api.set(on));
   } catch {
     return null;
   }

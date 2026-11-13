@@ -1,6 +1,8 @@
 // The window's own shortcuts (lib/shortcuts.ts): Cmd+W closes and Cmd+Q quits on macOS, where the
 // accessory app has no menu bar to own them; nothing elsewhere or with other modifiers.
 
+import "./fixture-settings.ts";
+
 import { assertEquals } from "@std/assert";
 import { type ShortcutKey, windowShortcut } from "../lib/shortcuts.ts";
 

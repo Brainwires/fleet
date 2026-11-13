@@ -6,12 +6,13 @@
     "desktop": "deno run -A jsr:@denext/denext@^4.16.0/cli desktop run .",
     "desktop:build": "deno run -A jsr:@denext/denext@^4.16.0/cli desktop build .",
     "desktop:package": "deno run -A jsr:@denext/denext@^4.16.0/cli desktop package .",
+    "desktop:package:internal": "FLEET_INTERNAL=1 deno run -A jsr:@denext/denext@^4.16.0/cli desktop package .",
     "desktop:package:windows": "deno run -A jsr:@denext/denext@^4.16.0/cli run -A scripts/package-windows.ts --arch x86_64",
     "test": "deno run -A jsr:@denext/denext@^4.16.0/cli test",
     "check": "deno fmt --check && deno lint && deno task test",
     "icons": "deno run --allow-write=icons,public tools/make-icons.ts",
-    "hooks": "deno run --allow-net=127.0.0.1:8789 --allow-run=/usr/bin/security --allow-env=HOME --allow-read=$HOME/Library/LaunchAgents/com.brainwires.denext-ci-hooks-tunnel.plist,/Library/LaunchDaemons/com.brainwires.denext-ci-hooks-tunnel.plist,/Library/LaunchAgents/com.brainwires.denext-ci-hooks-tunnel.plist,$HOME/.denext-runners/hooks --allow-write=$HOME/.denext-runners/hooks hooks-only.ts",
-    "mcp": "deno run --no-config --no-prompt \"--allow-read=$HOME/Library/Application Support/dev.brainwires.fleet,$HOME/.denext-runners/hooks,$HOME/.denext-runners/health.json\" mcp/fleet-mcp.ts --data-dir \"$HOME/Library/Application Support/dev.brainwires.fleet\" --hooks-dir \"$HOME/.denext-runners/hooks\" --health-file \"$HOME/.denext-runners/health.json\""
+    "hooks": "deno run --allow-net=127.0.0.1 --allow-run=/usr/bin/security --allow-env=HOME \"--allow-read=$HOME/Library/Application Support/dev.brainwires.fleet,$HOME/Library/LaunchAgents,/Library/LaunchAgents,/Library/LaunchDaemons\" \"--allow-write=$HOME/Library/Application Support/dev.brainwires.fleet\" hooks-only.ts --settings \"$HOME/Library/Application Support/dev.brainwires.fleet/fleet-settings.json\"",
+    "mcp": "deno run --no-config --no-prompt \"--allow-read=$HOME/Library/Application Support/dev.brainwires.fleet\" mcp/fleet-mcp.ts --data-dir \"$HOME/Library/Application Support/dev.brainwires.fleet\""
   },
   "allowScripts": {
     "deny": [

@@ -1,5 +1,8 @@
 // Test helpers: the recorded fixtures (trimmed GitHub responses, no credentials), a fixed clock,
 // and a fake `fetch` that serves routes with ETags and answers 304 to a matching If-None-Match.
+// Importing it applies the settings the fixtures were recorded under (tests/fixture-settings.ts).
+
+import "./fixture-settings.ts";
 
 /** The fixtures' "now": 2026-11-11T17:30:00Z, mid-way through the recorded CI run. */
 export const NOW = Date.parse("2026-11-11T17:30:00Z");

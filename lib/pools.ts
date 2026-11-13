@@ -1,81 +1,55 @@
-// Our self-hosted runner pools: the short pool name the cards show, the runs-on label a job carries
-// (the key DENEXT_POOL_HEALTH's `pools` uses), the runner-name prefix the scheduler registers
-// (`denext-<pool>-<slot>-<epoch>`), and the slot count. The list is rebuilt from live data on every
-// poll (`derivePools` → `setPools`): the watchdog's per-pool `hosts` (the Mac mini's health.json or
-// the variable), else the variable's labels plus the org's runners. POOLS, the static list, is only
-// the first render's, before any data arrives. Several pools may share a label (win-x64 and
-// win-x64-brain on denext-windows-x64): a job's label then names the FIRST of them.
+// The self-hosted runner pools: the short name a card shows, the runs-on label(s) a job targets it
+// with, the runner-name prefix its runners register with (when they have one), and the slot count.
+// The list follows the live data, rebuilt on every poll:
+// - with the pool-health variable configured (settings `pools.healthVariable`), from its per-pool
+//   `hosts` (or its labels plus the runners) — `derivePools`;
+// - else grouped from the owners' self-hosted runners by their custom labels — `groupRunners`.
+// The seed list (the runner scheduler integration's declared pools; none by default) is only the
+// first render's, before any data arrives. Several pools may share a label: a job's label then
+// names the FIRST of them.
 
 import type { GhRunner } from "./github-types.ts";
 import type { PoolHealthDoc } from "./health.ts";
+import { onSettingsApplied, type RunnerHostRule, settings } from "./settings.ts";
+
+export type { RunnerHostRule } from "./settings.ts";
 
 /** One self-hosted pool. */
 export interface PoolDef {
-  /** The short name (`mac-arm`): the card's title, and `alerts[].pool` in the health variable. */
+  /** The short name: the card's title, and `alerts[].pool` in the health variable. */
   readonly id: string;
-  /** The runs-on label (`denext-macos-arm64`). */
+  /** The runs-on label (the first of `labels` for a grouped pool). */
   readonly label: string;
-  /** The runner-name prefix (`denext-mac-arm-`), for a running job whose labels say nothing. */
+  /** Every label a job must carry to target it (a grouped pool's custom labels); `[label]` else. */
+  readonly labels?: readonly string[];
+  /** The runner-name prefix, for a running job whose labels say nothing (`""`: none). */
   readonly runnerPrefix: string;
   /** The pool's own slot count (`null`: unknown). */
   readonly slots: number | null;
 }
 
-/** The static pools, in card order: the list before any live data arrives. */
-export const POOLS: readonly PoolDef[] = [
-  { id: "mac-arm", label: "denext-macos-arm64", runnerPrefix: "denext-mac-arm-", slots: 2 },
-  { id: "mac-x64", label: "denext-macos-x64", runnerPrefix: "denext-mac-x64-", slots: 1 },
-  { id: "linux-x64", label: "denext-linux-x64", runnerPrefix: "denext-linux-x64-", slots: 3 },
-  {
-    id: "linux-x64-2204",
-    label: "denext-linux-x64-2204",
-    runnerPrefix: "denext-linux-x64-2204-",
-    slots: 3,
-  },
-  {
-    id: "linux-x64-docker",
-    label: "denext-linux-x64-docker",
-    runnerPrefix: "denext-linux-x64-docker-",
-    slots: 1,
-  },
-  { id: "win-arm64", label: "denext-windows-arm64", runnerPrefix: "denext-win-arm64-", slots: 2 },
-  { id: "win-x64", label: "denext-windows-x64", runnerPrefix: "denext-win-x64-", slots: 1 },
-  {
-    id: "win-x64-brain",
-    label: "denext-windows-x64",
-    runnerPrefix: "denext-win-x64-brain-",
-    slots: 1,
-  },
-];
-
-/**
- * A workflow whose GitHub-hosted job only hosts a self-hosted runner for a while ("runner host"):
- * long-lived by design, so it never warns (no STALLED, over usual). Its real work shows up as
- * another job whose runner name starts with `runnerPrefix` + the slot. Add a rule here to teach
- * Fleet another such workflow (documented in the README).
- */
-export interface RunnerHostRule {
-  readonly repo: string;
-  readonly workflow: string;
-  /** The runner-name prefix it registers (`gh-intel-helper-`, then `<slot>-<ts>`). */
-  readonly runnerPrefix: string;
-  /** The pool its runners serve. */
-  readonly pool: string;
+/** The seed pools (the runner scheduler integration's declared ones), in card order. */
+export function seedPools(): PoolDef[] {
+  const sched = settings().integrations.runnerScheduler;
+  if (!sched) return [];
+  return sched.pools.map((p) => ({
+    id: p.id,
+    label: p.label,
+    runnerPrefix: p.runnerPrefix ??
+      (sched.runnerNamePrefix ? `${sched.runnerNamePrefix}${p.id}-` : ""),
+    slots: p.slots ?? null,
+  }));
 }
 
-/** The runner-host workflows. */
-export const RUNNER_HOSTS: readonly RunnerHostRule[] = [
-  {
-    repo: "Brainwires/deno",
-    workflow: "intel helper",
-    runnerPrefix: "gh-intel-helper-",
-    pool: "mac-x64",
-  },
-];
+/** The runner-host workflows (settings `runnerHosts`). */
+export function runnerHosts(): readonly RunnerHostRule[] {
+  return settings().runnerHosts;
+}
 
 /** The rule for a run's repo and workflow name, or `undefined` when it isn't a runner host. */
 export function runnerHostRule(repo: string, workflow: string): RunnerHostRule | undefined {
-  return RUNNER_HOSTS.find((r) => r.repo === repo && r.workflow === workflow);
+  const lower = repo.toLowerCase();
+  return runnerHosts().find((r) => r.repo.toLowerCase() === lower && r.workflow === workflow);
 }
 
 /** The slot number in a matrix job name (`helper (1)` → `1`), or `null`. */
@@ -83,9 +57,9 @@ export function hostSlot(jobName: string): string | null {
   return /\((\d+)\)\s*$/.exec(jobName)?.[1] ?? null;
 }
 
-/** The rule whose runner prefix a runner name carries (`gh-intel-helper-1-…`), or `undefined`. */
+/** The rule whose runner prefix a runner name carries, or `undefined`. */
 export function hostRuleOfRunner(name: string): RunnerHostRule | undefined {
-  return RUNNER_HOSTS.find((r) => name.startsWith(r.runnerPrefix));
+  return runnerHosts().find((r) => name.startsWith(r.runnerPrefix));
 }
 
 /** The runner of rule `rule` for `slot`, true when `name` is `<prefix><slot>-…`. */
@@ -96,31 +70,22 @@ export function runnerIsSlot(name: string, rule: RunnerHostRule, slot: string): 
 /** The pseudo-pool for GitHub-hosted runners. */
 export const GITHUB_POOL = "github";
 
-/** The repos always watched, in lane order. */
-export const CORE_REPOS: readonly string[] = [
-  "Brainwires/deno",
-  "Brainwires/denext",
-  "Brainwires/laufey",
-  "Brainwires/qutty",
-];
+/** The repos always polled, in lane order (settings `repos.pinned`). */
+export function pinnedRepos(): readonly string[] {
+  return settings().repos.pinned;
+}
 
-/** The org. */
-export const ORG = "Brainwires";
-
-/** Branches that must stay green. */
-export const DEFAULT_BRANCHES: ReadonlySet<string> = new Set([
-  "development-denext",
-  "development",
-  "main",
-]);
-
-let current: readonly PoolDef[] = POOLS;
+let current: readonly PoolDef[] = seedPools();
 /** The FIRST pool per label (a job's label can't say which host of a shared label takes it). */
-let byLabel = firstByLabel(POOLS);
+let byLabel = firstByLabel(current);
+/** The registered self-hosted runners' names → their pool (from the last runner list). */
+let runnerIndex = new Map<string, string>();
+
+const lc = (s: string) => s.toLowerCase();
 
 function firstByLabel(defs: readonly PoolDef[]): Map<string, PoolDef> {
   const m = new Map<string, PoolDef>();
-  for (const d of defs) if (!m.has(d.label)) m.set(d.label, d);
+  for (const d of defs) if (!m.has(lc(d.label))) m.set(lc(d.label), d);
   return m;
 }
 
@@ -129,35 +94,121 @@ export function currentPools(): readonly PoolDef[] {
   return current;
 }
 
-/** Replace the pool list (from `derivePools`); every lookup below follows it. */
+/** Replace the pool list (from `derivePools` / `groupRunners`); every lookup below follows it. */
 export function setPools(defs: readonly PoolDef[]): void {
   current = defs;
   byLabel = firstByLabel(defs);
 }
 
+// New settings: back to their seed list until the next poll derives the live one.
+onSettingsApplied(() => {
+  setPools(seedPools());
+  runnerIndex = new Map();
+});
+
 /** Whether another pool shares this pool's label. */
 export function labelIsShared(label: string, defs: readonly PoolDef[] = current): boolean {
-  return defs.filter((d) => d.label === label).length > 1;
+  return defs.filter((d) => lc(d.label) === lc(label)).length > 1;
 }
 
-/** A scheduler runner name (`denext-<pool>-<slot>-<epoch>`) → its pool name, or `null`. */
+/** The runner scheduler's naming prefix (`""`: none). */
+function namePrefix(): string {
+  return settings().integrations.runnerScheduler?.runnerNamePrefix ?? "";
+}
+
+/** A scheduler runner name (`<prefix><pool>-<slot>-<epoch>`) → its pool name, or `null`. */
 export function poolNameOfRunner(name: string): string | null {
-  return /^denext-(.+)-\d+-\d+$/.exec(name)?.[1] ?? null;
+  const prefix = namePrefix();
+  if (!prefix || !name.startsWith(prefix)) return null;
+  return /^(.+)-\d+-\d+$/.exec(name.slice(prefix.length))?.[1] ?? null;
+}
+
+/** GitHub's own runner labels (every self-hosted runner gets them): not a pool's identity. */
+const DEFAULT_RUNNER_LABELS = new Set([
+  "self-hosted",
+  "linux",
+  "windows",
+  "macos",
+  "x64",
+  "x86",
+  "arm",
+  "arm64",
+]);
+
+/** A runner's identifying labels: its custom ones, else its OS / architecture ones. */
+function runnerLabels(r: GhRunner): string[] {
+  const all = r.labels ?? [];
+  const custom = all
+    .filter((l) =>
+      l.type === "custom" || (l.type === undefined && !DEFAULT_RUNNER_LABELS.has(lc(l.name)))
+    )
+    .map((l) => l.name);
+  if (custom.length) return [...new Set(custom)].sort((a, b) => lc(a).localeCompare(lc(b)));
+  return all.map((l) => l.name).filter((n) => lc(n) !== "self-hosted");
 }
 
 /**
- * The pool list from live data, or `null` when there is none yet (keep the current list):
- * 1. the watchdog's per-pool `hosts` (the mini's health.json merged in, or the variable's), in
- *    its order: exactly the scheduler's pools;
- * 2. else (an older watchdog) per label of the variable's `pools`: the pools its registered
- *    runners' names show, plus the static pools on that label, else one pool named for the label.
+ * Pools grouped from the owners' self-hosted runners: one per distinct set of custom labels (a
+ * runner with none goes by its OS / architecture labels), named by its labels (`gpu+linux`), its
+ * slots the runners registered. `null` without a runner list (no access, or none read yet).
+ */
+export function groupRunners(runners: readonly GhRunner[] | null): PoolDef[] | null {
+  if (!runners) return null;
+  const groups = new Map<string, { labels: string[]; count: number }>();
+  for (const r of runners) {
+    const labels = runnerLabels(r);
+    const id = labels.length ? labels.join("+") : "self-hosted";
+    const g = groups.get(id) ?? { labels: labels.length ? labels : ["self-hosted"], count: 0 };
+    g.count++;
+    groups.set(id, g);
+  }
+  return [...groups.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([id, g]) => ({
+      id,
+      label: g.labels[0],
+      labels: g.labels,
+      runnerPrefix: "",
+      slots: g.count,
+    }));
+}
+
+/**
+ * The runner index: each registered runner's name → its pool in `defs` (the grouped pool of its
+ * labels, else its scheduler name, else a pool whose labels it carries).
+ */
+export function indexRunners(
+  runners: readonly GhRunner[] | null,
+  defs: readonly PoolDef[] = current,
+): void {
+  const m = new Map<string, string>();
+  for (const r of runners ?? []) {
+    const labels = runnerLabels(r);
+    const grouped = defs.find((d) => d.labels && d.labels.join("+") === labels.join("+"));
+    const named = poolNameOfRunner(r.name);
+    const id = grouped?.id ??
+      (named && defs.some((d) => d.id === named) ? named : null) ??
+      poolOfLabels((r.labels ?? []).map((l) => l.name), defs)?.id ?? named;
+    if (id) m.set(r.name, id);
+  }
+  runnerIndex = m;
+}
+
+/**
+ * The pool list from the health variable, or `null` when there is none yet (keep the current list):
+ * 1. its per-pool `hosts` (the local health file merged in, or the variable's), in its order;
+ * 2. else per label of its `pools`: the pools its registered runners' names show, plus the seed
+ *    pools on that label, else one pool named for the label.
  */
 export function derivePools(
   doc: PoolHealthDoc | null,
   runners: readonly GhRunner[] | null,
 ): PoolDef[] | null {
   if (!doc) return null;
-  const known = new Map(POOLS.map((p) => [p.id, p]));
+  const seed = seedPools();
+  const known = new Map(seed.map((p) => [p.id, p]));
+  const prefix = namePrefix();
+  const prefixOf = (id: string) => known.get(id)?.runnerPrefix ?? (prefix ? `${prefix}${id}-` : "");
   const hosts = Object.entries(doc.hosts ?? {});
   if (hosts.length > 0) {
     const out: PoolDef[] = [];
@@ -167,7 +218,7 @@ export function derivePools(
       out.push({
         id,
         label,
-        runnerPrefix: h.runnerPrefix ?? `denext-${id}-`,
+        runnerPrefix: h.runnerPrefix ?? prefixOf(id),
         slots: h.slots ?? known.get(id)?.slots ?? null,
       });
     }
@@ -176,13 +227,13 @@ export function derivePools(
   const labels = Object.keys(doc.pools);
   if (labels.length === 0) return null;
   const order = (label: string) => {
-    const i = POOLS.findIndex((p) => p.label === label);
-    return i < 0 ? POOLS.length : i;
+    const i = seed.findIndex((p) => p.label === label);
+    return i < 0 ? seed.length : i;
   };
   labels.sort((a, b) => order(a) - order(b) || a.localeCompare(b));
   const out: PoolDef[] = [];
   for (const label of labels) {
-    const ids: string[] = POOLS.filter((p) => p.label === label).map((p) => p.id);
+    const ids: string[] = seed.filter((p) => p.label === label).map((p) => p.id);
     for (const r of runners ?? []) {
       const id = poolNameOfRunner(r.name);
       if (id && !ids.includes(id) && (r.labels ?? []).some((l) => l.name === label)) ids.push(id);
@@ -193,7 +244,7 @@ export function derivePools(
       out.push({
         id,
         label,
-        runnerPrefix: known.get(id)?.runnerPrefix ?? `denext-${id}-`,
+        runnerPrefix: prefixOf(id),
         slots: ids.length === 1
           ? merged.slots ?? known.get(id)?.slots ?? null
           : known.get(id)?.slots ?? null,
@@ -203,43 +254,78 @@ export function derivePools(
   return out;
 }
 
-/** The pool for a runs-on label, or `undefined` for a label that isn't one of ours. */
+/** The pool for a runs-on label, or `undefined` for a label that isn't a pool's. */
 export function poolByLabel(label: string): PoolDef | undefined {
-  return byLabel.get(label);
+  return byLabel.get(lc(label));
 }
 
-/** The short name for a pool label (`denext-macos-arm64` → `mac-arm`); an unknown label as is. */
+/** The short name for a pool label; an unknown label as is. */
 export function poolIdOfLabel(label: string): string {
-  return byLabel.get(label)?.id ?? label;
+  return byLabel.get(lc(label))?.id ?? label;
+}
+
+/** The pool in `defs` whose labels a job's labels all include (the most specific first). */
+function poolOfLabels(labels: readonly string[], defs: readonly PoolDef[]): PoolDef | undefined {
+  const have = new Set(labels.map(lc));
+  let best: PoolDef | undefined;
+  for (const d of defs) {
+    const need = d.labels ?? [d.label];
+    if (!need.every((l) => have.has(lc(l)))) continue;
+    if (!best || need.length > (best.labels ?? [best.label]).length) best = d;
+  }
+  return best;
 }
 
 /**
- * The pool a set of runs-on labels targets: the first `denext-*` label (known pools first), or
- * `null` when none is ours.
+ * The pool a set of runs-on labels targets: a pool whose labels the job carries (for a single-label
+ * pool, the first such label in the job's order wins), else the first label with the scheduler's
+ * label prefix, else `null`.
  */
 export function poolFromLabels(labels: readonly string[]): string | null {
   for (const label of labels) {
-    const known = byLabel.get(label);
-    if (known) return known.id;
+    const known = byLabel.get(lc(label));
+    if (known && (known.labels ?? [known.label]).length <= 1) return known.id;
   }
-  const ours = labels.find((l) => l.startsWith("denext-"));
-  return ours ?? null;
+  const multi = poolOfLabels(labels, current.filter((d) => (d.labels?.length ?? 1) > 1));
+  if (multi) return multi.id;
+  const prefix = settings().integrations.runnerScheduler?.labelPrefix ?? "";
+  return (prefix && labels.find((l) => l.startsWith(prefix))) || null;
+}
+
+/** Whether a runs-on label belongs to a pool (or carries the scheduler's label prefix). */
+export function isPoolLabel(label: string): boolean {
+  if (byLabel.has(lc(label))) return true;
+  if (current.some((d) => d.labels?.some((l) => lc(l) === lc(label)))) return true;
+  const prefix = settings().integrations.runnerScheduler?.labelPrefix ?? "";
+  return prefix !== "" && label.startsWith(prefix);
 }
 
 /**
- * The pool a runner name belongs to (`denext-linux-x64-2204-1-…` → `linux-x64-2204`), the longest
- * prefix winning, or `null`.
+ * The pool a runner name belongs to: a runner-host rule's pool, the runner list's, else the longest
+ * matching pool prefix; `null` when none.
  */
 export function poolFromRunnerName(name: string): string | null {
   const host = hostRuleOfRunner(name);
   if (host) return host.pool;
+  const indexed = runnerIndex.get(name);
+  if (indexed) return indexed;
   let best: PoolDef | undefined;
   for (const p of current) {
     if (
-      name.startsWith(p.runnerPrefix) && (!best || p.runnerPrefix.length > best.runnerPrefix.length)
+      p.runnerPrefix && name.startsWith(p.runnerPrefix) &&
+      (!best || p.runnerPrefix.length > best.runnerPrefix.length)
     ) {
       best = p;
     }
   }
   return best?.id ?? null;
+}
+
+/** Whether a runner name is one of the owners' self-hosted runners (or a runner host's). */
+export function isSelfHostedRunner(name: string): boolean {
+  if (!name) return false;
+  if (hostRuleOfRunner(name) || runnerIndex.has(name)) return true;
+  const prefix = namePrefix();
+  if (prefix && name.startsWith(prefix)) return true;
+  return current.some((p) => p.runnerPrefix && name.startsWith(p.runnerPrefix));
 }

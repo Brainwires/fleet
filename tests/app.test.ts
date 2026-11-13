@@ -1,6 +1,8 @@
 // The app as denext serves it: the route renders the page shell (title, stylesheet, the bundled
 // fonts reachable), with no desktop runtime (the page then waits for the backend).
 
+import "./fixture-settings.ts";
+
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { createTestApp, createTestClient } from "denext/testing";
 

@@ -31,7 +31,7 @@ export function formatClock(at: number): string {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-/** A repo's short name (`Brainwires/denext` → `denext`). */
+/** A repo's short name (`acme/web` → `web`). */
 export function shortRepo(full: string): string {
   const i = full.indexOf("/");
   return i === -1 ? full : full.slice(i + 1);
