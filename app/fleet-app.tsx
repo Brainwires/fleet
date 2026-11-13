@@ -1,8 +1,9 @@
 "use client";
 // The page's state: the snapshot from the backend (refreshed on its `changed` event, and every few
 // seconds while visible, which also tells the backend to poll GitHub at the visible rate), a 1 s
-// clock for the ticking times (stopped while the window is hidden), and the token screen when
-// Fleet has no token.
+// clock for the ticking times (stopped while the window is hidden), the first-run wizard until
+// Fleet is set up, the token screen when a set-up Fleet has no token, and the Settings view (the
+// header's button, or the tray's Settings…).
 
 import { useCallback, useEffect, useRef, useState } from "denext";
 import { onDesktopEvent } from "denext/desktop/client";
@@ -15,6 +16,8 @@ import { FleetView } from "./fleet-view.tsx";
 import { type ControlRequest, DispatchPanel, type PoolRequest } from "./controls.tsx";
 import type { ControlResult } from "../lib/control-runner.ts";
 import { TokenScreen } from "./token-screen.tsx";
+import { type MachineInfo, type SettingsApi, SettingsView, SetupWizard } from "./settings-view.tsx";
+import type { FleetSettings } from "../lib/settings.ts";
 import { visibleClock } from "./visible-clock.ts";
 import { windowShortcut } from "../lib/shortcuts.ts";
 
@@ -35,7 +38,15 @@ export function FleetApp() {
   const [now, setNow] = useState(() => Date.now());
   const [refreshing, setRefreshing] = useState(false);
   const [events, setEvents] = useState<FleetEvent[]>([]);
-  const [pools, setPools] = useState(false);
+  const [pools, setPools] = useState<{ pools: boolean; restart?: boolean; watchdog?: boolean }>({
+    pools: false,
+  });
+  /** The settings and machine facts while a settings screen is open (`null`: not loaded). */
+  const [config, setConfig] = useState<{ settings: FleetSettings; machine: MachineInfo } | null>(
+    null,
+  );
+  /** Which settings screen shows over the main view. */
+  const [screen, setScreen] = useState<"main" | "settings" | "wizard">("main");
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
   const [dispatching, setDispatching] = useState(false);
   const [repos, setRepos] = useState<string[]>([]);
@@ -88,8 +99,29 @@ export function FleetApp() {
   }, [pullEvents]);
 
   useEffect(() => {
-    void fleet.capabilities().then((c) => setPools(c.pools)).catch(() => {});
+    void fleet.capabilities().then(setPools).catch(() => {});
   }, []);
+
+  const loadConfig = useCallback(async () => {
+    try {
+      setConfig(await fleet.settings());
+    } catch (err) {
+      setError(errorText(err));
+    }
+  }, []);
+
+  // The wizard (not set up yet) and the Settings view read the settings when they open.
+  const needsSetup = snap?.setupComplete === false;
+  useEffect(() => {
+    if (needsSetup || screen !== "main") void loadConfig();
+  }, [needsSetup, screen, loadConfig]);
+
+  // The tray's Settings…: show the view, then tell the backend it was shown.
+  useEffect(() => {
+    if (!snap?.settingsRequested) return;
+    if (!needsSetup) setScreen("settings");
+    void fleet.settingsShown().catch(() => {});
+  }, [snap?.settingsRequested, needsSetup]);
 
   // Cmd+W closes the window and Cmd+Q quits (macOS): an accessory app has no menu bar to own them.
   useEffect(() => {
@@ -141,25 +173,60 @@ export function FleetApp() {
   if (!snap || snap.auth === "pending") {
     return <div class="loading" aria-busy="true">Looking for a GitHub token…</div>;
   }
-  if (snap.auth === "needs-token" || snap.auth === "invalid") {
+  const signIn = {
+    submit: async (token: string) => {
+      const r = await fleet.setToken({ token });
+      await read();
+      return r;
+    },
+    retryGh: async () => {
+      const ok = await fleet.retryGh();
+      await read();
+      return ok;
+    },
+    usePublic: async () => {
+      await fleet.usePublic();
+      await read();
+    },
+  };
+  const settingsApi: SettingsApi = {
+    save: async (settings) => {
+      const r = await fleet.saveSettings({ settings });
+      if (r.ok) setConfig((c) => (c ? { ...c, settings: r.settings } : c));
+      await read();
+      return r;
+    },
+    tokenInfo: () => fleet.tokenInfo(),
+    ownerRepos: (owner, kind) => fleet.ownerRepos({ owner, kind }),
+    onOpen: openUrl,
+  };
+  if (needsSetup || screen === "wizard") {
+    if (!config) return <div class="loading" aria-busy="true">Loading the settings…</div>;
     return (
-      <TokenScreen
+      <SetupWizard
+        settings={config.settings}
+        machine={config.machine}
         auth={snap.auth}
-        submit={async (token) => {
-          const r = await fleet.setToken({ token });
-          await read();
-          return r;
-        }}
-        retryGh={async () => {
-          const ok = await fleet.retryGh();
-          await read();
-          return ok;
-        }}
-        usePublic={async () => {
-          await fleet.usePublic();
-          await read();
-        }}
-        onOpen={openUrl}
+        api={settingsApi}
+        signIn={signIn}
+        onDone={() => setScreen("main")}
+      />
+    );
+  }
+  if (snap.auth === "needs-token" || snap.auth === "invalid") {
+    return <TokenScreen auth={snap.auth} {...signIn} onOpen={openUrl} />;
+  }
+  if (screen === "settings") {
+    if (!config) return <div class="loading" aria-busy="true">Loading the settings…</div>;
+    return (
+      <SettingsView
+        settings={config.settings}
+        machine={config.machine}
+        auth={snap.auth}
+        api={settingsApi}
+        signIn={signIn}
+        onClose={() => setScreen("main")}
+        onRerun={() => setScreen("wizard")}
       />
     );
   }
@@ -170,9 +237,15 @@ export function FleetApp() {
       onOpen={openUrl}
       refreshing={refreshing}
       events={events}
+      onSettings={() => setScreen("settings")}
       controls={{
         onControl: (c: ControlRequest) => void act(() => fleet.control(c)),
-        ...(pools ? { onPool: (c: PoolRequest) => void act(() => fleet.poolControl(c)) } : {}),
+        ...(pools.pools
+          ? {
+            onPool: (c: PoolRequest) => void act(() => fleet.poolControl(c)),
+            scheduler: { restart: pools.restart !== false, watchdog: pools.watchdog !== false },
+          }
+          : {}),
         onDispatch: () => {
           setDispatching(true);
           void fleet.repos().then(setRepos).catch(() => {});

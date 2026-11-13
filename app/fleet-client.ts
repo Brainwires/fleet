@@ -8,13 +8,23 @@ import type { ControlRequest, PoolRequest } from "./controls.tsx";
 import type { Snapshot } from "../lib/model.ts";
 export { CHANGED_EVENT } from "../lib/model.ts";
 import type { TokenCheck } from "../lib/service.ts";
+import type { FleetSettings, SettingsResult } from "../lib/settings.ts";
+import type { RepoChoice, TokenInfo } from "../lib/discover.ts";
+import type { MachineInfo } from "./settings-view.tsx";
 
 /** What the page can ask the backend. */
 export interface FleetClient {
   snapshot(args: { visible: boolean }): Promise<Snapshot>;
   events(args: { after: number }): Promise<{ events: FleetEvent[]; lastSeq: number }>;
   visibility(args: { visible: boolean }): Promise<null>;
-  capabilities(args?: Record<never, never>): Promise<{ pools: boolean }>;
+  capabilities(
+    args?: Record<never, never>,
+  ): Promise<{ pools: boolean; restart?: boolean; watchdog?: boolean }>;
+  settings(args?: Record<never, never>): Promise<{ settings: FleetSettings; machine: MachineInfo }>;
+  saveSettings(args: { settings: FleetSettings }): Promise<SettingsResult>;
+  tokenInfo(args?: Record<never, never>): Promise<TokenInfo>;
+  ownerRepos(args: { owner: string; kind: "org" | "user" }): Promise<RepoChoice[]>;
+  settingsShown(args?: Record<never, never>): Promise<null>;
   repos(args?: Record<never, never>): Promise<string[]>;
   workflows(args: { repo: string }): Promise<DispatchWorkflow[]>;
   control(args: ControlRequest): Promise<ControlResult>;
