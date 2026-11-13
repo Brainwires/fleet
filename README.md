@@ -109,11 +109,12 @@ with `~/`.
   `desktop.app.dock: "while-window-open"`. Fleet itself is accessory from the first frame to quit;
   while its window is open, denext's Dock helper (a small app Fleet copies into its data folder,
   outside /Applications) holds the Dock icon and the Cmd-Tab entry, and clicking it or switching to
-  it brings the window up. Fleet never switches to "regular": an app that was ever regular gets a
-  tile in the Dock's recent apps whenever its running Dock tile goes away (on quit, or on going back
-  to accessory), and macOS has no opt-out. Opening brings the window to the front and makes it key
-  through the window's `focus()`, which activates the app ignoring other apps without changing the
-  policy.
+  it brings the window up. Its Quit (the Dock menu, Cmd-Q while it is in front) closes the window
+  and Fleet keeps running in the tray; the tray menu's Quit quits Fleet. Fleet never switches to
+  "regular": an app that was ever regular gets a tile in the Dock's recent apps whenever its running
+  Dock tile goes away (on quit, or on going back to accessory), and macOS has no opt-out. Opening
+  brings the window to the front and makes it key through the window's `focus()`, which activates
+  the app ignoring other apps without changing the policy.
 - **Quit means "close to the tray"** unless Fleet asks for it: the Dock's Quit, Cmd+Q (the app menu
   or the window), and `osascript -e 'quit app "Fleet"'` close Fleet's window and leave it running in
   the tray (accessory again). It is a `DesktopRuntime.onBeforeQuit` guard (`lib/quit-guard.ts`) that
