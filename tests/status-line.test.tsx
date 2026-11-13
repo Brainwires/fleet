@@ -128,6 +128,35 @@ Deno.test("view: an idle org with live webhooks reads live, not 'updated 4m ago'
   assert(empties.includes("Nothing running."), `live empties: ${empties.join(" | ")}`);
   assert(empties.includes("Nothing queued."));
   assertEquals(byClass(screen.container, "status-stale").length, 0);
+  // The live label replaces the webhook badge; its tooltip carries the details.
+  assertFalse(text.includes("hooks:"), "no webhook badge beside the live label");
+  assertEquals(byClass(screen.container, "hooks").length, 0);
+  const live = byClass(screen.container, "status-live");
+  assertEquals(live.length, 1);
+  const title = live[0].getAttribute("title") ?? "";
+  assertStringIncludes(title, "last delivery at");
+  assertStringIncludes(title, "(2m ago)");
+  assertStringIncludes(title, "last poll 4m ago");
+});
+
+Deno.test("view: via the standalone receiver, the live label's tooltip says so", async () => {
+  const s = await idle(parts({ lastDeliveryAt: NOW - 30_000 }));
+  const screen = await render(view({ ...s, hooks: { ...s.hooks, via: "spool" } }));
+  const live = byClass(screen.container, "status-live");
+  assertStringIncludes(live[0].getAttribute("title") ?? "", "via the standalone receiver");
+  assertFalse((screen.container.textContent ?? "").includes("(via receiver)"));
+});
+
+Deno.test("view: the webhook badge shows whenever the live label doesn't", async () => {
+  // Hooks live but the reconcile poll overdue: behind, so the badge stays.
+  const behind = await render(
+    view(await idle(parts({ lastDeliveryAt: NOW - MIN, lastSuccessAt: NOW - 20 * MIN }))),
+  );
+  assertStringIncludes(behind.container.textContent ?? "", "hooks: live");
+  assertEquals(byClass(behind.container, "status-live").length, 0);
+  // Off: the badge says so.
+  const off = await render(view(await idle(parts({ hooks: "off", lastSuccessAt: NOW - 5000 }))));
+  assertStringIncludes(off.container.textContent ?? "", "hooks: off");
 });
 
 Deno.test("view: quiet webhooks with nothing running are muted 'quiet', not an amber 'stale'", async () => {

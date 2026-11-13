@@ -513,13 +513,19 @@ function Freshness({ snapshot, now }: { snapshot: Snapshot; now: number }) {
     : `last poll ${formatAgo(p.lastSuccessAt, now)}`;
   if (f.state === "pending" || f.updatedAt === null) return <span>polling…</span>;
   if (f.state === "live") {
+    // The webhook badge is hidden while this shows: its details are here.
+    const hooks = snapshot.hooks;
+    const last = hooks.lastDeliveryAt ?? f.updatedAt;
+    const via = hooks.via === "spool" ? " via the standalone receiver" : "";
     return (
       <span
         class="status-live"
-        title={`GitHub webhooks deliver changes as they happen; polling reconciles (${polled}).`}
+        title={`GitHub webhooks: live${via}; last delivery at ${formatClock(last)} (${
+          formatAgo(last, now)
+        }). Polling reconciles (${polled}).`}
       >
         <span class="live-dot" aria-hidden="true" />
-        live · last event {formatAgo(snapshot.hooks.lastDeliveryAt ?? f.updatedAt, now)}
+        live · last event {formatAgo(last, now)}
       </span>
     );
   }
@@ -558,7 +564,9 @@ function StatusLine({ snapshot, now }: { snapshot: Snapshot; now: number }) {
         ? <span class="status-bad">poll failed: {p.message}</span>
         : <Freshness snapshot={snapshot} now={now} />}
       <span class="muted">every {Math.round(p.intervalMs / 1000)}s</span>
-      <HooksBadge hooks={snapshot.hooks} now={now} quiet={fresh.hooksQuiet} />
+      {fresh.state === "live"
+        ? null
+        : <HooksBadge hooks={snapshot.hooks} now={now} quiet={fresh.hooksQuiet} />}
       {rate
         ? (
           <span
