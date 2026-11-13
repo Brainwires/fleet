@@ -107,8 +107,6 @@ check(promptBudget, 60, "the prompt waits about 60 s")
 check(timeoutOutcome(.prompt).0, .notAuthorized, "an unanswered prompt exits 3")
 check(timeoutOutcome(.settings).0, .failed, "slow settings exit 1")
 check(timeoutOutcome(.add).0, .failed, "a slow post exits 1")
-check(promptOutcome(granted: true), .add, "granted: post")
-check(promptOutcome(granted: false), nil, "denied: exit 3")
 
 // LaunchServices: register only when it knows no app for the id, and only a bundle.
 let own = "/Users/u/Applications/Fleet.app/Contents/Helpers/Fleet Notifier.app"
@@ -117,6 +115,20 @@ check(
   needsRegistration(registeredURL: URL(fileURLWithPath: own), ownBundlePath: own), false,
   "registered: nothing to do")
 check(needsRegistration(registeredURL: nil, ownBundlePath: "/tmp/fleet-notify"), false, "not a bundle")
+
+// The LaunchServices-launched permission instance.
+check(parseCommand(["--request-authorization"]), .requestAuthorization, "--request-authorization")
+check(invalid(["--request-authorization", "--title", "T"]), true, "--request-authorization alone")
+check(
+  authorizationLaunchCommand(bundlePath: "/A/Fleet Notifier.app"),
+  ["/usr/bin/open", "-n", "-g", "-a", "/A/Fleet Notifier.app", "--args", "--request-authorization"],
+  "the LaunchServices launch")
+check(promptPoll(.notDetermined, now: 10, deadline: 60), .keepWaiting, "undetermined: wait")
+check(promptPoll(.notDetermined, now: 60, deadline: 60), .timedOut, "undetermined at the deadline")
+check(promptPoll(.authorized, now: 10, deadline: 60), .post, "allowed: post")
+check(promptPoll(.provisional, now: 10, deadline: 60), .post, "provisional: post")
+check(promptPoll(.denied, now: 10, deadline: 60), .refuse, "denied: exit 3")
+check(promptPoll(.denied, now: 99, deadline: 60), .refuse, "denied wins over the deadline")
 
 print("\(checks - failures)/\(checks) checks passed")
 exit(failures == 0 ? 0 : 1)

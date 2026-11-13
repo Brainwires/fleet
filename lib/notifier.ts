@@ -54,6 +54,19 @@ export function watchdogNotifies(
 export const LSREGISTER =
   "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister";
 
+/** `open`, by absolute path: starts the helper through LaunchServices to ask for permission. */
+export const OPEN_BIN = "/usr/bin/open";
+
+/**
+ * `open`'s arguments that start the helper through LaunchServices with `--request-authorization`
+ * (notifier/Sources/Core.swift authorizationLaunchCommand): it asks for notification permission
+ * while that is undetermined, else quits at once. Only a LaunchServices-launched instance gets the
+ * prompt: the watchdog's exec from a shell gets none.
+ */
+export function notifierAuthorizationArgs(helperBundle: string): string[] {
+  return ["-n", "-g", "-a", helperBundle, "--args", "--request-authorization"];
+}
+
 /** The data-folder file recording which helper build Fleet registered. */
 export const NOTIFIER_STAMP_FILE = "fleet-notifier-registered";
 
@@ -72,6 +85,8 @@ export interface RegisterDeps {
   readonly writeStamp: (stamp: string) => Promise<void>;
   /** Run `lsregister -f <bundle>`; whether it succeeded. */
   readonly lsregister: (bundle: string) => Promise<boolean>;
+  /** Start the helper's `--request-authorization` instance (`open …`). */
+  readonly askPermission: (bundle: string) => Promise<void>;
 }
 
 /**
@@ -79,7 +94,8 @@ export interface RegisterDeps {
  * install registers only the outer Fleet.app, and the notification center refuses an app
  * LaunchServices doesn't know: the helper's post fails with exit 3 and its permission prompt
  * never appears. The helper also registers itself when it finds itself unknown; this covers it
- * before the first post. Best effort: a failure is retried at the next launch.
+ * before the first post, then asks for notification permission through the helper. Best effort: a
+ * failed registration is retried at the next launch.
  *
  * @returns Whether `lsregister` ran.
  */
@@ -94,5 +110,8 @@ export async function registerNotifier(deps: RegisterDeps): Promise<boolean> {
   if ((await deps.readStamp())?.trim() === stamp) return false;
   if (!(await deps.lsregister(bundle))) return false;
   await deps.writeStamp(stamp);
+  // Fleet is launched by LaunchServices; the helper's instance it starts asks for permission (a
+  // no-op once the user answered), so the first watchdog alert needn't wait on the prompt.
+  await deps.askPermission(bundle).catch(() => {});
   return true;
 }

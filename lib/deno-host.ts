@@ -6,7 +6,13 @@ import type { FleetNotification } from "./notify.ts";
 import type { PersistedState } from "./poller.ts";
 import { type FleetSettings, LOCAL_CONFIG_FILE, SETTINGS_FILE } from "./settings.ts";
 import type { FleetEvent } from "./events.ts";
-import { LSREGISTER, NOTIFIER_STAMP_FILE, registerNotifier } from "./notifier.ts";
+import {
+  LSREGISTER,
+  NOTIFIER_STAMP_FILE,
+  notifierAuthorizationArgs,
+  OPEN_BIN,
+  registerNotifier,
+} from "./notifier.ts";
 import {
   AGENT_SNAPSHOT_FILE,
   HISTORY_FILE,
@@ -353,7 +359,8 @@ export async function postNotification(n: FleetNotification): Promise<void> {
 
 /**
  * Register the embedded Fleet Notifier with LaunchServices once per helper build (lib/notifier.ts
- * registerNotifier), the stamp in the app's data folder. Best effort; macOS only.
+ * registerNotifier), the stamp in the app's data folder, and ask for its notification permission.
+ * Best effort; macOS only.
  */
 export async function registerNotifierHelper(dir: string): Promise<void> {
   try {
@@ -370,6 +377,13 @@ export async function registerNotifierHelper(dir: string): Promise<void> {
           stderr: "null",
         })
           .output()).success,
+      askPermission: async (bundle) => {
+        await new Deno.Command(OPEN_BIN, {
+          args: notifierAuthorizationArgs(bundle),
+          stdout: "null",
+          stderr: "null",
+        }).output();
+      },
     });
   } catch (err) {
     console.error("fleet: notifier registration:", err instanceof Error ? err.name : "error");

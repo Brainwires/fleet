@@ -41,6 +41,11 @@ export interface NotifierPlist {
   readonly version: string;
   /** The icon file in Contents/Resources (Fleet's, copied), without `.icns`; none: no icon key. */
   readonly iconFile?: string;
+  /**
+   * The app icon's name in Contents/Resources/Assets.car (CFBundleIconName), only when that asset
+   * catalog was built: a CFBundleIconName with no Assets.car shows the generic icon.
+   */
+  readonly iconName?: string;
 }
 
 /** The helper's Info.plist: a UI element (LSUIElement, no Dock icon) named Fleet Notifier. */
@@ -55,12 +60,14 @@ export function notifierInfoPlist(o: NotifierPlist): string {
     ["CFBundlePackageType", "<string>APPL</string>"],
     ["CFBundleShortVersionString", `<string>${xml(o.version)}</string>`],
     ["CFBundleVersion", `<string>${xml(o.version)}</string>`],
-    ...(o.iconFile
-      ? [["CFBundleIconFile", `<string>${xml(o.iconFile)}</string>`]] as [
-        string,
-        string,
-      ][]
-      : []),
+    ...(o.iconFile ? [["CFBundleIconFile", `<string>${xml(o.iconFile)}</string>`]] : []) as [
+      string,
+      string,
+    ][],
+    ...(o.iconName ? [["CFBundleIconName", `<string>${xml(o.iconName)}</string>`]] : []) as [
+      string,
+      string,
+    ][],
     // What a click opens (notifier/Sources/Core.swift fleetIdentifier).
     ["FleetAppIdentifier", `<string>${xml(o.fleetIdentifier)}</string>`],
     ["LSMinimumSystemVersion", `<string>${NOTIFIER_MIN_MACOS}</string>`],
@@ -105,6 +112,93 @@ export async function buildNotifierExecutable(out: string): Promise<void> {
   }
 }
 
+/** The Mac app icon set's images: 16…512 pt at 1x and 2x, as `iconutil -c iconset` names them. */
+const ICONSET = [16, 32, 128, 256, 512].flatMap((size) =>
+  [1, 2].map((scale) => ({
+    idiom: "mac",
+    size: `${size}x${size}`,
+    scale: `${scale}x`,
+    filename: `icon_${size}x${size}${scale === 2 ? "@2x" : ""}.png`,
+  }))
+);
+
+/** `actool` from the selected developer directory, else from /Applications/Xcode.app. */
+async function findActool(): Promise<Record<string, string> | null> {
+  const choices: Record<string, string>[] = [
+    {},
+    { DEVELOPER_DIR: "/Applications/Xcode.app/Contents/Developer" },
+  ];
+  for (const env of choices) {
+    const p = await new Deno.Command("xcrun", {
+      args: ["--find", "actool"],
+      env,
+      stdout: "null",
+      stderr: "null",
+    }).output().catch(() => null);
+    if (p?.success) return env;
+  }
+  return null;
+}
+
+/**
+ * Compile `icns` into an asset catalog (Assets.car, app icon `AppIcon`) in `resources`, the icon
+ * source recent macOS prefers (System Settings > Notifications among others). Needs Xcode's
+ * actool; without it (Command Line Tools only) the helper keeps the .icns alone.
+ *
+ * @returns The icon's name, or `null` when no Assets.car was built.
+ */
+async function compileAssetCatalog(icns: string, resources: string): Promise<string | null> {
+  const env = await findActool();
+  if (!env) return null;
+  const tmp = await Deno.makeTempDir({ prefix: "fleet-notifier-icon-" });
+  try {
+    const set = `${tmp}/Assets.xcassets/AppIcon.appiconset`;
+    await Deno.mkdir(set, { recursive: true });
+    await run(["iconutil", "-c", "iconset", "-o", `${tmp}/AppIcon.iconset`, icns]);
+    for (const img of ICONSET) {
+      await Deno.copyFile(`${tmp}/AppIcon.iconset/${img.filename}`, `${set}/${img.filename}`);
+    }
+    const info = { version: 1, author: "xcode" };
+    await Deno.writeTextFile(`${tmp}/Assets.xcassets/Contents.json`, JSON.stringify({ info }));
+    await Deno.writeTextFile(`${set}/Contents.json`, JSON.stringify({ images: ICONSET, info }));
+    await Deno.mkdir(`${tmp}/out`);
+    const p = await new Deno.Command("xcrun", {
+      args: [
+        "actool",
+        "--compile",
+        `${tmp}/out`,
+        "--platform",
+        "macosx",
+        "--minimum-deployment-target",
+        NOTIFIER_MIN_MACOS,
+        "--app-icon",
+        "AppIcon",
+        "--output-partial-info-plist",
+        `${tmp}/partial.plist`,
+        `${tmp}/Assets.xcassets`,
+      ],
+      env,
+      stdout: "null",
+      stderr: "piped",
+    }).output();
+    if (!p.success) {
+      console.warn(
+        `Fleet Notifier: actool failed, keeping the .icns only: ${
+          new TextDecoder().decode(p.stderr).trim().slice(0, 300)
+        }`,
+      );
+      return null;
+    }
+    await Deno.copyFile(`${tmp}/out/Assets.car`, `${resources}/Assets.car`);
+    return "AppIcon";
+  } catch (err) {
+    console.warn(`Fleet Notifier: no asset catalog (${err instanceof Error ? err.message : err})`);
+    return null;
+  } finally {
+    await Deno.remove(tmp, { recursive: true }).catch(() => {});
+  }
+}
+
 async function plistValue(plist: string, key: string): Promise<string | null> {
   try {
     return (await run(["plutil", "-extract", key, "raw", "-o", "-", plist])).trim() || null;
@@ -144,9 +238,16 @@ export async function embedNotifier(app: string, executable: string): Promise<st
       // No icon file: the helper goes without one.
     }
   }
+  // The same icon as an asset catalog, where actool is available (CFBundleIconFile stays too).
+  const iconName = iconFile
+    ? await compileAssetCatalog(
+      `${helper}/Contents/Resources/${iconFile}.icns`,
+      `${helper}/Contents/Resources`,
+    )
+    : null;
   await Deno.writeTextFile(
     `${helper}/Contents/Info.plist`,
-    notifierInfoPlist({ fleetIdentifier, version, iconFile }),
+    notifierInfoPlist({ fleetIdentifier, version, iconFile, iconName: iconName ?? undefined }),
   );
   const exe = `${helper}/Contents/MacOS/${NOTIFIER_EXECUTABLE}`;
   await Deno.copyFile(executable, exe);

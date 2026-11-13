@@ -76,7 +76,7 @@ function start(host: DesktopExtensionHost): void {
   extHost = host;
   const dir = host.appSupportDir;
   // The embedded Fleet Notifier, registered with LaunchServices once per build (a ditto install
-  // doesn't), so the watchdog's first post gets its permission prompt.
+  // doesn't), then asked for its notification permission (the prompt shows at Fleet's launch).
   void registerNotifierHelper(dir);
   service = createFleetService({
     ghToken: () => ghToken(),

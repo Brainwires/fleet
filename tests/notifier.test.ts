@@ -10,6 +10,7 @@ import "./fixture-settings.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   NOTIFIER_BUNDLE,
+  notifierAuthorizationArgs,
   notifierExecutableIn,
   notifierIdentifier,
   notifierStamp,
@@ -36,6 +37,23 @@ async function run(cmd: string[]): Promise<{ code: number; stdout: string; stder
     .output();
   const d = new TextDecoder();
   return { code: p.code, stdout: d.decode(p.stdout), stderr: d.decode(p.stderr) };
+}
+
+/** A real .icns at `out` from Fleet's icons/app.png (sips + iconutil), for the embed test. */
+async function makeIcns(out: string, tmp: string): Promise<void> {
+  const set = `${tmp}/app.iconset`;
+  await Deno.mkdir(set, { recursive: true });
+  const png = new URL("../icons/app.png", import.meta.url).pathname;
+  for (const size of [16, 32, 128, 256, 512]) {
+    for (const scale of [1, 2]) {
+      const name = `icon_${size}x${size}${scale === 2 ? "@2x" : ""}.png`;
+      const px = String(size * scale);
+      const r = await run(["sips", "-z", px, px, png, "--out", `${set}/${name}`]);
+      assertEquals(r.code, 0, r.stderr);
+    }
+  }
+  const r = await run(["iconutil", "-c", "icns", "-o", out, set]);
+  assertEquals(r.code, 0, r.stderr);
 }
 
 const SRC = (f: string) => new URL(`../notifier/${f}`, import.meta.url).pathname;
@@ -72,6 +90,7 @@ Deno.test("notifier: the watchdog notifies here only beside the scheduler, from 
 /** A fake machine: one helper build (mtime), a stamp file, the lsregister calls. */
 function fakeMachine(over: Partial<RegisterDeps> & { mtimeMs?: number | null } = {}) {
   const calls: string[] = [];
+  const asked: string[] = [];
   let stamp: string | null = null;
   const deps: RegisterDeps = {
     os: "darwin",
@@ -86,9 +105,13 @@ function fakeMachine(over: Partial<RegisterDeps> & { mtimeMs?: number | null } =
       calls.push(b);
       return Promise.resolve(true);
     },
+    askPermission: (b) => {
+      asked.push(b);
+      return Promise.resolve();
+    },
     ...over,
   };
-  return { deps, calls, stamp: () => stamp };
+  return { deps, calls, asked, stamp: () => stamp };
 }
 
 const HELPER = "/Users/u/Applications/Fleet.app/Contents/Helpers/Fleet Notifier.app";
@@ -97,10 +120,13 @@ Deno.test("notifier registration: lsregister -f once per helper build", async ()
   const m = fakeMachine();
   assertEquals(await registerNotifier(m.deps), true);
   assertEquals(m.calls, [HELPER]);
+  // …then its permission instance is started through LaunchServices.
+  assertEquals(m.asked, [HELPER]);
   assertEquals(m.stamp(), notifierStamp(HELPER, 1000));
   // The next launch, same build: nothing.
   assertEquals(await registerNotifier(m.deps), false);
   assertEquals(m.calls.length, 1);
+  assertEquals(m.asked.length, 1);
   // A new build (another mtime): registered again.
   const next = { ...m.deps, mtime: () => Promise.resolve(2000) };
   assertEquals(await registerNotifier(next), true);
@@ -126,6 +152,18 @@ Deno.test("notifier registration: a failed lsregister writes no stamp (retried n
   const m = fakeMachine({ lsregister: () => Promise.resolve(false) });
   assertEquals(await registerNotifier(m.deps), false);
   assertEquals(m.stamp(), null);
+  assertEquals(m.asked, []);
+});
+
+Deno.test("notifier registration: the permission instance is a LaunchServices launch", () => {
+  assertEquals(notifierAuthorizationArgs(HELPER), [
+    "-n",
+    "-g",
+    "-a",
+    HELPER,
+    "--args",
+    "--request-authorization",
+  ]);
 });
 
 // ---- Fleet's dedupe (lib/notify.ts) ----
@@ -228,6 +266,17 @@ Deno.test("notifier: Info.plist is a UI element with Fleet's id, version and ico
   assertStringIncludes(p, "<key>LSUIElement</key>\n\t<true/>");
   assertStringIncludes(p, "<key>CFBundleExecutable</key>\n\t<string>fleet-notify</string>");
   assertStringIncludes(p, "<key>CFBundleIconFile</key>\n\t<string>AppIcon</string>");
+  // No asset catalog, no CFBundleIconName (one with no Assets.car shows the generic icon).
+  assertEquals(p.includes("CFBundleIconName"), false);
+  assertStringIncludes(
+    notifierInfoPlist({
+      fleetIdentifier: "x",
+      version: "1",
+      iconFile: "AppIcon",
+      iconName: "AppIcon",
+    }),
+    "<key>CFBundleIconName</key>\n\t<string>AppIcon</string>",
+  );
   assertEquals(
     notifierInfoPlist({ fleetIdentifier: "a&b", version: "1" }).includes("CFBundleIconFile"),
     false,
@@ -279,7 +328,7 @@ Deno.test({
       await Deno.mkdir(`${app}/Contents/MacOS`, { recursive: true });
       await Deno.mkdir(`${app}/Contents/Resources`, { recursive: true });
       await Deno.copyFile("/usr/bin/true", `${app}/Contents/MacOS/Fleet`);
-      await Deno.writeTextFile(`${app}/Contents/Resources/AppIcon.icns`, "icns");
+      await makeIcns(`${app}/Contents/Resources/AppIcon.icns`, dir);
       await Deno.writeTextFile(
         `${app}/Contents/Info.plist`,
         `<?xml version="1.0" encoding="UTF-8"?>
@@ -332,7 +381,17 @@ Deno.test({
           .trim(),
         "0.1.0",
       );
-      await Deno.stat(`${helper}/Contents/Resources/AppIcon.icns`);
+      // The icon: CFBundleIconFile names the copied .icns; CFBundleIconName only with an Assets.car.
+      const iconFile = (await run(["plutil", "-extract", "CFBundleIconFile", "raw", plist])).stdout
+        .trim();
+      await Deno.stat(`${helper}/Contents/Resources/${iconFile}.icns`);
+      const hasCar = await Deno.stat(`${helper}/Contents/Resources/Assets.car`).then(
+        () => true,
+        () => false,
+      );
+      const iconName = await run(["plutil", "-extract", "CFBundleIconName", "raw", plist]);
+      assertEquals(iconName.code === 0, hasCar, "CFBundleIconName exactly when Assets.car exists");
+      if (hasCar) assertEquals(iconName.stdout.trim(), "AppIcon");
 
       // The CLI, inside its bundle: --dry-run validates and prints, posts nothing.
       const ok = await run([

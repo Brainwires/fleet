@@ -5,7 +5,9 @@
 //
 // Post mode exits once the post is accepted: within 2 s once authorized; the first run waits up to
 // 60 s for the answer to the one-time permission prompt. A helper LaunchServices doesn't know
-// registers its own bundle first (a `ditto` install doesn't). A click launches the helper with
+// registers its own bundle first (a `ditto` install doesn't). The permission prompt is asked by an
+// instance LaunchServices starts (`--request-authorization`): a UI element app exec'd from a shell
+// gets none. A click launches the helper with
 // no arguments; the notification response reaches the delegate set before launch finishes, Fleet
 // is opened (`open -b <Fleet's id>`), and the helper quits.
 
@@ -90,20 +92,29 @@ func post(_ r: PostRequest) -> Never {
   case .refuse:
     fail(.notAuthorized, "notifications are off for Fleet Notifier (System Settings > Notifications)")
   case .request:
+    // A UI element app exec'd from a shell gets no prompt from requestAuthorization: the helper
+    // starts itself through LaunchServices to ask (--request-authorization), and this process
+    // re-reads the state until the user answers (up to 60 s).
     let promptStart = monotonicNow()
-    let answered = DispatchSemaphore(value: 0)
-    nonisolated(unsafe) var granted = false
-    center.requestAuthorization(options: [.alert, .sound]) { ok, _ in
-      granted = ok
-      answered.signal()
-    }
-    guard wait(answered, until: phaseDeadline(.prompt, start: start, promptStart: promptStart))
-    else {
-      let (code, m) = timeoutOutcome(.prompt)
-      fail(code, m)
-    }
-    guard promptOutcome(granted: granted) != nil else {
-      fail(.notAuthorized, "notifications were not allowed for Fleet Notifier")
+    let deadline = phaseDeadline(.prompt, start: start, promptStart: promptStart)
+    run(authorizationLaunchCommand(bundlePath: Bundle.main.bundleURL.path))
+    poll: while true {
+      Thread.sleep(forTimeInterval: promptPollInterval)
+      let read = DispatchSemaphore(value: 0)
+      nonisolated(unsafe) var now: AuthStatus = .notDetermined
+      center.getNotificationSettings { settings in
+        now = authStatus(settings.authorizationStatus)
+        read.signal()
+      }
+      if !wait(read, until: monotonicNow() + postBudget) { now = .notDetermined }
+      switch promptPoll(now, now: monotonicNow(), deadline: deadline) {
+      case .post: break poll
+      case .keepWaiting: continue
+      case .refuse: fail(.notAuthorized, "notifications were not allowed for Fleet Notifier")
+      case .timedOut:
+        let (code, m) = timeoutOutcome(.prompt)
+        fail(code, m)
+      }
     }
     answeredAt = monotonicNow()
   }
@@ -134,6 +145,39 @@ func post(_ r: PostRequest) -> Never {
   withExtendedLifetime(presenter) {}
   if let refused { fail(.failed, refused) }
   exit(ExitCode.posted.rawValue)
+}
+
+/// Run a command (an absolute path first) and wait for it; output dropped.
+func run(_ argv: [String]) {
+  let p = Process()
+  p.executableURL = URL(fileURLWithPath: argv[0])
+  p.arguments = Array(argv.dropFirst())
+  p.standardOutput = FileHandle.nullDevice
+  p.standardError = FileHandle.nullDevice
+  try? p.run()
+  p.waitUntilExit()
+}
+
+/// The instance LaunchServices started with --request-authorization (by the CLI, or by Fleet at
+/// startup): ask for permission once, while it is undetermined, then quit. Gives up after the
+/// prompt's budget.
+final class AuthorizationLaunch: NSObject, NSApplicationDelegate {
+  let delegate = NotificationDelegate(quitAfterClick: true)
+
+  func applicationWillFinishLaunching(_ notification: Notification) {
+    UNUserNotificationCenter.current().delegate = delegate
+  }
+
+  func applicationDidFinishLaunching(_ notification: Notification) {
+    let quit = { DispatchQueue.main.async { NSApp.terminate(nil) } }
+    DispatchQueue.main.asyncAfter(deadline: .now() + promptBudget + 5) { NSApp.terminate(nil) }
+    registerIfNeeded()
+    let center = UNUserNotificationCenter.current()
+    center.getNotificationSettings { settings in
+      guard authStep(authStatus(settings.authorizationStatus)) == .request else { return quit() }
+      center.requestAuthorization(options: [.alert, .sound]) { _, _ in quit() }
+    }
+  }
 }
 
 /// Open Fleet (`open -b <Fleet's id>`), its window up.
@@ -199,6 +243,12 @@ case .post(let r):
     exit(0)
   }
   post(r)
+case .requestAuthorization:
+  let app = NSApplication.shared
+  let launch = AuthorizationLaunch()
+  app.delegate = launch
+  app.setActivationPolicy(.accessory)
+  app.run()
 case .click:
   let app = NSApplication.shared
   let launch = ClickLaunch()

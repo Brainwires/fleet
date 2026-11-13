@@ -306,14 +306,16 @@ an untitled script). The runner watchdog's `alert_notify` uses it:
   --title T --body B [--subtitle S] [--id KEY] [--url fleet:LINK] [--dry-run]
 ```
 
-**First run: allow its notifications.** After installing a new Fleet, open Fleet once: it registers
+**First run: allow its notifications.** After installing a new Fleet, open Fleet once. It registers
 the helper with LaunchServices (a `ditto` or Finder copy registers only Fleet.app itself, and the
-notification center refuses an unregistered helper with no prompt; the helper also registers itself
-when it finds itself unknown). Then post once by hand, for example
-`"$HOME/Applications/Fleet.app/Contents/Helpers/Fleet Notifier.app/Contents/MacOS/fleet-notify" --title Test --body "Allow me"`:
-macOS asks whether **Fleet Notifier** may send notifications, and the command waits up to 60 s for
-the answer. Choose **Allow** (to change it later: System Settings > Notifications > Fleet Notifier).
-Until it is allowed, every post exits 3.
+notification center refuses an unregistered helper with no prompt), then starts the helper through
+LaunchServices to ask: macOS asks whether **Fleet Notifier** may send notifications. Choose
+**Allow** (to change it later: System Settings > Notifications > Fleet Notifier). Only an instance
+LaunchServices starts gets that prompt; a post exec'd from a shell while permission is undetermined
+starts one the same way (`open -n -g -a "…/Fleet Notifier.app" --args --request-authorization`) and
+waits up to 60 s for the answer. Until it is allowed, every post exits 3. The helper carries Fleet's
+icon as an `.icns` and, when Xcode's `actool` is there at packaging, as an asset catalog
+(`Assets.car`, `CFBundleIconName`) too.
 
 `--id` replaces an earlier notification with the same id (the watchdog passes its condition key). It
 exits once the post is accepted, within 2 s once allowed (the first run waits up to 60 s for the

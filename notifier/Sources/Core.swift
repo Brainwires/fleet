@@ -33,6 +33,9 @@ enum Command: Equatable {
   /// No arguments: LaunchServices started the helper for a click on one of its notifications.
   case click
   case post(PostRequest)
+  /// `--request-authorization`: the instance LaunchServices started to ask for permission (a
+  /// process exec'd from a shell gets no prompt as a UI element app).
+  case requestAuthorization
   case help
   /// Bad arguments: the message for stderr (exit 4).
   case invalid(String)
@@ -42,6 +45,9 @@ enum Command: Equatable {
 let maxTitle = 256
 let maxBody = 2000
 let maxId = 1024
+
+/// The flag of the LaunchServices-launched instance that asks for notification permission.
+let requestAuthorizationFlag = "--request-authorization"
 
 let usage = """
   usage: fleet-notify --title T --body B [--subtitle S] [--id KEY] [--url fleet:LINK] [--dry-run]
@@ -55,6 +61,10 @@ let usage = """
 func parseCommand(_ args: [String]) -> Command {
   let args = args.filter { !$0.hasPrefix("-psn_") }
   if args.isEmpty { return .click }
+  if args.contains(requestAuthorizationFlag) {
+    return args == [requestAuthorizationFlag]
+      ? .requestAuthorization : .invalid("\(requestAuthorizationFlag) takes no other arguments")
+  }
   var values: [String: String] = [:]
   var dryRun = false
   var i = 0
@@ -202,11 +212,6 @@ func timeoutOutcome(_ phase: PostPhase) -> (ExitCode, String) {
   }
 }
 
-/// After the prompt: granted goes on to post; refused exits 3.
-func promptOutcome(granted: Bool) -> PostPhase? {
-  granted ? .add : nil
-}
-
 // MARK: LaunchServices
 
 /// Whether the helper must register its own bundle: LaunchServices has no app for its bundle id
@@ -214,4 +219,31 @@ func promptOutcome(granted: Bool) -> PostPhase? {
 /// center refuses it, with no prompt. Only a bundle (`….app`) is registered.
 func needsRegistration(registeredURL: URL?, ownBundlePath: String) -> Bool {
   registeredURL == nil && ownBundlePath.hasSuffix(".app")
+}
+
+// MARK: Asking for permission through LaunchServices
+
+/// The command that starts the helper through LaunchServices to ask for permission: a new
+/// instance (`-n`: this CLI process may count as one), in the background (`-g`).
+func authorizationLaunchCommand(bundlePath: String) -> [String] {
+  ["/usr/bin/open", "-n", "-g", "-a", bundlePath, "--args", requestAuthorizationFlag]
+}
+
+/// How often the CLI re-reads the authorization state while the prompt is up.
+let promptPollInterval: TimeInterval = 0.5
+
+/// What the CLI does with the authorization state it just read while waiting on the prompt.
+enum PromptPoll: Equatable {
+  case post
+  case refuse
+  case keepWaiting
+  case timedOut
+}
+
+func promptPoll(_ status: AuthStatus, now: TimeInterval, deadline: TimeInterval) -> PromptPoll {
+  switch authStep(status) {
+  case .post: return .post
+  case .refuse: return .refuse
+  case .request: return now >= deadline ? .timedOut : .keepWaiting
+  }
 }
