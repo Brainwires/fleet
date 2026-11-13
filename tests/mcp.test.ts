@@ -527,7 +527,7 @@ Deno.test("server: initialize, tools/list, a tool error, unknown methods", async
     const bad = await call(server, 3, "fleet_runs", { limit: "lots" });
     assertEquals(bad.result.isError, true);
     const nope = await server.handle(
-      { jsonrpc: "2.0", id: 4, method: "resources/list" },
+      { jsonrpc: "2.0", id: 4, method: "prompts/list" },
       () => {},
     ) as Any;
     assertEquals(nope.error.code, -32601);

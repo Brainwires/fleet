@@ -84,6 +84,7 @@ Deno.test("events: queued → started → finished, with the failed step and ann
     }]),
   );
   assertEquals(ev.map((e) => e.text), ["started on linux-x64 on denext-linux-x64-2-17944"]);
+  assertEquals(ev[0].pool, "linux-x64", "job lines name their pool (the stream's pool= filter)");
   const failed = job(1, {
     status: "completed",
     conclusion: "failure",

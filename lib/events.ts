@@ -52,6 +52,8 @@ export interface FleetEvent {
   readonly run_id?: number;
   /** The job this line is about (job lines). */
   readonly job_id?: number;
+  /** The job's pool short name, or `github` (job lines; absent in lines from older builds). */
+  readonly pool?: string;
   /** Logged for something the user did in Fleet (a control). */
   readonly user?: boolean;
   /**
@@ -143,6 +145,21 @@ export function poolText(job: GhJob): string {
   return c?.pool === GITHUB_POOL ? "GitHub-hosted" : c?.pool ?? "?";
 }
 
+/** A job's pool short name (`github` for GitHub-hosted), or `undefined` when unknown. */
+export function jobPool(job: GhJob): string | undefined {
+  const c = classifyJob({
+    ...job,
+    status: job.status === "completed" ? "in_progress" : job.status,
+  });
+  return c?.pool ?? undefined;
+}
+
+/** `{ pool }` for a job line, or nothing when the pool is unknown. */
+function poolField(job: GhJob): { pool?: string } {
+  const pool = jobPool(job);
+  return pool ? { pool } : {};
+}
+
 /** The failed step's name, if the job JSON has steps. */
 export function failedStep(job: GhJob): string | null {
   const s = job.steps?.find((x) => x.conclusion === "failure" || x.conclusion === "timed_out");
@@ -186,6 +203,7 @@ export function diffObservation(state: TrackerState, obs: Observation): NewEvent
         kind,
         job: job.name,
         job_id: job.id,
+        ...poolField(job),
         text,
         url: job.html_url ?? run.html_url,
       });
@@ -251,6 +269,7 @@ export function diffObservation(state: TrackerState, obs: Observation): NewEvent
             kind: "finished",
             job: job.name,
             job_id: job.id,
+            ...poolField(job),
             text: "finished: cancelled",
             url: job.html_url ?? run.html_url,
           });

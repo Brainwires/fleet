@@ -15,3 +15,9 @@ export const JOURNAL_MAX_BYTES = 5 * 1024 * 1024;
 export const HISTORY_FILE = "fleet-history.json";
 /** The app's identifier: its data folder's name (macOS `~/Library/Application Support/<id>`). */
 export const APP_ID = "dev.brainwires.fleet";
+/** The loopback event stream's bearer token (random per install, 0600; lib/deno-stream.ts). */
+export const STREAM_TOKEN_FILE = "fleet-stream-token";
+/** Where the running stream listens (`{ port, pid, started_at }`), written when it starts. */
+export const STREAM_STATE_FILE = "fleet-stream.json";
+/** The stream's default loopback port (the webhook receiver's default is 8789). */
+export const DEFAULT_STREAM_PORT = 8790;

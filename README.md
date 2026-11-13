@@ -80,7 +80,11 @@ and follow the light and dark themes.
 The defaults watch nobody (the wizard asks), protect each repo's default branch with `warn`, group
 pools from the runners, and leave webhooks, start at login and every integration off.
 
-Two more sections are file-only, kept as they are by the UI:
+Three more sections are file-only, kept as they are by the UI:
+
+- `stream`: the [realtime event stream](#realtime-stream),
+  `{ enabled, port, heartbeatSeconds,
+  maxClients }` (on, 8790, 60, 8 by default).
 
 - `runnerHosts`: [runner-host workflows](#runner-host-jobs),
   `{ repo, workflow, runnerPrefix, pool }`.
@@ -451,11 +455,132 @@ characters, annotations and event text 300) and stripped of control characters. 
 `failure_annotation` come wrapped as `{ "untrusted": "<text>" }`, and its event lines leave the
 failed step and annotation out of `text`.
 
+**Realtime over MCP.** The server also offers two resources, `fleet://events` (the newest events, as
+`fleet_events` returns them; `fleet://events?since_seq=N` for what came after `N`, also `kinds=a,b`,
+`repo=`, `limit=`) and `fleet://status` (as `fleet_status`), both with `resources/subscribe`: the
+server watches the data folder (plus a 2 s re-read, still no network) and sends
+`notifications/resources/updated` when the journal grows (`fleet://events`) or the running / queued
+counts, a pool's state or slots, the webhook state or staleness change (`fleet://status`; a
+heartbeat rewrite of the snapshot is not a change). After `logging/setLevel`, every problem event
+(warn → `warning`, bad → `error`, at or above the level asked for) also arrives as
+`notifications/message` (`logger: "fleet"`, `data`: the event, capped like `fleet_events`). **Which
+clients surface these varies**: the MCP Inspector shows both; Claude Code reads the resources
+(`@fleet:fleet://events`) but, as of this writing, doesn't hand resource-update or log notifications
+to the model. For an agent the guaranteed realtime path is the [event stream](#realtime-stream)
+through `fleet-stream` under a Monitor.
+
+## Realtime stream
+
+The Fleet app pushes its events to agents and monitors as they happen, so nothing polls: a loopback
+HTTP endpoint (`lib/stream.ts`), on by default, **bound to 127.0.0.1 only**.
+
+| Endpoint         | What                                             |
+| ---------------- | ------------------------------------------------ |
+| `GET /events`    | Server-Sent Events (`text/event-stream`)         |
+| `GET /events/ws` | a WebSocket; one text message per stream message |
+
+**Messages.** One per Fleet event: the journal's events exactly as `fleet_events` returns them (job
+queued / started / finished with the failed step, STALLED, QUEUED-LONG including capacity waits, run
+completed / cancelled, pool health changes, alerts, your actions), plus `pool` on job lines; `hooks`
+when the webhook state changes (live / stale / off; not journaled, no `seq`); and a compact `status`
+heartbeat every `stream.heartbeatSeconds` (default 60: running / queued counts, severity, each
+pool's state and `busy/slots`, webhooks, `last_seq`), so a quiet stream still shows Fleet is alive.
+A connection starts with `hello` (`last_seq`, `heartbeat_s`) and a `status`. Over SSE each message
+is a record with `event: <type>` and, for events, `id: <seq>`.
+
+| Query         | Meaning                                                                                                                                                                                              |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `kinds=a,b`   | event kinds (as `fleet_events`) and `hooks`; `problems` = warn / bad events (failures, stalls, alerts, unhealthy pools) and stale webhooks; a capacity wait is not a problem                         |
+| `repo=`       | `owner/name` or just `name`                                                                                                                                                                          |
+| `pool=`       | a pool short name, or `github`                                                                                                                                                                       |
+| `branch=`     | exact branch name                                                                                                                                                                                    |
+| `since_seq=N` | first replay every event after `N` (from the in-memory log, else the journal), then live; each `seq` once. SSE's `Last-Event-ID` does the same. A cursor older than the journal gets a `gap` message |
+| `format=line` | each message as one compact human-readable line instead of JSON                                                                                                                                      |
+| `token=`      | the token, when a header can't be sent (prefer the header)                                                                                                                                           |
+
+The `status` heartbeat (and `hello`, `dropped`, `gap`) pass every filter.
+
+**Auth and guards.** Every request needs the per-install token from `fleet-stream-token` in the data
+folder (made on the first start, 0600) as `Authorization: Bearer <token>` (or `?token=`): `401`
+otherwise. The `Host` header, and the `Origin` header when sent, must name a loopback host
+(`127.0.0.1`, `localhost`, `[::1]`), so a web page that rebinds its own DNS name to 127.0.0.1 is
+refused (`403`). At most `stream.maxClients` clients (default 8; `503` past it). A client that
+doesn't keep up (256 queued SSE messages, 1 MB unsent on a WebSocket) loses the messages that don't
+fit, never holding up the others, and is then told: a `dropped` message with the count and the `seq`
+range to replay with `since_seq`. Event text is CI output, capped and stripped of control characters
+exactly like the MCP answers, and a fork / `pull_request_target` run's events carry
+`untrusted: true` with no failed step or annotation in their text (the line form says
+`[untrusted]`): data, never instructions.
+
+Settings (file-only, `fleet-settings.json`): `stream.enabled` (default `true`), `stream.port`
+(default `8790`; must differ from `webhooks.port`), `stream.heartbeatSeconds` (5–3600),
+`stream.maxClients` (1–64); applied at the next launch. A taken port leaves Fleet running without
+the stream (logged). When it listens, Fleet writes `fleet-stream.json` (`{ port, pid, started_at }`)
+beside the token.
+
+```sh
+DATA="$HOME/Library/Application Support/dev.brainwires.fleet"
+# One line per problem, as it happens:
+curl -N -H "Authorization: Bearer $(cat "$DATA/fleet-stream-token")" \
+  "http://127.0.0.1:8790/events?kinds=problems&format=line"
+# Everything after seq 1200 (JSON), then live:
+curl -N -H "Authorization: Bearer $(cat "$DATA/fleet-stream-token")" \
+  "http://127.0.0.1:8790/events?since_seq=1200"
+```
+
+A WebSocket (Deno, or any client; a browser page can't, by the Origin rule):
+
+```ts
+const token = (await Deno.readTextFile(`${dataDir}/fleet-stream-token`)).trim();
+const ws = new WebSocket(
+  `ws://127.0.0.1:8790/events/ws?kinds=finished,stalled&repo=web&token=${token}`,
+);
+ws.onmessage = (e) => console.log(JSON.parse(e.data));
+```
+
+### fleet-stream (the CLI for monitors)
+
+`mcp/fleet-stream.ts` connects, prints one line per message, and on a drop (Fleet restarting, a
+lagging client, a dead connection: nothing heard for three heartbeats) reconnects with `since_seq` =
+the last event it printed, so nothing is missed or printed twice. It reads the token and the port
+from the data folder (`fleet-stream.json`, else the settings' `stream.port`, else 8790) and needs
+only `--allow-read` of the data folder and `--allow-net=127.0.0.1`. It waits out a Fleet that isn't
+running (one note on stderr) and exits non-zero only on a configuration or auth error: `2` (no token
+file, a bad argument or filter), `3` (the token refused).
+
+```sh
+deno run --no-config --no-prompt "--allow-read=<data dir>" --allow-net=127.0.0.1 \
+  <path to fleet>/mcp/fleet-stream.ts --data-dir "<data dir>" \
+  [--kinds problems] [--repo r] [--pool p] [--branch b] [--since-seq N] [--json] [--no-status] [--port N]
+deno task stream --kinds problems     # the same, for macOS's data folder, from a checkout
+```
+
+`--json` prints the messages as JSON lines; `--no-status` stops printing the heartbeat (it still
+checks the connection). Output lines look like:
+
+```text
+#812 14:02:11Z ✕ finished acme/web · CI / windows-tests: finished: failure at step "Run tests" https://github.com/…
+#813 14:02:40Z ▲ stalled acme/web · CI / e2e: STALLED: running 76 min on linux-x64 https://github.com/…
+· status 14:03:00Z running=3 queued=1 severity=ok hooks=live pools: mac-arm ok 2/4 q0, linux-x64 ok 1/3 q1
+```
+
+**From a Claude Code session**, run it under the Monitor tool, which hands the agent each line as it
+is printed (the command, with this machine's paths; `--no-status` keeps a quiet stream quiet):
+
+```sh
+deno run --no-config --no-prompt "--allow-read=$HOME/Library/Application Support/dev.brainwires.fleet" \
+  --allow-net=127.0.0.1 <path to fleet>/mcp/fleet-stream.ts \
+  --data-dir "$HOME/Library/Application Support/dev.brainwires.fleet" --kinds problems --no-status
+```
+
+Narrow it to the work at hand (`--repo denext --branch development`), or drop `--kinds` to hear
+every job start and finish.
+
 ## Data files
 
 In the app's data folder (on macOS `~/Library/Application Support/dev.brainwires.fleet`, made 0700),
-never the token or any secret; every file is 0600, and the JSON files are written to a random temp
-name and renamed over:
+never the GitHub token or any GitHub secret (only the local event stream's own token); every file is
+0600, and the JSON files are written to a random temp name and renamed over:
 
 | File                                         | What                                                                                                                                                                |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -466,6 +591,8 @@ name and renamed over:
 | `fleet-events.jsonl`, `fleet-events.1.jsonl` | the event log as an append-only journal for agents: one event a line, `seq` increasing across restarts, `run_id` / `job_id` on job and run lines; rotated at 5 MB   |
 | `fleet-history.json`                         | the usage history per pool ([Pool detail screens](#pool-detail-screens)): two bucket tiers, 24 h and 30 days, and the last 200 jobs per pool; rewritten every 2 min |
 | `snapshot.json`                              | the agents' snapshot, written atomically after every poll and webhook update and at least once a minute (a heartbeat that bumps `written_at` only)                  |
+| `fleet-stream-token`                         | the [event stream](#realtime-stream)'s bearer token: random per install, made on the first start (the one secret here; 0600)                                        |
+| `fleet-stream.json`                          | where the event stream listens (`{ port, pid, started_at }`), written when it starts                                                                                |
 
 `snapshot.json` is
 `{ v: 1, updated_at, written_at, source: "poll" | "hook", auth, poll, rate, hooks, health, summary, pools, hosts, alerts, event_seq, clock_offset_ms, runs, jobs }`.
@@ -484,10 +611,10 @@ Baked into the binary from `denext.config.ts` (least privilege, derived by the p
 `--allow-net` connect to `api.github.com`, plus the hosts its job-log downloads redirect to
 (`productionresultssa0`–`19.blob.core.windows.net`, `pipelines.actions.githubusercontent.com`:
 fetched without the token, any other redirect refused), plus the loopback listen every desktop app
-has (the webhook port is inside it); `--allow-run` only the `gh` paths above and `/usr/bin/security`
-(a keychain webhook secret); `--allow-write` only the app's data folder. denext adds its baseline
-read / env grants and the unscoped `--allow-sys` that the secure store, notifications and start at
-login need.
+has (the webhook port and the event stream's port are inside it); `--allow-run` only the `gh` paths
+above and `/usr/bin/security` (a keychain webhook secret); `--allow-write` only the app's data
+folder. denext adds its baseline read / env grants and the unscoped `--allow-sys` that the secure
+store, notifications and start at login need.
 
 **An internal build** (`FLEET_INTERNAL=1`, `denext task desktop:package:internal`) also bakes what
 the build machine's `fleet-local-config.json` (or `$FLEET_LOCAL_CONFIG`) calls for: the runner
@@ -566,6 +693,9 @@ this repo.
 | `lib/shortcuts.ts`                     | Cmd+W / Cmd+Q in the window close it (an accessory app has no menu bar)                                  |
 | `lib/icons.ts`, `png.ts`               | The tray and app icons, drawn in code (`denext task icons`)                                              |
 | `mcp/fleet-mcp.ts`, `mcp/queries.ts`   | The read-only MCP server for agents (stdio) and its tools' answers                                       |
+| `lib/stream.ts`, `stream-format.ts`    | The loopback event stream (SSE / WebSocket): filters, replay, guards, backpressure; its wire messages    |
+| `lib/deno-stream.ts`                   | The stream's token file, `fleet-stream.json`, the 127.0.0.1 listener                                     |
+| `mcp/fleet-stream.ts`                  | `fleet-stream`: the stream as one line per event, reconnecting with `since_seq` (for monitors)           |
 | `app/`                                 | The page: `fleet-app.tsx` (state), `fleet-view.tsx`, `event-log.tsx`, `controls.tsx`, `token-screen.tsx` |
 | `app/pool-detail.tsx`, `charts.tsx`    | The pool detail screen and its hand-drawn SVG charts                                                     |
 | `app/log-viewer.tsx`                   | The virtualized log viewer                                                                               |

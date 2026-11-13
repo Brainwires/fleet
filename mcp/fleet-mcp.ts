@@ -13,6 +13,11 @@
 // machine.) Tools: fleet_status, fleet_runs, fleet_jobs, fleet_events, fleet_wait,
 // fleet_pool_history, fleet_runner_log (with --logs-dir). Every answer
 // carries its freshness (`as_of`, `stale`, `warning`); fleet_status names the watched owners.
+//
+// Realtime: the resources `fleet://events` and `fleet://status` take `resources/subscribe`, and
+// the server sends `notifications/resources/updated` when the journal grows / the pools' state
+// changes (it watches the data folder, plus a 2 s re-read: still no network). After
+// `logging/setLevel`, every problem event (warn / bad) also arrives as `notifications/message`.
 
 import {
   AGENT_SNAPSHOT_FILE,
@@ -23,7 +28,7 @@ import {
   LOG_FILE,
 } from "../lib/agent-files.ts";
 import type { AgentSnapshot } from "../lib/agent-snapshot.ts";
-import type { FleetEvent } from "../lib/events.ts";
+import { type FleetEvent, isProblem } from "../lib/events.ts";
 import { HistoryStore } from "../lib/history.ts";
 import { launcherForJob, launcherPath, readTail } from "../lib/deno-logs.ts";
 import {
@@ -35,6 +40,7 @@ import {
 import {
   ArgError,
   DEFAULT_WAIT_S,
+  eventOut,
   eventsResult,
   freshness,
   jobsResult,
@@ -440,6 +446,106 @@ export const TOOLS = [
   },
 ] as const;
 
+/** The event log as a resource (subscribable). */
+export const EVENTS_URI = "fleet://events";
+/** Pools, queue and freshness as a resource (subscribable). */
+export const STATUS_URI = "fleet://status";
+
+/** The resources, as `resources/list` returns them. */
+export const RESOURCES = [
+  {
+    uri: EVENTS_URI,
+    name: "Fleet events",
+    description:
+      "Fleet's newest events (as fleet_events returns them; `fleet://events?since_seq=N` for what " +
+      "came after N, also `kinds=a,b`, `repo=`, `limit=`). Subscribe to hear " +
+      "notifications/resources/updated whenever new events are logged. " + UNTRUSTED_NOTE,
+    mimeType: "application/json",
+  },
+  {
+    uri: STATUS_URI,
+    name: "Fleet status",
+    description:
+      "Pools, hosts, queue counts and freshness (as fleet_status returns them). Subscribe to hear " +
+      "notifications/resources/updated when running / queued counts, a pool's state or slots, " +
+      "the webhook state or staleness change.",
+    mimeType: "application/json",
+  },
+] as const;
+
+/** MCP log levels, lowest first. */
+export const LOG_LEVELS = [
+  "debug",
+  "info",
+  "notice",
+  "warning",
+  "error",
+  "critical",
+  "alert",
+  "emergency",
+] as const;
+
+/** Watch `dirs` for changes, calling every waker on each; returns the closer. */
+function watchDirs(dirs: readonly (string | null)[], wakers: Set<() => void>): () => void {
+  const watchers: Deno.FsWatcher[] = [];
+  for (const dir of dirs) {
+    if (!dir) continue;
+    try {
+      const watcher = Deno.watchFs(dir, { recursive: false });
+      watchers.push(watcher);
+      (async () => {
+        try {
+          for await (const _ of watcher) for (const fn of [...wakers]) fn();
+        } catch {
+          // Closed.
+        }
+      })();
+    } catch {
+      // Not there (yet): the periodic re-read covers it.
+    }
+  }
+  return () => {
+    for (const w of watchers) {
+      try {
+        w.close();
+      } catch {
+        // Already closed.
+      }
+    }
+  };
+}
+
+/** What a status subscriber is told about: counts, pool state and slots, webhooks, staleness. */
+function statusSignature(snap: AgentSnapshot | null, now: number): string {
+  return JSON.stringify([
+    snap?.summary.running,
+    snap?.summary.queued,
+    snap?.summary.severity,
+    snap?.pools.map((p) => [p.id, p.state, p.busy, p.slots, p.queued]),
+    snap?.hooks?.state,
+    freshness(snap, now).stale,
+  ]);
+}
+
+/** A `fleet://events?…` URI's query as fleet_events arguments. */
+function eventsUriArgs(uri: URL): Record<string, unknown> {
+  const q = uri.searchParams;
+  const args: Record<string, unknown> = { limit: 100 };
+  const int = (k: string) => {
+    const v = q.get(k);
+    if (v === null) return;
+    if (!/^\d{1,15}$/.test(v)) throw new ArgError(`${k} must be a whole number`);
+    args[k] = Number(v);
+  };
+  int("since_seq");
+  int("limit");
+  const kinds = q.get("kinds");
+  if (kinds) args.kinds = kinds.split(",").map((k) => k.trim()).filter(Boolean);
+  const repo = q.get("repo");
+  if (repo) args.repo = repo;
+  return args;
+}
+
 /** The server's options (tests shorten the clock). */
 export interface ServerOptions {
   readonly now?: () => number;
@@ -477,25 +583,9 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
     const deadline = start + w.timeoutS * 1000;
     const baseline = (await files.events()).at(-1)?.seq ?? 0;
     const wakers = new Set<() => void>();
-    const watchers: Deno.FsWatcher[] = [];
-    if (options.watch !== false) {
-      for (const dir of [files.paths.dataDir, files.paths.hooksDir]) {
-        if (!dir) continue;
-        try {
-          const watcher = Deno.watchFs(dir, { recursive: false });
-          watchers.push(watcher);
-          (async () => {
-            try {
-              for await (const _ of watcher) for (const fn of [...wakers]) fn();
-            } catch {
-              // Closed.
-            }
-          })();
-        } catch {
-          // Not there (yet): the 2 s re-read covers it.
-        }
-      }
-    }
+    const unwatch = options.watch !== false
+      ? watchDirs([files.paths.dataDir, files.paths.hooksDir], wakers)
+      : () => {};
     let lastProgress = start;
     try {
       while (true) {
@@ -517,14 +607,101 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
         await wakeAfter(Math.min(pollMs, deadline - t), signal, wakers);
       }
     } finally {
-      for (const w of watchers) {
+      unwatch();
+    }
+  }
+
+  // ---- realtime: resource subscriptions and problem-event log messages ----
+
+  const subscribed = new Set<string>();
+  /** The lowest level sent as notifications/message (`null`: the client didn't opt in). */
+  let logLevel: number | null = null;
+  let notify: Send = () => {};
+  let watching: AbortController | null = null;
+
+  /** Watch the files while anything is subscribed (or logging is on); stop when nothing is. */
+  function updateWatch(): void {
+    const wanted = subscribed.size > 0 || logLevel !== null;
+    if (wanted && !watching) {
+      watching = new AbortController();
+      void realtime(watching.signal);
+    } else if (!wanted && watching) {
+      watching.abort();
+      watching = null;
+    }
+  }
+
+  async function realtime(signal: AbortSignal): Promise<void> {
+    const wakers = new Set<() => void>();
+    const unwatch = options.watch !== false ? watchDirs([files.paths.dataDir], wakers) : () => {};
+    try {
+      let seen = (await files.events()).at(-1)?.seq ?? 0;
+      let status = statusSignature(await files.snapshot(), now());
+      while (!signal.aborted) {
+        await wakeAfter(pollMs, signal, wakers);
+        if (signal.aborted) break;
         try {
-          w.close();
+          const fresh = (await files.events()).filter((e) => e.seq > seen);
+          if (fresh.length > 0) {
+            seen = fresh.at(-1)!.seq;
+            if (subscribed.has(EVENTS_URI)) {
+              notify({
+                jsonrpc: "2.0",
+                method: "notifications/resources/updated",
+                params: { uri: EVENTS_URI },
+              });
+            }
+            if (logLevel !== null) {
+              for (const e of fresh) {
+                if (!isProblem(e)) continue;
+                const level = e.sev === "bad" ? "error" : "warning";
+                if (LOG_LEVELS.indexOf(level) < logLevel) continue;
+                notify({
+                  jsonrpc: "2.0",
+                  method: "notifications/message",
+                  params: { level, logger: "fleet", data: eventOut(e) },
+                });
+              }
+            }
+          }
+          const sig = statusSignature(await files.snapshot(), now());
+          if (sig !== status) {
+            status = sig;
+            if (subscribed.has(STATUS_URI)) {
+              notify({
+                jsonrpc: "2.0",
+                method: "notifications/resources/updated",
+                params: { uri: STATUS_URI },
+              });
+            }
+          }
         } catch {
-          // Already closed.
+          // A torn read: the next pass sees it.
         }
       }
+    } finally {
+      unwatch();
     }
+  }
+
+  async function readResource(raw: string): Promise<unknown> {
+    let uri: URL;
+    try {
+      uri = new URL(raw);
+    } catch {
+      return null;
+    }
+    const base = `${uri.protocol}//${uri.host}${uri.pathname}`;
+    if (base === EVENTS_URI) {
+      return eventsResult(await files.snapshot(), await files.events(), now(), eventsUriArgs(uri));
+    }
+    if (base === STATUS_URI) {
+      return statusResult(await files.snapshot(), now(), {
+        watchdog: await files.watchdog(),
+        hooksSpoolAt: await files.hooksSpoolAt(),
+      });
+    }
+    return null;
   }
 
   async function callTool(
@@ -599,14 +776,57 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
         const asked = typeof params.protocolVersion === "string" ? params.protocolVersion : "";
         return reply({
           protocolVersion: PROTOCOLS.includes(asked) ? asked : PROTOCOLS[0],
-          capabilities: { tools: { listChanged: false } },
+          capabilities: {
+            tools: { listChanged: false },
+            resources: { subscribe: true, listChanged: false },
+            logging: {},
+          },
           serverInfo: { name: "fleet", version: SERVER_VERSION },
           instructions:
             "Read GitHub Actions state (runs, jobs, runner pools, events) for the owners the Fleet " +
             "app watches (fleet_status lists them) from its cache instead of polling the GitHub " +
             "API, whose rate budget other tools share. Use fleet_wait instead of watch loops. " +
+            "Subscribe to fleet://events / fleet://status for update notifications, and set a " +
+            "log level to receive problem events as log messages. " +
             "Every answer has `as_of` and `stale`; when stale, fall back to gh. " + UNTRUSTED_NOTE,
         });
+      }
+      case "resources/list":
+        return reply({ resources: RESOURCES });
+      case "resources/templates/list":
+        return reply({ resourceTemplates: [] });
+      case "resources/read": {
+        const uri = String(params.uri ?? "");
+        let result: unknown;
+        try {
+          result = await readResource(uri);
+        } catch (err) {
+          return fail(-32602, err instanceof ArgError ? err.message : "invalid params");
+        }
+        if (result === null) return fail(-32002, `resource not found: ${uri.slice(0, 200)}`);
+        return reply({
+          contents: [{ uri, mimeType: "application/json", text: JSON.stringify(result, null, 1) }],
+        });
+      }
+      case "resources/subscribe":
+      case "resources/unsubscribe": {
+        const uri = String(params.uri ?? "");
+        if (uri !== EVENTS_URI && uri !== STATUS_URI) {
+          return fail(-32602, `not a subscribable resource: ${uri.slice(0, 200)}`);
+        }
+        notify = send;
+        if (method === "resources/subscribe") subscribed.add(uri);
+        else subscribed.delete(uri);
+        updateWatch();
+        return reply({});
+      }
+      case "logging/setLevel": {
+        const i = LOG_LEVELS.indexOf(params.level as typeof LOG_LEVELS[number]);
+        if (i < 0) return fail(-32602, `level must be one of ${LOG_LEVELS.join(", ")}`);
+        notify = send;
+        logLevel = i;
+        updateWatch();
+        return reply({});
       }
       case "ping":
         return reply({});
@@ -645,7 +865,16 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
     }
   }
 
-  return { handle, abortAll: () => inflight.forEach((ac) => ac.abort()) };
+  return {
+    handle,
+    /** Abort every call in flight and stop the realtime watch (stdin closed). */
+    abortAll: () => {
+      inflight.forEach((ac) => ac.abort());
+      subscribed.clear();
+      logLevel = null;
+      updateWatch();
+    },
+  };
 }
 
 /** Serve MCP over stdin / stdout until stdin closes. */

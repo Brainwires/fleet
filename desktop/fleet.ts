@@ -21,6 +21,14 @@ import {
   saveState,
 } from "../lib/deno-host.ts";
 import { CHANGED_EVENT, type Snapshot } from "../lib/model.ts";
+import type { FleetEvent } from "../lib/events.ts";
+import { createStream, type FleetStream, replayFrom, statusMessage } from "../lib/stream.ts";
+import {
+  ensureStreamToken,
+  listenStream,
+  type StreamListener,
+  writeStreamState,
+} from "../lib/deno-stream.ts";
 import { createFleetService, type FleetService } from "../lib/service.ts";
 import {
   type ControlDeps,
@@ -75,7 +83,14 @@ function start(host: DesktopExtensionHost): void {
     saveLog: (d) => saveLog(dir, d),
     // For agents (mcp/fleet-mcp.ts reads these, read-only): the snapshot and the event journal.
     saveAgentSnapshot: (snap) => saveAgentSnapshot(dir, snap),
-    appendJournal: (events) => appendJournal(dir, events),
+    // …and the loopback event stream (lib/stream.ts) pushes each appended event to its clients.
+    appendJournal: async (events) => {
+      try {
+        await appendJournal(dir, events);
+      } finally {
+        publishToStream(events);
+      }
+    },
     journalLastSeq: () => journalLastSeq(dir),
     // What happened while Fleet was closed: the receiver's spool, read once at startup.
     readSpool: (since) => readSpoolSince(since, spoolDirOf(settings().webhooks, dir)),
@@ -101,9 +116,11 @@ function start(host: DesktopExtensionHost): void {
   service.start().catch((err) => console.error("fleet: start failed:", errName(err)));
   // Webhooks follow the startup settings (a change applies at the next launch).
   void service.settingsReady().then(() => startHooks(service!, dir), () => {});
+  // The loopback event stream follows the startup settings too.
+  void service.settingsReady().then(() => startStream(service!, dir), () => {});
   host.onAppQuit(async () => {
     stopSpool?.();
-    await Promise.all([receiver?.stop(), service?.flushHistory()]);
+    await Promise.all([receiver?.stop(), service?.flushHistory(), streamListener?.stop()]);
   });
 }
 
@@ -160,6 +177,63 @@ async function startHooks(s: FleetService, dataDir: string): Promise<void> {
     );
     s.setHooksEnabled(false);
   }
+}
+
+let stream: FleetStream | null = null;
+let streamListener: StreamListener | null = null;
+/** The last event `seq` handed to the stream. */
+let streamSeq = 0;
+
+/** Newly journaled events to the stream's clients (none before it starts). */
+function publishToStream(events: readonly FleetEvent[]): void {
+  for (const e of events) streamSeq = Math.max(streamSeq, e.seq);
+  stream?.publish(events);
+}
+
+/**
+ * The loopback event stream for agents and monitors (settings `stream`): 127.0.0.1 only, the
+ * per-install token in the data folder, `fleet-stream.json` saying the port. A taken port leaves
+ * Fleet running without it.
+ */
+async function startStream(s: FleetService, dataDir: string): Promise<void> {
+  const cfg = s.settings().stream;
+  if (!cfg.enabled || stream) return;
+  let token: string;
+  try {
+    token = await ensureStreamToken(dataDir);
+  } catch (err) {
+    console.warn(`fleet: stream: off (the token file: ${errName(err)})`);
+    return;
+  }
+  const lastSeq = () => Math.max(streamSeq, s.snapshot().eventSeq);
+  const st = createStream({
+    token,
+    lastSeq,
+    replay: (since) => replayFrom(s.events(since), since, () => readJournal(dataDir)),
+    status: () => statusMessage(s.snapshot(), lastSeq(), Date.now()),
+    heartbeatMs: cfg.heartbeatSeconds * 1000,
+    maxClients: cfg.maxClients,
+  });
+  const listener = listenStream(st, cfg.port);
+  if (!listener) {
+    console.warn(`fleet: stream: 127.0.0.1:${cfg.port} is taken; no event stream`);
+    return;
+  }
+  stream = st;
+  streamListener = listener;
+  await writeStreamState(dataDir, {
+    port: listener.port,
+    pid: Deno.pid,
+    started_at: new Date().toISOString(),
+  }).catch((err) => console.warn(`fleet: stream: fleet-stream.json: ${errName(err)}`));
+  // Webhook state changes (live / stale / off) are stream messages too (not journaled).
+  let hooksWas = s.snapshot().hooks?.state ?? "off";
+  s.onChange((snap) => {
+    const now = snap.hooks?.state ?? "off";
+    if (now === hooksWas) return;
+    st.publishHooks(now, hooksWas);
+    hooksWas = now;
+  });
 }
 
 /** An error's name only: a message could, in principle, echo a request. */

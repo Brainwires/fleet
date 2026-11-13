@@ -5,10 +5,13 @@
 //
 // The defaults name nobody's infrastructure: no owner, every repo of the owners chosen in the first-
 // run wizard, each repo's own default branch protected (cancel / duplicate dispatch warn), pools
-// grouped from the owners' self-hosted runners, webhooks off, start at login off, no integrations.
+// grouped from the owners' self-hosted runners, webhooks off, start at login off, no integrations;
+// the loopback event stream on (127.0.0.1 only, token-gated).
 //
 // The active settings are module state (like the pool list in lib/pools.ts): `applySettings` swaps
 // them, and every reader (the poller, classification, guardrails, notifications) follows.
+
+import { DEFAULT_STREAM_PORT } from "./agent-files.ts";
 
 /** The schema version this build reads and writes. */
 export const SETTINGS_VERSION = 1;
@@ -99,6 +102,17 @@ export interface WebhookSettings {
   readonly requireLaunchdJob: string;
 }
 
+/** The loopback event stream for agents and monitors (lib/stream.ts). */
+export interface StreamSettings {
+  readonly enabled: boolean;
+  /** The 127.0.0.1 port (`GET /events`, `GET /events/ws`). */
+  readonly port: number;
+  /** A `status` heartbeat this often (seconds). */
+  readonly heartbeatSeconds: number;
+  /** At most this many clients at once. */
+  readonly maxClients: number;
+}
+
 /** The runner scheduler's pool commands (absolute paths, `~/` allowed). */
 export interface SchedulerControls {
   /** `pause-pool.sh <pool> --seconds N [reason]` / `pause-pool.sh --resume <pool>`. */
@@ -170,6 +184,7 @@ export interface FleetSettings {
   /** Start Fleet at login (applied when changed in the wizard, the Settings view or the tray). */
   readonly startAtLogin: boolean;
   readonly webhooks: WebhookSettings;
+  readonly stream: StreamSettings;
   readonly integrations: {
     readonly runnerScheduler: RunnerSchedulerIntegration | null;
   };
@@ -196,6 +211,7 @@ export const DEFAULT_SETTINGS: FleetSettings = Object.freeze({
     secret: { source: "secure-store" },
     requireLaunchdJob: "",
   },
+  stream: { enabled: true, port: DEFAULT_STREAM_PORT, heartbeatSeconds: 60, maxClients: 8 },
   integrations: { runnerScheduler: null },
 }) as FleetSettings;
 
@@ -488,6 +504,31 @@ export function validateSettings(raw: unknown): SettingsResult {
     ),
   };
 
+  const so0 = r.obj(doc.stream, "stream");
+  const int = (v: unknown, path: string, min: number, max: number, dflt: number): number => {
+    if (v === undefined) return dflt;
+    if (typeof v !== "number" || !Number.isInteger(v) || v < min || v > max) {
+      r.err(path, `a whole number from ${min} to ${max}`);
+      return dflt;
+    }
+    return v;
+  };
+  const stream: StreamSettings = {
+    enabled: r.bool(so0.enabled, "stream.enabled", d.stream.enabled),
+    port: int(so0.port, "stream.port", 1024, 65535, d.stream.port),
+    heartbeatSeconds: int(
+      so0.heartbeatSeconds,
+      "stream.heartbeatSeconds",
+      5,
+      3600,
+      d.stream.heartbeatSeconds,
+    ),
+    maxClients: int(so0.maxClients, "stream.maxClients", 1, 64, d.stream.maxClients),
+  };
+  if (stream.enabled && webhooks.enabled && stream.port === webhooks.port) {
+    r.err("stream.port", "must differ from webhooks.port");
+  }
+
   const io = r.obj(doc.integrations, "integrations");
   let runnerScheduler: RunnerSchedulerIntegration | null = null;
   if (io.runnerScheduler !== undefined && io.runnerScheduler !== null) {
@@ -556,6 +597,7 @@ export function validateSettings(raw: unknown): SettingsResult {
       notifications,
       startAtLogin,
       webhooks,
+      stream,
       integrations: { runnerScheduler },
     },
   };

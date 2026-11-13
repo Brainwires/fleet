@@ -7,7 +7,7 @@
 // Notifications are never derived from these lines (they come from the live snapshot only), so a
 // back-filled failure is in the log without a banner.
 
-import { failedStep, type FleetEvent, type NewEvent, poolText } from "./events.ts";
+import { failedStep, type FleetEvent, jobPool, type NewEvent, poolText } from "./events.ts";
 import { type HookDelivery, payloadRepo } from "./hooks.ts";
 import { asJob, asRun } from "./poller.ts";
 import { runProvenance } from "./classify.ts";
@@ -156,6 +156,7 @@ export function backfillEvents(
     const job = asJob(d.payload.workflow_job);
     if (!job) continue;
     const runUrl = `https://github.com/${repo}/actions/runs/${job.run_id}`;
+    const pool = jobPool(job);
     const ev = (sev: FleetEvent["sev"], kind: FleetEvent["kind"], text: string): NewEvent => ({
       at: d.receivedAt,
       sev,
@@ -166,6 +167,7 @@ export function backfillEvents(
       run_id: job.run_id,
       job: job.name,
       job_id: job.id,
+      ...(pool ? { pool } : {}),
       text,
       url: job.html_url ?? runUrl,
       backfill: true,
@@ -205,6 +207,7 @@ export function backfillEvents(
       at: g.at,
       job: null,
       job_id: undefined,
+      pool: undefined,
       text: `run ${runId} cancelled (${g.count} jobs)`,
       url: `https://github.com/${g.base.repo}/actions/runs/${runId}`,
     });
