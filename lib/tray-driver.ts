@@ -1,10 +1,10 @@
 // The tray-resident app, driven from the app's process (desktop.ts), never from a page: with no
-// window open there is no page to answer the tray. Accessory (no Dock icon, no menu bar) while only
-// the tray runs. While the window is open it follows lib/dock-policy.ts: "regular" (a Dock icon,
-// Cmd-Tab) when the app is installed outside /Applications, else accessory still, since an app under
-// /Applications that was ever regular gets a tile in the Dock's recent apps once its running tile
-// goes away. An accessory window comes to the front through its focus(), which activates the app
-// without changing the policy. Closing the window destroys it (Fleet stays in the tray), and
+// window open there is no page to answer the tray. An accessory app (no menu bar) for its whole
+// life, its window open or not; while it is open denext's Dock helper (desktop.app.dock
+// "while-window-open") shows the Dock icon. An app that was ever regular gets a tile in the Dock's
+// recent apps once its running Dock tile goes away (on quit, or on switching back to accessory),
+// and macOS has no opt-out. The window comes to the front through its focus(), which activates the
+// app without changing the policy. Closing the window destroys it (Fleet stays in the tray), and
 // opening makes a fresh one. A click on the icon
 // opens / closes the window; the menu opens / closes it, shows the summary, opens the Settings view,
 // pauses notifications, toggles start at login, polls now and quits.
@@ -98,9 +98,9 @@ export interface WindowHost {
   /** Open a fresh Fleet window (`windows.open({ key: WINDOW_KEY, … })`); throws when it can't. */
   open(): FleetWindow;
   /**
-   * Set the macOS activation policy (`DesktopRuntime.setActivationPolicy`). Given only when the
-   * Dock icon follows the window (lib/dock-policy.ts `"follow-window"`); without it the policy is
-   * never touched (Fleet stays accessory).
+   * Set the macOS activation policy (`DesktopRuntime.setActivationPolicy`) so the Dock icon
+   * follows the window. Fleet passes none (denext's Dock helper shows the icon, and Fleet stays
+   * accessory); without it the policy is never touched.
    */
   setActivationPolicy?(policy: "regular" | "accessory"): boolean;
 }

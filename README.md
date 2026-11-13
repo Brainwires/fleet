@@ -105,21 +105,15 @@ with `~/`.
 
 ## Tray behaviour
 
-- **The Dock icon depends on where Fleet is installed** (macOS). The Dock adds an unpinned app to
-  "Recent applications" when its running Dock tile goes away (on quit, or on going back to
-  accessory), but only when the app bundle's resolved path is under `/Applications` (measured on
-  macOS 15 and 26; Apple documents none of it, and there is no opt-out). So at launch Fleet resolves
-  its bundle's real path (`lib/dock-policy.ts`):
-  - **Outside `/Applications`** (for example `~/Applications/Fleet.app`, the recommended place):
-    Fleet goes "regular" just before its window opens (a Dock icon, Cmd-Tab, the host's app menu)
-    and back to "accessory" once the window closes. Nothing is left in Recents.
-  - **Under `/Applications`** (a symlink into it counts): accessory from the first frame to quit,
-    with the window open or not, so it never lands in Recents. Opening brings the window to the
-    front and makes it key through the window's `focus()`, which activates the app without changing
-    the policy.
-
-  A separate window-helper app (denext's macOS window helper, in progress) will give a Dock icon
-  with the window open wherever Fleet is installed.
+- **A Dock icon only while the window is open, never in the recent apps** (macOS):
+  `desktop.app.dock: "while-window-open"`. Fleet itself is accessory from the first frame to quit;
+  while its window is open, denext's Dock helper (a small app Fleet copies into its data folder,
+  outside /Applications) holds the Dock icon and the Cmd-Tab entry, and clicking it or switching to
+  it brings the window up. Fleet never switches to "regular": an app that was ever regular gets a
+  tile in the Dock's recent apps whenever its running Dock tile goes away (on quit, or on going back
+  to accessory), and macOS has no opt-out. Opening brings the window to the front and makes it key
+  through the window's `focus()`, which activates the app ignoring other apps without changing the
+  policy.
 - **Quit means "close to the tray"** unless Fleet asks for it: the Dock's Quit, Cmd+Q (the app menu
   or the window), and `osascript -e 'quit app "Fleet"'` close Fleet's window and leave it running in
   the tray (accessory again). It is a `DesktopRuntime.onBeforeQuit` guard (`lib/quit-guard.ts`) that
@@ -134,9 +128,10 @@ with `~/`.
   fresh window that rebuilds everything from the backend's snapshot and log, at the size and place
   the last one had (`desktop.window.key` / `windows.open({ key: "fleet" })`, saved in the app's
   `windows.json`). Opening while a window is open brings that one to the front, never a second.
-- **What opens it**: the tray (a click, or Open Fleet), a click on its Dock icon (outside
-  `/Applications`), opening Fleet again from Finder or Launchpad, launching it again (single
-  instance), or a click on one of Fleet's notifications (also the click that launched it).
+- **What opens it**: the tray (a click, or Open Fleet), a click on its Dock icon (the Dock
+  helper's, while the window is open), opening Fleet again from Finder or Launchpad, launching it
+  again (single instance), or a click on one of Fleet's notifications (also the click that
+  launched it).
 - **Quit** only through the tray's Quit Fleet, or the OS's logout / restart / shut down.
 - **The icon**: a macOS template icon (status by shape) or colour art on Windows / Linux; red when a
   pool is unhealthy or a job has been queued over 15 min (a wait on a pool with every slot busy
@@ -729,8 +724,7 @@ this repo.
 | `lib/agent-snapshot.ts`                | The agents' `snapshot.json`, built from the poller's state                                               |
 | `lib/agent-files.ts`                   | The agent files' names, shared with the MCP server                                                       |
 | `lib/deno-host.ts`                     | gh, the data files, native notifications                                                                 |
-| `lib/tray-driver.ts`                   | Tray, window manager (open / close / focus, the Dock icon following it), start at login                  |
-| `lib/dock-policy.ts`                   | Whether the Dock icon follows the window (macOS: not when installed under `/Applications`)               |
+| `lib/tray-driver.ts`                   | Tray, window manager (open / close / focus, never regular), start at login                               |
 | `lib/quit-guard.ts`                    | Which quits quit: the tray's Quit and the session end; any other closes to the tray                      |
 | `lib/shortcuts.ts`                     | Cmd+W / Cmd+Q in the window close it (an accessory app has no menu bar)                                  |
 | `lib/icons.ts`, `png.ts`               | The tray and app icons, drawn in code (`denext task icons`)                                              |

@@ -7,8 +7,9 @@
 // `quitOnLastWindowClosed` off, and window-registry.ts `closed` ends the app only without it), and
 // the tray, a reopen, a second launch or a notification click opens a fresh one. Only the tray's
 // Quit quits: any other quit (the Dock's Quit, Cmd+Q, `osascript … quit`) closes the window and
-// leaves Fleet in the tray (lib/quit-guard.ts); the OS's session end always quits. On macOS the Dock
-// icon follows the window unless Fleet is installed under /Applications (lib/dock-policy.ts).
+// leaves Fleet in the tray (lib/quit-guard.ts); the OS's session end always quits. On macOS Fleet
+// stays accessory, and denext's Dock helper shows a Dock icon while the window is open
+// (desktop.app.dock "while-window-open" in denext.config.ts).
 // The window also shows until the first-run wizard is done, and the tray's Settings… opens it on the
 // Settings view. Start at login is opt-in: set only when the settings change it.
 import config from "./.deno-desktop/config.json" with { type: "json" };
@@ -17,7 +18,6 @@ import { fleetService } from "./desktop/fleet.ts";
 import { trayIcons } from "./lib/icons.ts";
 import type { Snapshot } from "./lib/model.ts";
 import { onNotificationClick } from "./lib/deno-host.ts";
-import { dockMode } from "./lib/dock-policy.ts";
 import { createQuitGuard } from "./lib/quit-guard.ts";
 import {
   createWindowManager,
@@ -46,9 +46,6 @@ const openWindow = () => {
     console.error("fleet: window:", err instanceof Error ? err.message : "error");
   }
 };
-
-/** Whether the Dock icon follows the window (macOS, not installed under /Applications). */
-const DOCK = dockMode(Deno.build.os, () => Deno.execPath(), (p) => Deno.realPathSync(p));
 
 /** Which quits quit: the tray's Quit and the session end; any other closes to the tray. */
 const quitGuard = createQuitGuard({
@@ -110,10 +107,6 @@ const manager = createWindowManager({
     } catch { /* a runtime without it */ }
     return w satisfies FleetWindow;
   },
-  // The Dock icon follows the window only outside /Applications (no Recents entry there).
-  ...(DOCK === "follow-window"
-    ? { setActivationPolicy: (p: "regular" | "accessory") => app.setActivationPolicy(p) }
-    : {}),
 }, {
   onChange: () => tray?.refreshMenu(),
   // No page reads now: the backend polls at the hidden rate until a window opens again. With no

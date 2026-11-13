@@ -38,10 +38,12 @@ export default {
       singleInstance: true,
       // Closing the window (it closes for good) leaves Fleet running in the tray.
       keepAlive: true,
-      // A tray app: no Dock icon or menu bar from the first frame to quit, its window open or not.
-      // Never "regular": an app that was ever regular lands in the Dock's recent apps once its
+      // A tray app with a Dock icon and a Cmd-Tab entry only while its window is open: Fleet itself
+      // stays accessory (no menu bar) from the first frame to quit, and denext's Dock helper (copied
+      // into the data folder, outside /Applications) holds the icon, so Fleet never lands in the
+      // Dock's recent apps. Never "regular": an app that was ever regular lands there once its
       // running tile goes away. The window comes to the front through focus() (lib/tray-driver.ts).
-      activationPolicy: "accessory",
+      dock: "while-window-open",
     },
     // Hidden at launch: desktop.ts shows it on the first launch or when a token is needed, else
     // closes it. Keyed like every window desktop.ts opens later (lib/tray-driver.ts WINDOW_KEY), so
