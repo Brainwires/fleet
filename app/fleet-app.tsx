@@ -42,7 +42,10 @@ function openUrl(url: string): void {
   void openExternal(url).catch((err) => console.error("fleet: open:", errorText(err)));
 }
 
-const visibleNow = () => typeof document === "undefined" || document.visibilityState === "visible";
+/** Whether the window shows: visible, or focused (insurance for an engine slow to flip visibility). */
+const visibleNow = () =>
+  typeof document === "undefined" || document.visibilityState === "visible" ||
+  document.hasFocus?.() === true;
 
 export function FleetApp() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
@@ -188,11 +191,20 @@ export function FleetApp() {
       if (visible) void read();
     };
     document.addEventListener("visibilitychange", onVis);
+    // Insurance: the window coming to the front, or a page restored from the back-forward cache,
+    // reads the current state too (a read is an in-process call).
+    const onShow = () => {
+      if (visibleNow()) onVis();
+    };
+    globalThis.addEventListener?.("focus", onShow);
+    globalThis.addEventListener?.("pageshow", onShow);
     const stop = onDesktopEvent("fleet", CHANGED_EVENT, () => void read());
     return () => {
       clearInterval(poll);
       clock.stop();
       document.removeEventListener("visibilitychange", onVis);
+      globalThis.removeEventListener?.("focus", onShow);
+      globalThis.removeEventListener?.("pageshow", onShow);
       stop();
     };
   }, [read]);

@@ -714,9 +714,10 @@ Go through these in order; each one isolates one hop.
    `hooks: live (via receiver)` (Fleet tails the standalone receiver's spool) after the first
    verified delivery. A ping counts only when Fleet itself is the receiver; with the standalone
    receiver, wait for a workflow event. Before any delivery it reads
-   `hooks: stale (no delivery yet)`, and in a quiet spell `hooks: stale (last delivery N min ago)`:
-   both are normal when no workflow has run for 10 minutes. `hooks: off` means webhooks aren't
-   enabled on this machine (see [Troubleshooting](#troubleshooting)).
+   `hooks: quiet (no delivery yet)`, and in a quiet spell `hooks: quiet (last delivery N min ago)`:
+   both are normal when no workflow has run for 10 minutes. The same silence while jobs are running
+   or queued reads `hooks: stale (…)` in amber, since deliveries were due. `hooks: off` means
+   webhooks aren't enabled on this machine (see [Troubleshooting](#troubleshooting)).
 
 6. **The spool grows** (one line per accepted delivery; this prints only the head of the last line):
 
