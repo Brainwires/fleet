@@ -1,7 +1,10 @@
 // The tray-resident app, driven from the app's process (desktop.ts), never from a page: with no
-// window open there is no page to answer the tray. Like examples/hangar in denext: an accessory app
-// (no Dock icon) while only the tray runs, a regular one while Fleet's window is open; closing the
-// window destroys it (Fleet stays in the tray), and opening makes a fresh one. A click on the icon
+// window open there is no page to answer the tray. An accessory app (no Dock icon, no menu bar) for
+// its whole life, its window open or not: an app that was ever regular gets a tile in the Dock's
+// recent apps once its running Dock tile goes away (on quit, or on switching back to accessory),
+// and macOS has no opt-out. The window comes to the front through its focus(), which activates the
+// app without changing the policy. Closing the window destroys it (Fleet stays in the tray), and
+// opening makes a fresh one. A click on the icon
 // opens / closes the window; the menu opens / closes it, shows the summary, pauses notifications,
 // toggles start at login, polls now and quits.
 //
@@ -90,7 +93,6 @@ export interface WindowHost {
   find(): FleetWindow | undefined;
   /** Open a fresh Fleet window (`windows.open({ key: WINDOW_KEY, … })`); throws when it can't. */
   open(): FleetWindow;
-  setActivationPolicy(policy: "regular" | "accessory"): boolean;
 }
 
 /** What the window manager tells the app. */
@@ -102,9 +104,10 @@ export interface WindowHooks {
 }
 
 /**
- * Open / close Fleet's window, the Dock icon following it (macOS): "regular" just before a window
- * opens or comes to the front, "accessory" once the last one closed. Closing destroys the window;
- * the next open is a fresh window whose page rebuilds its state from the backend.
+ * Open / close Fleet's window. It never touches the activation policy (Fleet stays accessory, so
+ * it never lands in the Dock's recent apps): show() brings the window up with its focus(), which on
+ * macOS activates the app ignoring other apps. Closing destroys the window; the next open is a
+ * fresh window whose page rebuilds its state from the backend.
  */
 export interface WindowManager {
   /** Open a window, or bring the open one to the front (never a second). */
@@ -128,25 +131,14 @@ export function createWindowManager(host: WindowHost, hooks: WindowHooks = {}): 
     watched.add(w.id);
     w.onClosed(() => {
       watched.delete(w.id);
-      // The last one gone: no Dock icon while only the tray runs.
-      if (!host.find()) host.setActivationPolicy("accessory");
       hooks.onClosed?.();
       changed();
     });
   };
   const m: WindowManager = {
     show() {
-      // Regular first: a Dock icon, and the app comes to the front.
-      host.setActivationPolicy("regular");
-      let w = host.find();
-      if (!w) {
-        try {
-          w = host.open();
-        } catch (err) {
-          host.setActivationPolicy("accessory");
-          throw err;
-        }
-      }
+      // Never "regular": focus() brings the window to the front and makes it key on its own.
+      const w = host.find() ?? host.open();
       watch(w);
       w.show();
       w.focus();

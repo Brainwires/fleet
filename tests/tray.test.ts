@@ -1,5 +1,5 @@
 // The tray-resident behaviour with fakes: the window manager (a closed window is gone, a fresh one
-// opens, the Dock icon follows), the menu and its wiring (open / close, summary, pause, start at
+// opens, the activation policy is never touched), the menu and its wiring (open / close, summary, pause, start at
 // login, quit), the tooltip and red icon, and start at login defaulting on once.
 
 import { assert, assertEquals, assertFalse } from "@std/assert";
@@ -49,7 +49,9 @@ function snap(over: Partial<Snapshot> = {}): Snapshot {
 /**
  * The runtime's windows as the window manager sees them: `byKey(WINDOW_KEY)` finds the open one
  * (`launch` starts with the launch's hidden main window), `open` makes a fresh one, `close` runs
- * its close handlers and drops it (as the registry does), and every call is logged.
+ * its close handlers and drops it (as the registry does), and every call is logged. It also has a
+ * `setActivationPolicy` the manager must never call (Fleet stays accessory: an app that was ever
+ * regular lands in the Dock's recent apps).
  */
 function fakeApp(opts: { launch?: boolean; openFails?: boolean } = {}) {
   const log: string[] = [];
@@ -93,7 +95,7 @@ function fakeApp(opts: { launch?: boolean; openFails?: boolean } = {}) {
       open = w;
       return w;
     },
-    setActivationPolicy: (p: "regular" | "accessory") => (log.push(`policy:${p}`), true),
+    setActivationPolicy: (p: string) => (log.push(`policy:${p}`), true),
   };
   return { host, log, current: () => open };
 }
@@ -119,7 +121,7 @@ const ICONS = {
   alert: { icon: new Uint8Array([3]), iconDark: null },
 };
 
-Deno.test("window manager: regular before a fresh window opens, accessory once it closed", () => {
+Deno.test("window manager: a fresh window opens and comes to the front; never the activation policy", () => {
   const { host, log, current } = fakeApp();
   let changes = 0;
   let closes = 0;
@@ -127,20 +129,20 @@ Deno.test("window manager: regular before a fresh window opens, accessory once i
   assertFalse(w.visible);
   w.show();
   assert(w.visible);
-  assertEquals(log, ["policy:regular", "open:window-1", "show:window-1", "focus:window-1"]);
+  assertEquals(log, ["open:window-1", "show:window-1", "focus:window-1"]);
   // The close button (or close()) destroys it: the runtime's close handlers run.
   log.length = 0;
   current()!.close();
   assertFalse(w.visible);
   assertEquals(current(), undefined);
-  assertEquals(log, ["close:window-1", "policy:accessory"]);
+  assertEquals(log, ["close:window-1"]);
   assertEquals(closes, 1);
   // Reopening is a fresh window, with its own close tracking.
   log.length = 0;
   w.show();
-  assertEquals(log, ["policy:regular", "open:window-2", "show:window-2", "focus:window-2"]);
+  assertEquals(log, ["open:window-2", "show:window-2", "focus:window-2"]);
   w.close();
-  assertEquals(log.slice(4), ["close:window-2", "policy:accessory"]);
+  assertEquals(log.slice(3), ["close:window-2"]);
   assertEquals(closes, 2);
   assertEquals(changes, 4);
 });
@@ -152,11 +154,9 @@ Deno.test("window manager: a repeated open focuses the open window, never a seco
   w.show();
   w.show();
   assertEquals(log.filter((l) => l.startsWith("open:")), ["open:window-1"]);
-  assertEquals(log.slice(4), [
-    "policy:regular",
+  assertEquals(log.slice(3), [
     "show:window-1",
     "focus:window-1",
-    "policy:regular",
     "show:window-1",
     "focus:window-1",
   ]);
@@ -170,12 +170,12 @@ Deno.test("window manager: the launch's hidden window is shown, or closed when F
     const { host, log } = fakeApp({ launch: true });
     const w = createWindowManager(host);
     w.show();
-    assertEquals(log, ["policy:regular", "show:main", "focus:main"]);
+    assertEquals(log, ["show:main", "focus:main"]);
     // closeHidden leaves a showing window alone.
     w.closeHidden();
-    assertEquals(log.length, 3);
+    assertEquals(log.length, 2);
     w.toggle();
-    assertEquals(log.slice(3), ["close:main", "policy:accessory"]);
+    assertEquals(log.slice(2), ["close:main"]);
   }
   // Not shown: closed, so no hidden window lingers; the next open is fresh.
   {
@@ -183,14 +183,9 @@ Deno.test("window manager: the launch's hidden window is shown, or closed when F
     const w = createWindowManager(host);
     w.closeHidden();
     assertEquals(current(), undefined);
-    assertEquals(log, ["close:main", "policy:accessory"]);
+    assertEquals(log, ["close:main"]);
     w.toggle();
-    assertEquals(log.slice(2), [
-      "policy:regular",
-      "open:window-1",
-      "show:window-1",
-      "focus:window-1",
-    ]);
+    assertEquals(log.slice(1), ["open:window-1", "show:window-1", "focus:window-1"]);
     // Nothing open: close and closeHidden do nothing.
     current()!.close();
     log.length = 0;
@@ -200,7 +195,7 @@ Deno.test("window manager: the launch's hidden window is shown, or closed when F
   }
 });
 
-Deno.test("window manager: a window that can't open puts the Dock icon back and throws", () => {
+Deno.test("window manager: a window that can't open throws, the policy untouched", () => {
   const { host, log } = fakeApp({ openFails: true });
   const w = createWindowManager(host);
   let threw = false;
@@ -210,7 +205,7 @@ Deno.test("window manager: a window that can't open puts the Dock icon back and 
     threw = true;
   }
   assert(threw);
-  assertEquals(log, ["policy:regular", "policy:accessory"]);
+  assertEquals(log, []);
 });
 
 Deno.test("tray menu: open/close, the summary as a disabled item, toggles, quit", () => {

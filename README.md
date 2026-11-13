@@ -58,19 +58,25 @@ The token is never logged, rendered, written to a file, or returned to the page.
 
 ## Tray behaviour
 
-- **No Dock icon** while no window is open (`activationPolicy: "accessory"` from the first frame);
-  Fleet becomes a regular app, with a Dock icon, just before its window opens, and an accessory one
-  again once it closes.
+- **No Dock icon, ever** (macOS): `activationPolicy: "accessory"` from the first frame to quit, with
+  the window open or not. Fleet never switches to "regular": an app that was ever regular gets a
+  tile in the Dock's recent apps whenever its running Dock tile goes away (on quit, or on going back
+  to accessory), and macOS has no opt-out. Opening brings the window to the front and makes it key
+  through the window's `focus()`, which activates the app ignoring other apps without changing the
+  policy.
+- **Shortcuts without a menu bar**: an accessory app shows no menu bar, so the window answers Cmd+W
+  (close the window) and Cmd+Q (quit) itself (`lib/shortcuts.ts`); the editing shortcuts (Cmd+C /
+  Cmd+V / Cmd+X / Cmd+A / Cmd+Z) go through the runtime host's built-in Edit menu.
 - **Closing the window closes it**: the window is destroyed, not hidden, and Fleet keeps running in
   the tray (`desktop.app.keepAlive`). Polling, the webhook listener, the MCP files, the event log
   and notifications go on with no window (at the hidden poll rate). Opening Fleet again makes a
   fresh window that rebuilds everything from the backend's snapshot and log, at the size and place
   the last one had (`desktop.window.key` / `windows.open({ key: "fleet" })`, saved in the app's
   `windows.json`). Opening while a window is open brings that one to the front, never a second.
-- **What opens it**: the tray (a click, or Open Fleet), a Dock click while the icon shows, launching
-  Fleet again (single instance), or a click on one of Fleet's notifications (also the click that
-  launched it).
-- **Quit** only through a real quit: Cmd+Q, the tray's Quit Fleet, or logging out.
+- **What opens it**: the tray (a click, or Open Fleet), opening Fleet again from Finder or
+  Launchpad, launching it again (single instance), or a click on one of Fleet's notifications (also
+  the click that launched it).
+- **Quit** only through a real quit: Cmd+Q in the window, the tray's Quit Fleet, or logging out.
 - **The icon**: a macOS template icon (status by shape) or colour art on Windows / Linux; red when a
   pool is unhealthy or a job has been queued over 15 min (a wait on a pool with every slot busy
   doesn't count, see Queued lanes). The tooltip is "N running · M queued" plus the reasons. A click
@@ -405,7 +411,8 @@ this repo.
 | `lib/agent-snapshot.ts`                | The agents' `snapshot.json`, built from the poller's state                                               |
 | `lib/agent-files.ts`                   | The agent files' names, shared with the MCP server                                                       |
 | `lib/deno-host.ts`                     | gh, the data files, native notifications                                                                 |
-| `lib/tray-driver.ts`                   | Tray, window manager (open / close, Dock icon), start at login                                           |
+| `lib/tray-driver.ts`                   | Tray, window manager (open / close / focus, never a Dock icon), start at login                           |
+| `lib/shortcuts.ts`                     | Cmd+W / Cmd+Q in the window (an accessory app has no menu bar)                                           |
 | `lib/icons.ts`, `png.ts`               | The tray and app icons, drawn in code (`denext task icons`)                                              |
 | `mcp/fleet-mcp.ts`, `mcp/queries.ts`   | The read-only MCP server for agents (stdio) and its tools' answers                                       |
 | `app/`                                 | The page: `fleet-app.tsx` (state), `fleet-view.tsx`, `event-log.tsx`, `controls.tsx`, `token-screen.tsx` |

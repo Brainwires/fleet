@@ -6,6 +6,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "denext";
 import { onDesktopEvent } from "denext/desktop/client";
+import { closeWindow, quitApp } from "denext/desktop/window";
 import { openExternal } from "denext/mobile";
 import { type FleetEvent, LOG_LIMIT, mergeEvents } from "../lib/events.ts";
 import type { Snapshot } from "../lib/model.ts";
@@ -15,6 +16,7 @@ import { type ControlRequest, DispatchPanel, type PoolRequest } from "./controls
 import type { ControlResult } from "../lib/control-runner.ts";
 import { TokenScreen } from "./token-screen.tsx";
 import { visibleClock } from "./visible-clock.ts";
+import { windowShortcut } from "../lib/shortcuts.ts";
 
 /** How often the page reads the (in-process) snapshot while visible. */
 const READ_MS = 5000;
@@ -87,6 +89,20 @@ export function FleetApp() {
 
   useEffect(() => {
     void fleet.capabilities().then((c) => setPools(c.pools)).catch(() => {});
+  }, []);
+
+  // Cmd+W closes the window and Cmd+Q quits (macOS): an accessory app has no menu bar to own them.
+  useEffect(() => {
+    const mac = /Mac/.test(navigator.userAgent);
+    const onKey = (e: KeyboardEvent) => {
+      const shortcut = windowShortcut(e, mac);
+      if (!shortcut) return;
+      e.preventDefault();
+      const done = shortcut === "close" ? closeWindow() : quitApp();
+      void done.catch((err) => console.error("fleet: shortcut:", errorText(err)));
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
   }, []);
 
   useEffect(() => {

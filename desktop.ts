@@ -5,7 +5,7 @@
 // else closed; the close button closes the window for good (`desktop.app.keepAlive` keeps the app
 // up with none: denext's src/desktop/app-windows.ts `applyKeepAlive` turns the runtime's
 // `quitOnLastWindowClosed` off, and window-registry.ts `closed` ends the app only without it), and
-// the tray, the Dock, a second launch or a notification click opens a fresh one. Only Quit quits.
+// the tray, a reopen, a second launch or a notification click opens a fresh one. Only Quit quits.
 import config from "./.deno-desktop/config.json" with { type: "json" };
 import { resolveDesktopCapabilities, runDesktop } from "denext/desktop";
 import { fleetService } from "./desktop/fleet.ts";
@@ -43,8 +43,9 @@ const openWindow = () => {
 const app = await runDesktop({
   importMetaUrl: import.meta.url,
   ...(await resolveDesktopCapabilities(config, { base: import.meta.url })),
-  // A Dock click with no window showing, and a second launch (singleInstance): Fleet's window,
-  // through the manager (Dock icon, close tracking), so the runtime opens nothing itself.
+  // A reopen (Fleet opened again from Finder or Launchpad while it runs; it has no Dock icon) and a
+  // second launch (singleInstance): Fleet's window, through the manager (close tracking), so the
+  // runtime opens nothing itself.
   onDockReopen: () => (openWindow(), undefined),
   onSecondInstance: () => (openWindow(), undefined),
 });
@@ -78,7 +79,6 @@ const manager = createWindowManager({
     } catch { /* a runtime without it */ }
     return w satisfies FleetWindow;
   },
-  setActivationPolicy: (p) => app.setActivationPolicy(p),
 }, {
   onChange: () => tray?.refreshMenu(),
   // No page reads now: the backend polls at the hidden rate until a window opens again. With no
