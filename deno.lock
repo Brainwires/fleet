@@ -1455,7 +1455,8 @@
   "workspace": {
     "dependencies": [
       "jsr:@denext/denext@^4.16.0",
-      "jsr:@std/assert@1"
+      "jsr:@std/assert@1",
+      "jsr:@std/path@1"
     ]
   }
 }

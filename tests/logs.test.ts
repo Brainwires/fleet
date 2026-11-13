@@ -19,6 +19,7 @@ import {
   schedulerLineFor,
 } from "../lib/runner-logs.ts";
 import {
+  directChildOf,
   launcherForJob,
   launcherPath,
   listLauncherLogs,
@@ -273,6 +274,9 @@ Deno.test("reads: only a pool's own launcher logs inside jobs/, no paths, no sym
     assertEquals(await launcherPath(dir, "linux-x64", "mac-arm-1-1794551969.log"), null);
     assertEquals(await launcherPath(dir, "mac-arm", "../scheduler.log"), null);
     assertEquals(await launcherPath(dir, "mac-arm", "jobs/mac-arm-1-1794551969.log"), null);
+    assertEquals(await launcherPath(dir, "mac-arm", "jobs\\mac-arm-1-1794551969.log"), null);
+    assertEquals(await launcherPath(dir, "mac-arm", "mac-arm-1-1794551969.log:x"), null);
+    assertEquals(await launcherPath(dir, "mac:arm", "mac:arm-1-1794551969.log"), null);
     const outside = await Deno.makeTempFile();
     await Deno.symlink(outside, `${dir}/jobs/mac-arm-9-1794550000.log`);
     assertEquals(await launcherPath(dir, "mac-arm", "mac-arm-9-1794550000.log"), null);
@@ -309,6 +313,25 @@ Deno.test("reads: a pool's launcher logs, its scheduler / alert lines, a job's l
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
+});
+
+Deno.test("reads: the containment check takes the OS's separator, a direct child only", () => {
+  // POSIX.
+  assert(directChildOf("/l/jobs/a-1-1794551969.log", "/l/jobs", "/"));
+  assert(directChildOf("/l/jobs/a-1-1794551969.log", "/l/jobs/", "/"));
+  assertFalse(directChildOf("/l/jobs-evil/a.log", "/l/jobs", "/"), "a sibling with the prefix");
+  assertFalse(directChildOf("/l/jobs/sub/a.log", "/l/jobs", "/"), "a nested file");
+  assertFalse(directChildOf("/l/scheduler.log", "/l/jobs", "/"));
+  assertFalse(directChildOf("/l/jobs/", "/l/jobs", "/"), "the folder itself");
+  // Windows: what Deno.realPath answers there.
+  assert(directChildOf("C:\\l\\jobs\\a-1-1794551969.log", "C:\\l\\jobs", "\\"));
+  assertFalse(directChildOf("C:\\l\\jobs-evil\\a.log", "C:\\l\\jobs", "\\"));
+  assertFalse(directChildOf("C:\\l\\jobs\\sub\\a.log", "C:\\l\\jobs", "\\"));
+  assertFalse(directChildOf("C:\\l\\jobs\\sub/a.log", "C:\\l\\jobs", "\\"));
+  assertFalse(directChildOf("D:\\other\\a.log", "C:\\l\\jobs", "\\"));
+  // A Windows path never passes the POSIX check, nor the reverse.
+  assertFalse(directChildOf("C:\\l\\jobs\\a.log", "C:\\l\\jobs", "/"));
+  assertFalse(directChildOf("/l/jobs/a.log", "/l/jobs", "\\"));
 });
 
 // ---- GitHub job logs ----

@@ -4,10 +4,11 @@
 import "./fixture-settings.ts";
 
 import { assertEquals, assertStringIncludes } from "@std/assert";
+import { fromFileUrl } from "@std/path";
 import { createTestApp, createTestClient } from "denext/testing";
 
 Deno.test("app: / renders the shell; the stylesheet and fonts are served from the app", async () => {
-  await using app = await createTestApp(new URL("../", import.meta.url).pathname);
+  await using app = await createTestApp(fromFileUrl(new URL("../", import.meta.url)));
   const client = createTestClient(app);
   const page = await client.get("/");
   assertEquals(page.status, 200);

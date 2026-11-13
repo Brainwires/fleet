@@ -20,8 +20,10 @@ const INTERNAL = internalGrants();
 export default {
   desktop: {
     // A .dmg on macOS; a .zip on Windows (an .msi needs WiX, which runs on Windows only, and the
-    // Windows build is cross-packaged from the Mac: `--target-os windows`, `--arch x86_64`).
-    installers: { macos: ["dmg"], linux: [], windows: ["zip"] },
+    // Windows build is cross-packaged from the Mac: `--target-os windows`, `--arch x86_64`); a
+    // .tar.gz and a .deb on Linux (both written by denext, no tool needed). An empty list would
+    // build only the bundle directory.
+    installers: { macos: ["dmg"], linux: ["tar.gz", "deb"], windows: ["zip"] },
     app: {
       name: "Fleet",
       identifier: "dev.brainwires.fleet",
