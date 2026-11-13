@@ -12,6 +12,9 @@ import {
   NOTIFIER_BUNDLE,
   notifierExecutableIn,
   notifierIdentifier,
+  notifierStamp,
+  type RegisterDeps,
+  registerNotifier,
   watchdogNotifies,
 } from "../lib/notifier.ts";
 import { pendingNotifications } from "../lib/notify.ts";
@@ -62,6 +65,67 @@ Deno.test("notifier: the watchdog notifies here only beside the scheduler, from 
     }),
     false,
   );
+});
+
+// ---- registration with LaunchServices (lib/notifier.ts registerNotifier) ----
+
+/** A fake machine: one helper build (mtime), a stamp file, the lsregister calls. */
+function fakeMachine(over: Partial<RegisterDeps> & { mtimeMs?: number | null } = {}) {
+  const calls: string[] = [];
+  let stamp: string | null = null;
+  const deps: RegisterDeps = {
+    os: "darwin",
+    execPath: "/Users/u/Applications/Fleet.app/Contents/MacOS/laufey_webview",
+    mtime: () => Promise.resolve(over.mtimeMs === undefined ? 1000 : over.mtimeMs),
+    readStamp: () => Promise.resolve(stamp),
+    writeStamp: (s) => {
+      stamp = s;
+      return Promise.resolve();
+    },
+    lsregister: (b) => {
+      calls.push(b);
+      return Promise.resolve(true);
+    },
+    ...over,
+  };
+  return { deps, calls, stamp: () => stamp };
+}
+
+const HELPER = "/Users/u/Applications/Fleet.app/Contents/Helpers/Fleet Notifier.app";
+
+Deno.test("notifier registration: lsregister -f once per helper build", async () => {
+  const m = fakeMachine();
+  assertEquals(await registerNotifier(m.deps), true);
+  assertEquals(m.calls, [HELPER]);
+  assertEquals(m.stamp(), notifierStamp(HELPER, 1000));
+  // The next launch, same build: nothing.
+  assertEquals(await registerNotifier(m.deps), false);
+  assertEquals(m.calls.length, 1);
+  // A new build (another mtime): registered again.
+  const next = { ...m.deps, mtime: () => Promise.resolve(2000) };
+  assertEquals(await registerNotifier(next), true);
+  assertEquals(m.calls.length, 2);
+  assertEquals(m.stamp(), notifierStamp(HELPER, 2000));
+});
+
+Deno.test("notifier registration: nothing off macOS, outside a bundle, or without the helper", async () => {
+  for (
+    const over of [
+      { os: "linux" },
+      { execPath: "/tmp/denext-desktop/Fleet" },
+      { mtimeMs: null },
+    ] as const
+  ) {
+    const m = fakeMachine(over);
+    assertEquals(await registerNotifier(m.deps), false);
+    assertEquals(m.calls, []);
+  }
+});
+
+Deno.test("notifier registration: a failed lsregister writes no stamp (retried next launch)", async () => {
+  const m = fakeMachine({ lsregister: () => Promise.resolve(false) });
+  assertEquals(await registerNotifier(m.deps), false);
+  assertEquals(m.stamp(), null);
 });
 
 // ---- Fleet's dedupe (lib/notify.ts) ----

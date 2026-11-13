@@ -14,6 +14,7 @@ import {
   loadState,
   postNotification,
   readJournal,
+  registerNotifierHelper,
   saveAgentSnapshot,
   saveHistory,
   saveLog,
@@ -74,6 +75,9 @@ function start(host: DesktopExtensionHost): void {
   if (service) return;
   extHost = host;
   const dir = host.appSupportDir;
+  // The embedded Fleet Notifier, registered with LaunchServices once per build (a ditto install
+  // doesn't), so the watchdog's first post gets its permission prompt.
+  void registerNotifierHelper(dir);
   service = createFleetService({
     ghToken: () => ghToken(),
     secrets: host.secureStore,

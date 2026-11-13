@@ -306,13 +306,22 @@ an untitled script). The runner watchdog's `alert_notify` uses it:
   --title T --body B [--subtitle S] [--id KEY] [--url fleet:LINK] [--dry-run]
 ```
 
+**First run: allow its notifications.** After installing a new Fleet, open Fleet once: it registers
+the helper with LaunchServices (a `ditto` or Finder copy registers only Fleet.app itself, and the
+notification center refuses an unregistered helper with no prompt; the helper also registers itself
+when it finds itself unknown). Then post once by hand, for example
+`"$HOME/Applications/Fleet.app/Contents/Helpers/Fleet Notifier.app/Contents/MacOS/fleet-notify" --title Test --body "Allow me"`:
+macOS asks whether **Fleet Notifier** may send notifications, and the command waits up to 60 s for
+the answer. Choose **Allow** (to change it later: System Settings > Notifications > Fleet Notifier).
+Until it is allowed, every post exits 3.
+
 `--id` replaces an earlier notification with the same id (the watchdog passes its condition key). It
-exits once the post is accepted, within 2 s: 0 posted, 1 not accepted, 3 not authorized (it asks for
-permission once; System Settings > Notifications > Fleet Notifier), 4 bad arguments. `--dry-run`
-validates and prints the notification as JSON, posting nothing. A click runs
-`open -b <Fleet's id> --args --show-window`: a running Fleet opens its window (a reopen), a stopped
-one starts with it shown. Fleet has no deep links yet, so `--url` is kept in the notification but
-not acted on.
+exits once the post is accepted, within 2 s once allowed (the first run waits up to 60 s for the
+permission prompt's answer): 0 posted, 1 not accepted, 3 not authorized (denied, or the prompt not
+answered in time), 4 bad arguments. `--dry-run` validates and prints the notification as JSON,
+posting nothing. A click runs `open -b <Fleet's id> --args --show-window`: a running Fleet opens its
+window (a reopen), a stopped one starts with it shown. Fleet has no deep links yet, so `--url` is
+kept in the notification but not acted on.
 
 Where the watchdog notifies through the helper (the runner scheduler integration is configured and
 this bundle embeds it), Fleet leaves out its own "queued over 15 min" notice for a self-hosted

@@ -49,3 +49,50 @@ export function watchdogNotifies(
     return false;
   }
 }
+
+/** LaunchServices' registration tool (macOS), by absolute path: baked as Fleet's `--allow-run`. */
+export const LSREGISTER =
+  "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister";
+
+/** The data-folder file recording which helper build Fleet registered. */
+export const NOTIFIER_STAMP_FILE = "fleet-notifier-registered";
+
+/** A helper build's stamp: its bundle path and its executable's mtime (a new build, a move). */
+export function notifierStamp(helperBundle: string, mtimeMs: number): string {
+  return `${helperBundle}\t${Math.round(mtimeMs)}`;
+}
+
+/** What {@linkcode registerNotifier} needs from the machine. */
+export interface RegisterDeps {
+  readonly os: string;
+  readonly execPath: string;
+  /** The executable's mtime (ms), or `null` when it is missing. */
+  readonly mtime: (path: string) => Promise<number | null>;
+  readonly readStamp: () => Promise<string | null>;
+  readonly writeStamp: (stamp: string) => Promise<void>;
+  /** Run `lsregister -f <bundle>`; whether it succeeded. */
+  readonly lsregister: (bundle: string) => Promise<boolean>;
+}
+
+/**
+ * Register Fleet's embedded helper with LaunchServices once per helper build. A `ditto` / `cp`
+ * install registers only the outer Fleet.app, and the notification center refuses an app
+ * LaunchServices doesn't know: the helper's post fails with exit 3 and its permission prompt
+ * never appears. The helper also registers itself when it finds itself unknown; this covers it
+ * before the first post. Best effort: a failure is retried at the next launch.
+ *
+ * @returns Whether `lsregister` ran.
+ */
+export async function registerNotifier(deps: RegisterDeps): Promise<boolean> {
+  if (deps.os !== "darwin") return false;
+  const app = appBundleOf(deps.execPath);
+  if (!app) return false;
+  const bundle = `${app}/${NOTIFIER_HELPER_DIR}/${NOTIFIER_BUNDLE}`;
+  const mtime = await deps.mtime(notifierExecutableIn(app));
+  if (mtime === null) return false;
+  const stamp = notifierStamp(bundle, mtime);
+  if ((await deps.readStamp())?.trim() === stamp) return false;
+  if (!(await deps.lsregister(bundle))) return false;
+  await deps.writeStamp(stamp);
+  return true;
+}

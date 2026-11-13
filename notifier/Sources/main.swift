@@ -3,7 +3,9 @@
 //
 //   fleet-notify --title T --body B [--subtitle S] [--id KEY] [--url fleet:LINK] [--dry-run]
 //
-// Post mode exits once the post is accepted (or after DEADLINE). A click launches the helper with
+// Post mode exits once the post is accepted: within 2 s once authorized; the first run waits up to
+// 60 s for the answer to the one-time permission prompt. A helper LaunchServices doesn't know
+// registers its own bundle first (a `ditto` install doesn't). A click launches the helper with
 // no arguments; the notification response reaches the delegate set before launch finishes, Fleet
 // is opened (`open -b <Fleet's id>`), and the helper quits.
 
@@ -11,8 +13,6 @@ import AppKit
 import Foundation
 import UserNotifications
 
-/// The whole post, authorization included, is given this long.
-let DEADLINE: TimeInterval = 1.8
 /// A click launch with no response by then (someone opened the helper by hand): quit.
 let CLICK_WAIT: TimeInterval = 5
 
@@ -32,15 +32,83 @@ func authStatus(_ s: UNAuthorizationStatus) -> AuthStatus {
   }
 }
 
+/// Register the helper's own bundle with LaunchServices when it knows no app for its id: a `ditto`
+/// install registers only the outer Fleet.app, and the notification center refuses an app
+/// LaunchServices doesn't know (exit 3, and no prompt ever appears). `LSRegisterURL`, else
+/// `lsregister -f` on the bundle.
+func registerIfNeeded() {
+  let bundle = Bundle.main.bundleURL
+  let registered = Bundle.main.bundleIdentifier.flatMap {
+    NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0)
+  }
+  guard needsRegistration(registeredURL: registered, ownBundlePath: bundle.path) else { return }
+  if LSRegisterURL(bundle as CFURL, true) == noErr { return }
+  let p = Process()
+  p.executableURL = URL(
+    fileURLWithPath:
+      "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/"
+      + "LaunchServices.framework/Versions/A/Support/lsregister")
+  p.arguments = ["-f", bundle.path]
+  p.standardOutput = FileHandle.nullDevice
+  p.standardError = FileHandle.nullDevice
+  try? p.run()
+  p.waitUntilExit()
+}
+
+/// Seconds on the monotonic clock.
+func monotonicNow() -> TimeInterval { TimeInterval(DispatchTime.now().uptimeNanoseconds) / 1e9 }
+
+/// Wait for `sem` until `deadline` (monotonicNow()); false when the wait ran out.
+func wait(_ sem: DispatchSemaphore, until deadline: TimeInterval) -> Bool {
+  sem.wait(timeout: .now() + max(0, deadline - monotonicNow())) == .success
+}
+
 func post(_ r: PostRequest) -> Never {
+  let start = monotonicNow()
+  registerIfNeeded()
   let center = UNUserNotificationCenter.current()
   // A click that lands while this process still runs comes here, not to a new launch.
   let presenter = NotificationDelegate(quitAfterClick: false)
   center.delegate = presenter
-  let done = DispatchSemaphore(value: 0)
-  nonisolated(unsafe) var result: ExitCode = .failed
-  nonisolated(unsafe) var message: String? = "the post was not accepted within \(DEADLINE) s"
 
+  // 1. The authorization state (within the 1.8 s budget).
+  let gotSettings = DispatchSemaphore(value: 0)
+  nonisolated(unsafe) var status: AuthStatus = .denied
+  center.getNotificationSettings { settings in
+    status = authStatus(settings.authorizationStatus)
+    gotSettings.signal()
+  }
+  guard wait(gotSettings, until: phaseDeadline(.settings, start: start)) else {
+    let (code, m) = timeoutOutcome(.settings)
+    fail(code, m)
+  }
+
+  // 2. The one-time prompt, while undetermined: wait for the user's answer (up to 60 s).
+  var answeredAt: TimeInterval? = nil
+  switch authStep(status) {
+  case .post: break
+  case .refuse:
+    fail(.notAuthorized, "notifications are off for Fleet Notifier (System Settings > Notifications)")
+  case .request:
+    let promptStart = monotonicNow()
+    let answered = DispatchSemaphore(value: 0)
+    nonisolated(unsafe) var granted = false
+    center.requestAuthorization(options: [.alert, .sound]) { ok, _ in
+      granted = ok
+      answered.signal()
+    }
+    guard wait(answered, until: phaseDeadline(.prompt, start: start, promptStart: promptStart))
+    else {
+      let (code, m) = timeoutOutcome(.prompt)
+      fail(code, m)
+    }
+    guard promptOutcome(granted: granted) != nil else {
+      fail(.notAuthorized, "notifications were not allowed for Fleet Notifier")
+    }
+    answeredAt = monotonicNow()
+  }
+
+  // 3. The post (1.8 s from the start, or from the prompt's answer).
   let content = UNMutableNotificationContent()
   content.title = r.title
   content.body = r.body
@@ -51,47 +119,21 @@ func post(_ r: PostRequest) -> Never {
   if let url = r.url { info["url"] = url }
   content.userInfo = info
   let identifier = r.id ?? UUID().uuidString
-
-  let add = {
-    // A delivered notification with the same id goes first: the new one replaces it.
-    if r.id != nil { center.removeDeliveredNotifications(withIdentifiers: [identifier]) }
-    center.add(UNNotificationRequest(identifier: identifier, content: content, trigger: nil)) {
-      err in
-      if let err {
-        result = .failed
-        message = "the system refused the post: \(err.localizedDescription)"
-      } else {
-        result = .posted
-        message = nil
-      }
-      done.signal()
-    }
+  // A delivered notification with the same id goes first: the new one replaces it.
+  if r.id != nil { center.removeDeliveredNotifications(withIdentifiers: [identifier]) }
+  let added = DispatchSemaphore(value: 0)
+  nonisolated(unsafe) var refused: String? = nil
+  center.add(UNNotificationRequest(identifier: identifier, content: content, trigger: nil)) { err in
+    if let err { refused = "the system refused the post: \(err.localizedDescription)" }
+    added.signal()
   }
-  center.getNotificationSettings { settings in
-    switch authStep(authStatus(settings.authorizationStatus)) {
-    case .post: add()
-    case .refuse:
-      result = .notAuthorized
-      message = "notifications are off for Fleet Notifier (System Settings > Notifications)"
-      done.signal()
-    case .request:
-      // The one-time system prompt. Not answered within the deadline: exit 3; the answer is kept.
-      result = .notAuthorized
-      message = "waiting for the notification permission prompt to be answered"
-      center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
-        if granted {
-          add()
-        } else {
-          message = "notifications were not allowed for Fleet Notifier"
-          done.signal()
-        }
-      }
-    }
+  guard wait(added, until: phaseDeadline(.add, start: start, promptAnswered: answeredAt)) else {
+    let (code, m) = timeoutOutcome(.add)
+    fail(code, m)
   }
-  _ = done.wait(timeout: .now() + DEADLINE)
   withExtendedLifetime(presenter) {}
-  if result == .posted { exit(0) }
-  fail(result, message)
+  if let refused { fail(.failed, refused) }
+  exit(ExitCode.posted.rawValue)
 }
 
 /// Open Fleet (`open -b <Fleet's id>`), its window up.

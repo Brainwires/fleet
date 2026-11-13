@@ -94,5 +94,29 @@ check(
   describe(PostRequest(title: "T", body: "B", id: "k")), #"{"body":"B","id":"k","title":"T"}"#,
   "dry-run JSON")
 
+// The waits: an authorized post shares 1.8 s from the start; the prompt waits 60 s for the answer;
+// after an answer the post gets 1.8 s of its own.
+check(phaseDeadline(.settings, start: 100), 101.8, "settings: start + 1.8")
+check(phaseDeadline(.add, start: 100), 101.8, "add, authorized: the same 1.8 s from the start")
+check(phaseDeadline(.prompt, start: 100, promptStart: 100.2), 160.2, "prompt: 60 s from asking")
+check(
+  phaseDeadline(.add, start: 100, promptStart: 100.2, promptAnswered: 130), 131.8,
+  "add after the prompt: 1.8 s from the answer")
+check(postBudget < 2, true, "an authorized post exits within 2 s")
+check(promptBudget, 60, "the prompt waits about 60 s")
+check(timeoutOutcome(.prompt).0, .notAuthorized, "an unanswered prompt exits 3")
+check(timeoutOutcome(.settings).0, .failed, "slow settings exit 1")
+check(timeoutOutcome(.add).0, .failed, "a slow post exits 1")
+check(promptOutcome(granted: true), .add, "granted: post")
+check(promptOutcome(granted: false), nil, "denied: exit 3")
+
+// LaunchServices: register only when it knows no app for the id, and only a bundle.
+let own = "/Users/u/Applications/Fleet.app/Contents/Helpers/Fleet Notifier.app"
+check(needsRegistration(registeredURL: nil, ownBundlePath: own), true, "unregistered: register")
+check(
+  needsRegistration(registeredURL: URL(fileURLWithPath: own), ownBundlePath: own), false,
+  "registered: nothing to do")
+check(needsRegistration(registeredURL: nil, ownBundlePath: "/tmp/fleet-notify"), false, "not a bundle")
+
 print("\(checks - failures)/\(checks) checks passed")
 exit(failures == 0 ? 0 : 1)

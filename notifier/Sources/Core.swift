@@ -156,3 +156,62 @@ func fleetIdentifier(plistValue: String?, ownIdentifier: String?) -> String? {
 func openCommand(fleetId: String) -> [String] {
   ["/usr/bin/open", "-b", fleetId, "--args", "--show-window"]
 }
+
+// MARK: The post's waits
+
+/// Reading the authorization state and posting share this budget, from the start (or from the
+/// moment the one-time prompt was answered): an authorized post exits within 2 s.
+let postBudget: TimeInterval = 1.8
+/// The one-time permission prompt waits this long for the user's answer.
+let promptBudget: TimeInterval = 60
+
+/// A step of a post that waits on the notification center.
+enum PostPhase: Equatable {
+  /// Reading the authorization state.
+  case settings
+  /// The one-time permission prompt (status notDetermined).
+  case prompt
+  /// Adding the notification.
+  case add
+}
+
+/// When `phase`'s wait ends (seconds on one clock). `start` is when the post began; `promptStart`
+/// when the prompt was asked; `promptAnswered` when the user answered it (none: no prompt).
+func phaseDeadline(
+  _ phase: PostPhase, start: TimeInterval, promptStart: TimeInterval? = nil,
+  promptAnswered: TimeInterval? = nil
+) -> TimeInterval {
+  switch phase {
+  case .settings: return start + postBudget
+  case .prompt: return (promptStart ?? start) + promptBudget
+  case .add: return (promptAnswered ?? start) + postBudget
+  }
+}
+
+/// The exit when `phase`'s wait ran out: an unanswered prompt is "not authorized" (3); a slow
+/// notification center is "not accepted" (1).
+func timeoutOutcome(_ phase: PostPhase) -> (ExitCode, String) {
+  switch phase {
+  case .prompt:
+    return (
+      .notAuthorized,
+      "the notification permission prompt was not answered within \(Int(promptBudget)) s"
+    )
+  case .settings: return (.failed, "the notification settings did not arrive within \(postBudget) s")
+  case .add: return (.failed, "the post was not accepted within \(postBudget) s")
+  }
+}
+
+/// After the prompt: granted goes on to post; refused exits 3.
+func promptOutcome(granted: Bool) -> PostPhase? {
+  granted ? .add : nil
+}
+
+// MARK: LaunchServices
+
+/// Whether the helper must register its own bundle: LaunchServices has no app for its bundle id
+/// (a `ditto` / `cp` install registers the outer app only), and without that the notification
+/// center refuses it, with no prompt. Only a bundle (`….app`) is registered.
+func needsRegistration(registeredURL: URL?, ownBundlePath: String) -> Bool {
+  registeredURL == nil && ownBundlePath.hasSuffix(".app")
+}
