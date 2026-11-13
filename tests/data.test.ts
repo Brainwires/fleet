@@ -22,11 +22,11 @@ import { HEALTH_STALE_MS, parsePoolHealth } from "../lib/health.ts";
 import { formatAgo, formatDuration } from "../lib/format.ts";
 import { pendingNotifications } from "../lib/notify.ts";
 import { Poller } from "../lib/poller.ts";
-import { poolFromLabels, poolFromRunnerName } from "../lib/pools.ts";
+import { currentPools, poolFromLabels, poolFromRunnerName, setPools } from "../lib/pools.ts";
 import { cleanToken, createFleetService, TOKEN_KEY } from "../lib/service.ts";
 import { encodePng } from "../lib/png.ts";
 import type { PoolCard, Snapshot } from "../lib/model.ts";
-import { markCapacityWaits, summarize } from "../lib/snapshot.ts";
+import { markCapacityWaits, poolCards, summarize } from "../lib/snapshot.ts";
 import { ciRunId, fakeFetch, fixture, NOW, standardRoutes } from "./helpers.ts";
 
 const job = (over: Partial<GhJob>): GhJob => ({
@@ -823,4 +823,50 @@ Deno.test("capacity wait: a paused, unhealthy or unknown pool is still a fault",
     assertEquals(jobWarning(rows[0], NOW), "queued-long", state);
     assertEquals(summary.severity, "alert", state);
   }
+});
+
+// ---- capacity waits on pools that share one machine ----
+
+function sharedHostCase(busyA: number, busyB: number) {
+  const prev = currentPools();
+  const mk = (id: string, host?: string) => ({
+    id,
+    label: `l-${id}`,
+    runnerPrefix: `${id}-`,
+    slots: 3,
+    ...(host ? { host } : {}),
+  });
+  setPools([mk("linux-x64", "biscuits"), mk("linux-arm", "biscuits"), mk("mac")]);
+  try {
+    const cards = poolCards([], [], { state: "unavailable", message: "" } as never, null);
+    const a = cards.find((c) => c.id === "linux-x64")!;
+    const b = cards.find((c) => c.id === "linux-arm")!;
+    return {
+      a: { ...a, state: "ok" as const, busy: busyA, queued: 1 },
+      b: { ...b, state: "ok" as const, busy: busyB },
+      mac: { ...cards.find((c) => c.id === "mac")!, state: "ok" as const, busy: 1 },
+    };
+  } finally {
+    setPools(prev);
+  }
+}
+
+Deno.test("shared host: pools on one machine report host load", () => {
+  const { a, mac } = sharedHostCase(0, 0);
+  assertEquals([a.host, a.hostSlots], ["biscuits", 3]);
+  assertEquals(mac.host, undefined);
+});
+
+Deno.test("shared host: host full is a capacity wait even when the pool reads 2/3", () => {
+  const { a, b } = sharedHostCase(2, 1);
+  const full = { ...a, hostBusy: 3, hostSlots: 3 };
+  assert(poolIsFull(full));
+  assertFalse(poolIsFull({ ...b, busy: 0, hostBusy: 2, hostSlots: 3 }));
+});
+
+Deno.test("shared host: a free slot on the host is still a fault; no host unchanged", () => {
+  const { a } = sharedHostCase(2, 0);
+  assertFalse(poolIsFull({ ...a, hostBusy: 2, hostSlots: 3 }));
+  assertFalse(poolIsFull(card({ slots: 3, busy: 2 })));
+  assert(poolIsFull(card({ slots: 3, busy: 3 })));
 });

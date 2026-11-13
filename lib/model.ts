@@ -91,6 +91,13 @@ export interface PoolCard {
   readonly since: number | null;
   /** The oldest queued job's `created_at`, or `null` with nothing queued. */
   readonly oldestQueuedSince: number | null;
+  /**
+   * Pools that share one machine (settings `host`): the machine's name, busy slots summed over its
+   * pools and its shared capacity (the largest slot count among them). Absent: a machine of its own.
+   */
+  readonly host?: string;
+  readonly hostBusy?: number;
+  readonly hostSlots?: number;
 }
 
 /** A job that finished in the last 30 minutes. */

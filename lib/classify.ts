@@ -117,9 +117,15 @@ export function jobAge(since: number, now: number): number {
 }
 
 /** A self-hosted pool that is ok with every slot busy: its queue is waiting for capacity. */
-export function poolIsFull(p: Pick<PoolCard, "id" | "state" | "slots" | "busy">): boolean {
-  return p.id !== GITHUB_POOL && p.state === "ok" && p.slots !== null && p.slots > 0 &&
-    p.busy >= p.slots;
+export function poolIsFull(
+  p:
+    & Pick<PoolCard, "id" | "state" | "slots" | "busy">
+    & Partial<Pick<PoolCard, "hostBusy" | "hostSlots">>,
+): boolean {
+  if (p.id === GITHUB_POOL || p.state !== "ok" || p.slots === null || p.slots <= 0) return false;
+  if (p.busy >= p.slots) return true;
+  // Pools sharing one machine share its capacity: the host being full fills each of them.
+  return p.hostSlots !== undefined && p.hostSlots > 0 && (p.hostBusy ?? 0) >= p.hostSlots;
 }
 
 /** A row's warning at `now`. */

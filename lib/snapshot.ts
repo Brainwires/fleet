@@ -142,6 +142,23 @@ export function poolCards(
       oldestQueuedSince: q.length ? Math.min(...q.map((r) => r.since)) : null,
     };
   });
+  // Pools that share a machine share its capacity: sum their busy slots against the largest slot count.
+  const hostOf = (id: string) => defs.find((p) => p.id === id)?.host;
+  const byHost = new Map<string, PoolCard[]>();
+  for (const c of cards) {
+    const hn = hostOf(c.id);
+    if (hn) byHost.set(hn, [...(byHost.get(hn) ?? []), c]);
+  }
+  for (const [hn, group] of byHost) {
+    const caps = group.map((c) => c.slots).filter((s): s is number => s !== null && s > 0);
+    if (group.length < 2 || caps.length === 0) continue;
+    const info = {
+      host: hn,
+      hostBusy: group.reduce((n, c) => n + c.busy, 0),
+      hostSlots: Math.max(...caps),
+    };
+    for (const c of group) cards[cards.indexOf(c)] = { ...c, ...info };
+  }
   const ghRun = running.filter((r) => r.pool === GITHUB_POOL).length;
   const ghQ = queued.filter((r) => r.pool === GITHUB_POOL);
   cards.push({
@@ -193,7 +210,19 @@ export function summarize(
     reasons.push(`${late} job${late === 1 ? "" : "s"} queued over 15 min`);
   }
   const waiting = queued.filter((r) => jobWarning(r, now) === "queued-capacity").length;
-  if (waiting) reasons.push(`${waiting} waiting for capacity`);
+  if (waiting) {
+    const hosts = new Map<string, string>();
+    for (const p of pools) {
+      if (p.host && p.hostSlots !== undefined && poolIsFull(p)) {
+        hosts.set(p.host, `${p.host} ${p.hostBusy}/${p.hostSlots}`);
+      }
+    }
+    reasons.push(
+      `${waiting} waiting for capacity${
+        hosts.size ? ` (host ${[...hosts.values()].join(", ")})` : ""
+      }`,
+    );
+  }
   const slow = running.filter((r) => jobWarning(r, now) === "over-usual").length;
   if (slow) {
     raise("warn");

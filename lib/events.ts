@@ -302,12 +302,21 @@ function jobPoolFull(job: GhJob, health: HealthState): boolean {
   const label = currentPools().find((p) => p.id === c.pool)?.label ?? c.pool;
   const h = health.doc.hosts?.[c.pool] ?? health.doc.pools[label];
   if (!h) return false;
-  return poolIsFull({
-    id: c.pool,
-    state: !h.ok ? "unhealthy" : h.paused ? "paused" : "ok",
-    slots: h.slots,
-    busy: h.busy ?? 0,
-  });
+  const state = !h.ok ? "unhealthy" : h.paused ? "paused" : "ok";
+  // Pools sharing one machine (settings `host`) share its capacity.
+  const defs = currentPools();
+  const host = defs.find((p) => p.id === c.pool)?.host;
+  const mates = host ? defs.filter((p) => p.host === host) : [];
+  let shared: { hostBusy: number; hostSlots: number } | undefined;
+  if (mates.length > 1) {
+    const hs = mates.map((p) => health.doc.hosts?.[p.id] ?? health.doc.pools[p.label]);
+    const caps = hs.map((x) => x?.slots ?? 0);
+    shared = {
+      hostBusy: hs.reduce((n, x) => n + (x?.busy ?? 0), 0),
+      hostSlots: Math.max(...caps),
+    };
+  }
+  return poolIsFull({ id: c.pool, state, slots: h.slots, busy: h.busy ?? 0, ...shared });
 }
 
 /** A job late right now: running past STALL_MS, or queued with no runner past QUEUE_LONG_MS. */

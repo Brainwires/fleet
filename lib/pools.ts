@@ -26,6 +26,8 @@ export interface PoolDef {
   readonly runnerPrefix: string;
   /** The pool's own slot count (`null`: unknown). */
   readonly slots: number | null;
+  /** The machine it shares with other pools (settings `host`), when named. */
+  readonly host?: string;
 }
 
 /** The seed pools (the runner scheduler integration's declared ones), in card order. */
@@ -38,6 +40,7 @@ export function seedPools(): PoolDef[] {
     runnerPrefix: p.runnerPrefix ??
       (sched.runnerNamePrefix ? `${sched.runnerNamePrefix}${p.id}-` : ""),
     slots: p.slots ?? null,
+    ...(p.host ? { host: p.host } : {}),
   }));
 }
 
@@ -209,6 +212,10 @@ export function derivePools(
   const known = new Map(seed.map((p) => [p.id, p]));
   const prefix = namePrefix();
   const prefixOf = (id: string) => known.get(id)?.runnerPrefix ?? (prefix ? `${prefix}${id}-` : "");
+  const hostOf = (id: string) => {
+    const host = known.get(id)?.host;
+    return host ? { host } : {};
+  };
   const hosts = Object.entries(doc.hosts ?? {});
   if (hosts.length > 0) {
     const out: PoolDef[] = [];
@@ -220,6 +227,7 @@ export function derivePools(
         label,
         runnerPrefix: h.runnerPrefix ?? prefixOf(id),
         slots: h.slots ?? known.get(id)?.slots ?? null,
+        ...hostOf(id),
       });
     }
     return out;
@@ -248,6 +256,7 @@ export function derivePools(
         slots: ids.length === 1
           ? merged.slots ?? known.get(id)?.slots ?? null
           : known.get(id)?.slots ?? null,
+        ...hostOf(id),
       });
     }
   }

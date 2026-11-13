@@ -193,7 +193,14 @@ function PoolCardView(
   const waited = pool.oldestQueuedSince === null ? null : now - pool.oldestQueuedSince;
   const lateQueue = waited !== null && waited > 15 * 60_000;
   const lateClass = lateQueue ? (poolIsFull(pool) ? " is-capacity" : " is-late") : "";
-  const load = pool.slots === null ? "" : `${pool.busy}/${pool.slots}`;
+  const hostFull = poolIsFull(pool) && pool.busy < (pool.slots ?? 0);
+  const load = pool.slots === null
+    ? ""
+    : `${pool.busy}/${pool.slots}${
+      pool.host && pool.hostSlots !== undefined
+        ? ` · host ${pool.hostBusy}/${pool.hostSlots}${hostFull ? " full" : ""}`
+        : ""
+    }`;
   // A self-hosted card stays compact; its busy runners open on demand (the card widens).
   const expanded = github || (open && runners.length > 0);
   const Tag = github ? "div" : "li";
