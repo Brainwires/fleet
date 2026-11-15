@@ -129,10 +129,9 @@ with `~/`.
   fresh window that rebuilds everything from the backend's snapshot and log, at the size and place
   the last one had (`desktop.window.key` / `windows.open({ key: "fleet" })`, saved in the app's
   `windows.json`). Opening while a window is open brings that one to the front, never a second.
-- **What opens it**: the tray (a click, or Open Fleet), a click on its Dock icon (the Dock
-  helper's, while the window is open), opening Fleet again from Finder or Launchpad, launching it
-  again (single instance), or a click on one of Fleet's notifications (also the click that
-  launched it).
+- **What opens it**: the tray (a click, or Open Fleet), a click on its Dock icon (the Dock helper's,
+  while the window is open), opening Fleet again from Finder or Launchpad, launching it again
+  (single instance), or a click on one of Fleet's notifications (also the click that launched it).
 - **Quit** only through the tray's Quit Fleet, or the OS's logout / restart / shut down.
 - **The icon**: a macOS template icon (status by shape) or colour art on Windows / Linux; red when a
   pool is unhealthy or a job has been queued over 15 min (a wait on a pool with every slot busy

@@ -15,8 +15,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Same version as the `jsr:@denext/denext@^4.16.0` pin in deno.json.
-  DENEXT_VERSION: v4.16.0
+  # Same version as the `jsr:@denext/denext@^4.18.0` pin in deno.json.
+  DENEXT_VERSION: v4.18.0
   DENO_DIR: ${{ github.workspace }}/../deno-dir
 
 jobs:

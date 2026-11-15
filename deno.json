@@ -1,19 +1,24 @@
 {
   "version": "0.1.0",
   "tasks": {
-    "dev": "deno run -A jsr:@denext/denext@^4.16.0/cli dev .",
-    "export": "deno run -A jsr:@denext/denext@^4.16.0/cli export .",
-    "desktop": "deno run -A jsr:@denext/denext@^4.16.0/cli desktop run .",
-    "desktop:build": "deno run -A jsr:@denext/denext@^4.16.0/cli desktop build .",
-    "desktop:package": "deno run -A jsr:@denext/denext@^4.16.0/cli desktop package .",
-    "desktop:package:internal": "FLEET_INTERNAL=1 deno run -A jsr:@denext/denext@^4.16.0/cli desktop package .",
-    "desktop:package:windows": "deno run -A jsr:@denext/denext@^4.16.0/cli run -A scripts/package-windows.ts --arch x86_64",
-    "test": "deno run -A jsr:@denext/denext@^4.16.0/cli test",
+    "dev": "deno run -A jsr:@denext/denext@^4.18.0/cli dev .",
+    "export": "deno run -A jsr:@denext/denext@^4.18.0/cli export .",
+    "desktop": "deno run -A jsr:@denext/denext@^4.18.0/cli desktop run .",
+    "desktop:build": "deno run -A jsr:@denext/denext@^4.18.0/cli desktop build .",
+    "desktop:package": "deno run -A jsr:@denext/denext@^4.18.0/cli desktop package .",
+    "desktop:package:internal": "FLEET_INTERNAL=1 deno run -A jsr:@denext/denext@^4.18.0/cli desktop package .",
+    "desktop:package:windows": "deno run -A jsr:@denext/denext@^4.18.0/cli run -A scripts/package-windows.ts --arch x86_64",
+    "test": "deno run -A jsr:@denext/denext@^4.18.0/cli test",
     "check": "deno fmt --check && deno lint && deno task test",
     "icons": "deno run --allow-write=icons,public tools/make-icons.ts",
     "hooks": "deno run --allow-net=127.0.0.1 --allow-run=/usr/bin/security --allow-env=HOME \"--allow-read=$HOME/Library/Application Support/dev.brainwires.fleet,$HOME/Library/LaunchAgents,/Library/LaunchAgents,/Library/LaunchDaemons\" \"--allow-write=$HOME/Library/Application Support/dev.brainwires.fleet\" hooks-only.ts --settings \"$HOME/Library/Application Support/dev.brainwires.fleet/fleet-settings.json\"",
     "mcp": "deno run --no-config --no-prompt \"--allow-read=$HOME/Library/Application Support/dev.brainwires.fleet\" mcp/fleet-mcp.ts --data-dir \"$HOME/Library/Application Support/dev.brainwires.fleet\"",
     "stream": "deno run --no-config --no-prompt \"--allow-read=$HOME/Library/Application Support/dev.brainwires.fleet\" --allow-net=127.0.0.1 mcp/fleet-stream.ts --data-dir \"$HOME/Library/Application Support/dev.brainwires.fleet\""
+  },
+  "minimumDependencyAge": {
+    "exclude": [
+      "jsr:@denext/denext"
+    ]
   },
   "allowScripts": {
     "deny": [
@@ -35,22 +40,22 @@
     ]
   },
   "imports": {
-    "denext": "jsr:@denext/denext@^4.16.0",
-    "denext/jsx-runtime": "jsr:@denext/denext@^4.16.0/jsx-runtime",
-    "denext/jsx-dev-runtime": "jsr:@denext/denext@^4.16.0/jsx-dev-runtime",
-    "denext/server": "jsr:@denext/denext@^4.16.0/server",
-    "denext/client": "jsr:@denext/denext@^4.16.0/client",
-    "denext/testing": "jsr:@denext/denext@^4.16.0/testing",
-    "denext/mobile": "jsr:@denext/denext@^4.16.0/mobile",
-    "denext/desktop": "jsr:@denext/denext@^4.16.0/desktop",
-    "denext/desktop/client": "jsr:@denext/denext@^4.16.0/desktop/client",
-    "denext/desktop/window": "jsr:@denext/denext@^4.16.0/desktop/window",
+    "denext": "jsr:@denext/denext@^4.18.0",
+    "denext/jsx-runtime": "jsr:@denext/denext@^4.18.0/jsx-runtime",
+    "denext/jsx-dev-runtime": "jsr:@denext/denext@^4.18.0/jsx-dev-runtime",
+    "denext/server": "jsr:@denext/denext@^4.18.0/server",
+    "denext/client": "jsr:@denext/denext@^4.18.0/client",
+    "denext/testing": "jsr:@denext/denext@^4.18.0/testing",
+    "denext/mobile": "jsr:@denext/denext@^4.18.0/mobile",
+    "denext/desktop": "jsr:@denext/denext@^4.18.0/desktop",
+    "denext/desktop/client": "jsr:@denext/denext@^4.18.0/desktop/client",
+    "denext/desktop/window": "jsr:@denext/denext@^4.18.0/desktop/window",
     "@std/assert": "jsr:@std/assert@^1",
     "@std/path": "jsr:@std/path@^1"
   },
   "lint": {
     "plugins": [
-      "jsr:@denext/denext@^4.16.0/lint-plugin"
+      "jsr:@denext/denext@^4.18.0/lint-plugin"
     ]
   },
   "fmt": {
