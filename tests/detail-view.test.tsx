@@ -420,3 +420,43 @@ Deno.test("detail: Esc returns to the dashboard", async () => {
   await screen.fireEvent.keyDown(all(screen.container, ".detail")[0], { key: "Escape" });
   assertEquals(back, 1);
 });
+
+const tabsOf = (root: TestElement) =>
+  all(root, "button").filter((b) => b.getAttribute("role") === "tab");
+
+Deno.test("pool detail: reports its tab on mount and on a change, and reopens on a given one", async () => {
+  const tabs: string[] = [];
+  const screen = await render(
+    <PoolDetailView
+      pool="mac-arm"
+      detail={detailOf("mac-arm")}
+      range="1h"
+      onRange={() => {}}
+      onBack={() => {}}
+      onOpen={() => {}}
+      now={T0}
+      onTab={(t) => void tabs.push(t)}
+    />,
+  );
+  await screen.act(() => new Promise((r) => setTimeout(r, 0)));
+  assertEquals(tabs, ["usage"]);
+  const logsTab = tabsOf(screen.container).find((b) => /log/i.test(text(b)))!;
+  await screen.fireEvent.click(logsTab);
+  assertEquals(tabs.at(-1), "logs");
+  const restored = await render(
+    <PoolDetailView
+      pool="mac-arm"
+      detail={detailOf("mac-arm")}
+      range="1h"
+      onRange={() => {}}
+      onBack={() => {}}
+      onOpen={() => {}}
+      now={T0}
+      initialTab="logs"
+    />,
+  );
+  const active = tabsOf(restored.container).find((b) =>
+    b.getAttribute("aria-selected") === "true"
+  )!;
+  assertEquals(/log/i.test(text(active)), true);
+});

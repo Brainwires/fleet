@@ -13,6 +13,7 @@ import { onAppMenuItem, setAppMenu } from "denext/desktop/app";
 import { openExternal } from "denext/mobile";
 import { type FleetEvent, LOG_LIMIT, mergeEvents } from "../lib/events.ts";
 import type { Snapshot } from "../lib/model.ts";
+import { linkStatus } from "../lib/link-status.ts";
 import { CHANGED_EVENT, errorText, fleet } from "./fleet-client.ts";
 import { FleetView } from "./fleet-view.tsx";
 import { type ControlRequest, DispatchPanel, type PoolRequest } from "./controls.tsx";
@@ -25,6 +26,13 @@ import { browserShortcut, windowShortcut } from "../lib/shortcuts.ts";
 import { GitHubBrowser, isGitHubUrl } from "./web-panel/github-browser.ts";
 import { GitHubPanel } from "./web-panel/github-panel.tsx";
 import { connectBrowserMenu } from "./web-panel/browser-menu.ts";
+import {
+  captureScroll,
+  type DetailTab,
+  type PanelOrigin,
+  restoreOrigin,
+  type ScrollRoot,
+} from "./web-panel/origin.ts";
 import { type LogsApi, PoolDetailView } from "./pool-detail.tsx";
 import type { PoolDetail } from "../lib/pool-detail.ts";
 import type { HistoryRange } from "../lib/history.ts";
@@ -55,6 +63,21 @@ function takeKeyboardBack(): void {
   const active = document.activeElement;
   if (active && active !== document.body) return;
   document.querySelector<HTMLElement>(".webpanel")?.focus();
+}
+
+/** Run `fn` once the page has laid out again (two animation frames). */
+function afterLayout(fn: () => void): void {
+  if (typeof requestAnimationFrame !== "function") return void setTimeout(fn, 0);
+  requestAnimationFrame(() => requestAnimationFrame(fn));
+}
+
+/** The page's scrollers a link's origin keeps: the document's and the main view's. */
+function scrollRoots(): (ScrollRoot | null)[] {
+  if (typeof document === "undefined" || typeof document.querySelector !== "function") return [];
+  return [
+    document.scrollingElement as ScrollRoot | null,
+    document.querySelector<HTMLElement>(".main-host") as ScrollRoot | null,
+  ];
 }
 
 /** Whether the window shows: visible, or focused (insurance for an engine slow to flip visibility). */
@@ -102,9 +125,25 @@ export function FleetApp() {
   const [range, setRange] = useState<HistoryRange>("24h");
   const [detail, setDetail] = useState<PoolDetail | null>(null);
   const [detailError, setDetailError] = useState("");
-  /** The in-app GitHub browser (one web view for the page's life) and what its panel shows. */
+  /** The pool detail screen's tab (kept, so a screen restored from the GitHub panel reopens on it). */
+  const [detailTab, setDetailTab] = useState<DetailTab>("usage");
+  /** The latest snapshot, for the panel's reopen rule (a link's run / job status). */
+  const snapNow = useRef<Snapshot | null>(null);
+  snapNow.current = snap;
+  /** The in-app GitHub browser (one web view for the page's life) and what its panel shows. Back
+   * from a link's first page (or Esc, or the Fleet button) restores the screen the link came from. */
   const [browser] = useState(() =>
-    new GitHubBrowser({ openExternal, onViewBlur: takeKeyboardBack })
+    new GitHubBrowser<PanelOrigin>({
+      openExternal,
+      onViewBlur: takeKeyboardBack,
+      linkStatus: (url) => linkStatus(snapNow.current, url),
+      onReturn: (origin) =>
+        restoreOrigin(
+          origin,
+          { setPool: setDetailPool, setRange, setTab: setDetailTab },
+          afterLayout,
+        ),
+    })
   );
   const [web, setWeb] = useState(browser.state);
   useEffect(() => {
@@ -116,8 +155,15 @@ export function FleetApp() {
       browser.dispose();
     };
   }, [browser]);
+  /** The screen showing now: a link's origin. */
+  const screenNow = useRef({ pool: detailPool, range, tab: detailTab });
+  screenNow.current = { pool: detailPool, range, tab: detailTab };
   /** A GitHub link from the main view: the panel, or the system browser without web views. */
-  const openUrl = useCallback((url: string) => void browser.open(url), [browser]);
+  const openUrl = useCallback(
+    (url: string) =>
+      void browser.open(url, { ...screenNow.current, scroll: captureScroll(scrollRoots()) }),
+    [browser],
+  );
 
   /** Run a control: the backend checks it and asks in a system dialog; show its outcome. */
   const act = useCallback(async (call: () => Promise<ControlResult>) => {
@@ -339,6 +385,8 @@ export function FleetApp() {
       <PoolDetailView
         key={detailPool}
         pool={detailPool}
+        initialTab={detailTab}
+        onTab={setDetailTab}
         detail={detail && detail.pool === detailPool ? detail : null}
         range={range}
         onRange={setRange}
@@ -382,7 +430,10 @@ export function FleetApp() {
       refreshing={refreshing}
       events={events}
       onSettings={() => setScreen("settings")}
-      onPoolDetail={(pool) => setDetailPool(pool)}
+      onPoolDetail={(pool) => {
+        setDetailTab("usage");
+        setDetailPool(pool);
+      }}
       controls={{
         onControl: (c: ControlRequest) => void act(() => fleet.control(c)),
         ...(pools.pools

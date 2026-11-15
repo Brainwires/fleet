@@ -218,10 +218,23 @@ browser instead.
 - **Toolbar**: Back, Forward, Reload, **Fleet** (back to the main view), the page's title and URL,
   and **Open in browser** (the current page in the system browser). A bar under the toolbar shows
   while a page loads; a failed load shows its error there.
-- **One view, kept**: every GitHub link navigates the same view. Leaving the panel hides the view
-  without closing it, so the next link reopens it at once; it closes when the window does. The view
-  is hidden while the wizard, the Settings view or the token screen replaces the main view (a native
-  view draws above all of the page's HTML).
+- **Never blank**: the view stays hidden until the link's page has loaded; meanwhile the panel shows
+  its own loading state (a spinner and the page's URL). A new link in the reused view hides it
+  first, so neither a blank page nor the previous link's page shows.
+- **Back to Fleet**: Back (the button, Cmd+[ or the Go menu) on the link's own page closes the panel
+  and returns to the screen the link was clicked on: the dashboard or that pool's detail screen,
+  with its range, tab and scroll position. Further in, Back steps through GitHub's pages as usual.
+  Esc and **Fleet** return to the same screen.
+- **One view, kept**: every GitHub link uses the same view. Leaving the panel hides the view without
+  closing it; it closes when the window does. The view is hidden while the wizard, the Settings view
+  or the token screen replaces the main view (a native view draws above all of the page's HTML).
+- **Reopen where you left it**: clicking the same link again reopens the panel at once on the page
+  and history you were on (Back then returns to the screen you clicked from this time). A hidden
+  page can miss live updates, so it reloads in place (same URL, `#step` links included, history
+  kept; the loading bar only if the reload is slow) when Fleet's data says the run or job is still
+  queued or running, or finished while the panel was hidden. A finished run or job reopens as it
+  was. A page Fleet knows no status for reloads if the panel was hidden for more than 30 seconds.
+  Another link always starts fresh.
 - **Session**: the view keeps its cookies in its own persistent storage partition (`fleet-github`,
   apart from Fleet's page), so a GitHub sign-in survives restarts. Pop-ups open in the same view,
   downloads go to the system browser, and camera, microphone, location and notification prompts are
@@ -764,7 +777,8 @@ this repo.
 | `lib/tray-driver.ts`                   | Tray, window manager (open / close / focus, never regular), start at login                               |
 | `lib/quit-guard.ts`                    | Which quits quit: the tray's Quit and the session end; any other closes to the tray                      |
 | `lib/shortcuts.ts`                     | Cmd+W / Cmd+Q in the window close it (an accessory app has no menu bar)                                  |
-| `app/web-panel/`                       | The in-app GitHub browser: the web view adapter (`engine.ts`), the browser, its panel and app menu       |
+| `app/web-panel/`                       | The in-app GitHub browser: web view adapter, browser, reveal gate, history, reopen rule, panel, menu     |
+| `lib/link-status.ts`                   | A run / job link's status from the snapshot (the panel's reopen rule)                                    |
 | `lib/icons.ts`, `png.ts`               | The tray and app icons, drawn in code (`denext task icons`)                                              |
 | `mcp/fleet-mcp.ts`, `mcp/queries.ts`   | The read-only MCP server for agents (stdio) and its tools' answers                                       |
 | `lib/stream.ts`, `stream-format.ts`    | The loopback event stream (SSE / WebSocket): filters, replay, guards, backpressure; its wire messages    |

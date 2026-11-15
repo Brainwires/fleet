@@ -3,13 +3,14 @@
 // Forward (Cmd+]) are menu items (CommandOrControl: Ctrl off macOS). Esc is not one: an accelerator
 // would take Esc from GitHub's own dialogs and menus, so Esc returns to Fleet only from Fleet's page.
 //
+// Back is enabled while the panel can step back or return to the Fleet screen the link came from.
 // Fleet sets no menu until the panel first opens (until then the host's default menu stays, as
 // before). The menu it sets keeps the editing roles that default menu carried (copy, paste, …, for
 // Fleet's fields and GitHub's page alike). The items are enabled only while the panel shows and its
 // history allows, so the keys reach the focused page otherwise.
 
 import type { AppMenuItem } from "denext/desktop/app";
-import type { BrowserCommand, BrowserState, GitHubBrowser } from "./github-browser.ts";
+import type { BrowserCommand, BrowserControls, BrowserState } from "./github-browser.ts";
 
 export const MENU_BACK = "fleet-browser-back";
 export const MENU_FORWARD = "fleet-browser-forward";
@@ -22,7 +23,7 @@ export interface AppMenuApi {
 
 /** The menu for `state`. */
 export function browserMenu(
-  state: Pick<BrowserState, "open" | "canGoBack" | "canGoForward">,
+  state: Pick<BrowserState, "open" | "canGoBack" | "canGoForward" | "canReturn">,
   mac: boolean,
 ): AppMenuItem[] {
   const edit: AppMenuItem = {
@@ -44,7 +45,7 @@ export function browserMenu(
         id: MENU_BACK,
         label: "Back",
         accelerator: "CommandOrControl+[",
-        disabled: !(state.open && state.canGoBack),
+        disabled: !(state.open && (state.canGoBack || state.canReturn)),
       },
       {
         id: MENU_FORWARD,
@@ -63,7 +64,7 @@ export function browserMenu(
  * Forward change, their clicks and accelerators run the browser's commands. Returns the stop.
  */
 export function connectBrowserMenu(
-  browser: GitHubBrowser,
+  browser: BrowserControls,
   api: AppMenuApi,
   mac: boolean,
 ): () => void {

@@ -8,6 +8,20 @@
 // the token screen) stops following and hides the view, which stays open for a quick reopen, on the
 // page it was on. `dispose` closes it.
 //
+// Never blank: the view shows only once the page a link asked for has loaded (reveal-gate.ts). A new
+// view requests its page at creation, hidden; a reused one is hidden, then navigated. Until the
+// load, the panel shows its own loading state (`waiting`) under the hidden view.
+//
+// Back to Fleet: each link opens with its origin (the Fleet screen it was clicked on). Back from the
+// link's own page (panel-history.ts), like Esc and the Fleet button, closes the panel and hands the
+// origin to `onReturn`, which restores that screen.
+//
+// Reopen where you left it: the same link again (after a return to Fleet) shows the view at once on
+// the page and history the user left, with the new click's screen as Back's target. Whether that
+// page reloads in place as it reappears follows the link's run / job status (reopen-policy.ts);
+// a reload keeps the URL (a `#step:N:L` hash too) and the history, and shows the loading bar only
+// if it takes longer than QUIET_RELOAD_MS. Another link always starts fresh.
+//
 // Staying on GitHub: denext's `desktop.webViews.allowedOrigins` (denext.config.ts) limits what Fleet
 // itself loads (`createWebView`, `navigate`) to github.com, but not the links the user follows in the
 // view. A main-frame load off GitHub's site (github.com and its subdomains, over https: a README's
@@ -18,8 +32,12 @@ import {
   nativeWebViews,
   type WebViewAnchor,
   type WebViewApi,
+  type WebViewEventMap,
   type WebViewHandle,
 } from "./engine.ts";
+import { PanelHistory } from "./panel-history.ts";
+import { RevealGate } from "./reveal-gate.ts";
+import { type LinkStatus, reloadOnReopen } from "./reopen-policy.ts";
 
 /** Only these URLs open at all (Fleet's links are GitHub's). */
 const GITHUB_PREFIX = "https://github.com/";
@@ -27,6 +45,10 @@ const GITHUB_PREFIX = "https://github.com/";
 export const GITHUB_PARTITION = "fleet-github";
 /** The same command from the page and the app menu this close together is one key press. */
 const DUPLICATE_MS = 300;
+/** The longest a link's page may take to load before the view shows anyway. */
+const REVEAL_FALLBACK_MS = 10_000;
+/** A quiet reload shows the loading bar only after this long. */
+const QUIET_RELOAD_MS = 300;
 
 /** The site the view stays on: github.com (sign-in, 2FA and passkeys too) and its subdomains. */
 const GITHUB_HOST = "github.com";
@@ -64,21 +86,36 @@ export interface BrowserState {
   readonly canGoForward: boolean;
   /** The native view has the keyboard (Fleet's page gets no keys then). */
   readonly viewFocused: boolean;
+  /** The view is hidden until the link's page loads (the panel shows its loading state). */
+  readonly waiting: boolean;
+  /** The panel has a Fleet screen to return to (Back from the link's own page goes there). */
+  readonly canReturn: boolean;
 }
 
 /** A toolbar / keyboard / menu command. */
 export type BrowserCommand = "back" | "forward" | "reload" | "home" | "external";
 
+/** What the panel and the app menu drive (any origin type). */
+export type BrowserControls = Pick<GitHubBrowser, "command" | "setAnchor" | "subscribe">;
+
 /** Where a link went. */
 export type OpenOutcome = "panel" | "browser" | "refused";
 
-export interface GitHubBrowserDeps {
+export interface GitHubBrowserDeps<O = unknown> {
   /** The system browser (denext/mobile `openExternal`). */
   openExternal(url: string): Promise<unknown>;
   /** The web view API, or `null` without one (default: feature-detected). */
   webViews?: () => Promise<WebViewApi | null>;
   /** The view lost the keyboard: the page should take it back (focus its own element). */
   onViewBlur?: () => void;
+  /** The panel closed back to Fleet: restore the screen the link was opened from. */
+  onReturn?: (origin: O) => void;
+  /** At most this long hidden waiting for a page before the view shows anyway (0: no limit). */
+  revealFallbackMs?: number;
+  /** A link's run / job status from Fleet's snapshot (default: unknown). */
+  linkStatus?: (url: string) => LinkStatus;
+  /** How long a stale page's reload stays quiet before the loading bar shows. */
+  quietReloadMs?: number;
   now?: () => number;
 }
 
@@ -91,10 +128,12 @@ const CLOSED_STATE: BrowserState = {
   canGoBack: false,
   canGoForward: false,
   viewFocused: false,
+  waiting: false,
+  canReturn: false,
 };
 
-export class GitHubBrowser {
-  #deps: GitHubBrowserDeps;
+export class GitHubBrowser<O = unknown> {
+  #deps: GitHubBrowserDeps<O>;
   #state: BrowserState = CLOSED_STATE;
   #listeners = new Set<(s: BrowserState) => void>();
   #api: Promise<WebViewApi | null> | null = null;
@@ -110,9 +149,27 @@ export class GitHubBrowser {
   #handedOff = "";
   /** The view committed an off-GitHub page and is on its way back (its title is not shown). */
   #offPage = false;
+  /** The Fleet screen the open link came from. */
+  #origin: { value: O } | null = null;
+  #history = new PanelHistory();
+  #gate: RevealGate;
+  /** The link the current (or last) panel session opened. */
+  #link = "";
+  /** When the panel last went back to Fleet, and its link's status then. */
+  #hiddenAt = 0;
+  #statusAtHide: LinkStatus = null;
+  /** A stale page's reload, quiet until its timer shows the loading bar. */
+  #quiet: ReturnType<typeof setTimeout> | undefined;
 
-  constructor(deps: GitHubBrowserDeps) {
+  constructor(deps: GitHubBrowserDeps<O>) {
     this.#deps = deps;
+    this.#gate = new RevealGate({
+      fallbackMs: deps.revealFallbackMs ?? REVEAL_FALLBACK_MS,
+      onReveal: () => {
+        this.#set({ waiting: false });
+        this.#show();
+      },
+    });
   }
 
   get state(): BrowserState {
@@ -150,7 +207,7 @@ export class GitHubBrowser {
    * Open a GitHub link: in the panel when this window hosts web views (navigating the one view when
    * it is already open), else in the system browser. Anything off GitHub is refused.
    */
-  async open(url: string): Promise<OpenOutcome> {
+  async open(url: string, ...origin: [O] | []): Promise<OpenOutcome> {
     if (!isGitHubUrl(url)) return "refused";
     const api = await this.#webViews();
     if (!api) {
@@ -158,9 +215,15 @@ export class GitHubBrowser {
       return "browser";
     }
     const existing = this.#view;
+    if (existing && url === this.#link && this.#gate.open && !this.#state.open) {
+      this.#resume(existing, origin);
+      return "panel";
+    }
     if (existing) {
-      this.#set({ open: true, url, error: null });
-      this.#show();
+      // Hidden first, so neither the page it was on nor a blank one shows; shown on the new load.
+      this.#hide();
+      this.#gate.close(false);
+      this.#begin(url, origin);
       void existing.navigate(url).catch((err) => this.#failed(err));
       return "panel";
     }
@@ -169,9 +232,60 @@ export class GitHubBrowser {
       this.#external(url);
       return "browser";
     }
-    this.#set({ open: true, url, error: null, loading: true });
-    this.#show();
+    this.#begin(url, origin);
     return "panel";
+  }
+
+  /** The same link again: the view as the user left it, shown at once (reloaded if stale). */
+  #resume(view: WebViewHandle, origin: [O] | []): void {
+    this.#origin = origin.length > 0 ? { value: origin[0] as O } : null;
+    const stale = reloadOnReopen(
+      this.#statusAtHide,
+      this.#status(this.#link),
+      this.#now() - this.#hiddenAt,
+    );
+    this.#set({ open: true, error: null, waiting: false, canReturn: this.#origin !== null });
+    this.#show();
+    if (!stale) return;
+    this.#endQuiet();
+    this.#quiet = setTimeout(() => {
+      this.#quiet = undefined;
+      this.#set({ loading: true });
+    }, this.#deps.quietReloadMs ?? QUIET_RELOAD_MS);
+    this.#history.expect("reload");
+    void view.reload().catch((err) => this.#failed(err));
+  }
+
+  /** The quiet reload finished (or the panel moved on): no loading bar for it any more. */
+  #endQuiet(): void {
+    if (this.#quiet !== undefined) clearTimeout(this.#quiet);
+    this.#quiet = undefined;
+  }
+
+  #status(url: string): LinkStatus {
+    return this.#deps.linkStatus?.(url) ?? null;
+  }
+
+  #now(): number {
+    return (this.#deps.now ?? Date.now)();
+  }
+
+  /** A link's panel session starts: its origin, its history, the toolbar waiting for its page. */
+  #begin(url: string, origin: [O] | []): void {
+    this.#endQuiet();
+    this.#link = url;
+    this.#origin = origin.length > 0 ? { value: origin[0] as O } : null;
+    this.#history.reset();
+    this.#set({
+      open: true,
+      url,
+      title: "",
+      error: null,
+      loading: true,
+      waiting: this.#gate.waiting,
+      canReturn: this.#origin !== null,
+    });
+    this.#show();
   }
 
   /** The view, created once (a second open while it is being created waits for the same one). */
@@ -187,6 +301,8 @@ export class GitHubBrowser {
       permissions: "deny",
     }).then((view) => {
       this.#view = view;
+      // The page was requested at creation (hidden); its "loading" may come before this listener.
+      this.#gate.close(true);
       this.#listen(view);
       return view;
     }, (err) => {
@@ -207,20 +323,13 @@ export class GitHubBrowser {
     });
     view.on("url", ({ url, canGoBack, canGoForward }) => {
       if (!staysInView(url)) return this.#leaveGitHub(view, url, true, canGoBack);
+      this.#history.committed();
       this.#lastGitHub = url;
       this.#handedOff = "";
       this.#offPage = false;
       this.#set({ url, canGoBack, canGoForward });
     });
-    view.on("load", ({ state, url, error }) => {
-      if (state === "loading" && url && !staysInView(url)) {
-        return this.#leaveGitHub(view, url, false, false);
-      }
-      if (state === "loading") this.#set({ loading: true, error: null });
-      else if (state === "failed") {
-        this.#set({ loading: false, error: error?.message || "The page did not load." });
-      } else if (state === "complete") this.#set({ loading: false });
-    });
+    view.on("load", (e) => this.#onLoad(view, e));
     view.on("focus-change", ({ focused }) => {
       this.#set({ viewFocused: focused });
       if (!focused) this.#deps.onViewBlur?.();
@@ -229,8 +338,28 @@ export class GitHubBrowser {
       if (this.#view !== view) return;
       this.#view = null;
       this.#detach = null;
+      this.#gate.cancel();
+      this.#endQuiet();
+      this.#link = "";
       this.#set(CLOSED_STATE);
     });
+  }
+
+  /** A main-frame load event: the reveal gate, the loading bar (quiet for a reopen's reload). */
+  #onLoad(view: WebViewHandle, { state, url, error }: WebViewEventMap["load"]): void {
+    if (state !== "loading") return this.#loadEnded(state, error?.message);
+    if (url && !staysInView(url)) return this.#leaveGitHub(view, url, false, false);
+    this.#gate.load(state);
+    if (this.#quiet === undefined) this.#set({ loading: true, error: null });
+  }
+
+  /** A load reached `state` (the page painted, finished or failed). */
+  #loadEnded(state: "interactive" | "complete" | "failed", error: string | undefined): void {
+    this.#gate.load(state);
+    this.#endQuiet();
+    if (state === "failed") {
+      this.#set({ loading: false, waiting: false, error: error || "The page did not load." });
+    } else if (state === "complete") this.#set({ loading: false });
   }
 
   /**
@@ -246,6 +375,7 @@ export class GitHubBrowser {
     if (!committed) return;
     this.#offPage = true;
     this.#set({ loading: false });
+    this.#history.expect("bounce");
     const back = canGoBack
       ? view.back()
       : this.#lastGitHub
@@ -262,10 +392,12 @@ export class GitHubBrowser {
   #show(): void {
     const view = this.#view;
     if (!view || !this.#anchor || !this.#state.open || this.#covered || this.#detach) return;
+    // Never before the link's page has loaded: no blank view, no previous page.
+    if (!this.#gate.open) return;
     // The API is known here: the view came from it.
     void this.#webViews().then((api) => {
       if (!api || this.#view !== view || this.#detach || !this.#anchor) return;
-      if (!this.#state.open || this.#covered) return;
+      if (!this.#state.open || this.#covered || !this.#gate.open) return;
       this.#detach = api.attachWebView(view, this.#anchor);
     });
   }
@@ -303,13 +435,34 @@ export class GitHubBrowser {
     if (cmd === "external") return this.#openCurrentExternally();
     const view = this.#view;
     if (!view || !this.#state.open) return;
-    const call = cmd === "back" ? view.back() : cmd === "forward" ? view.forward() : view.reload();
-    void call.catch((err) => this.#failed(err));
+    if (cmd === "back") return this.#back(view);
+    if (cmd === "reload") return this.#reload(view);
+    this.#history.expect("forward");
+    void view.forward().catch((err) => this.#failed(err));
+  }
+
+  /** Reload; after a failed first load, the view waits for the reloaded page before showing. */
+  #reload(view: WebViewHandle): void {
+    if (!this.#gate.open) {
+      this.#gate.close(false);
+      this.#set({ waiting: true });
+    }
+    this.#history.expect("reload");
+    void view.reload().catch((err) => this.#failed(err));
+  }
+
+  /** Back: within GitHub, or from the link's own page (or with no history) back to Fleet. */
+  #back(view: WebViewHandle): void {
+    const { canGoBack, canReturn } = this.#state;
+    if ((this.#history.atStart || !canGoBack) && canReturn) return this.home();
+    if (!canGoBack) return;
+    this.#history.expect("back");
+    void view.back().catch((err) => this.#failed(err));
   }
 
   /** Whether `cmd` repeats the other source's same command of a moment ago (records this one). */
   #echo(cmd: BrowserCommand, source: "page" | "menu"): boolean {
-    const at = (this.#deps.now ?? Date.now)();
+    const at = this.#now();
     const last = this.#last;
     if (last && last.cmd === cmd && last.source !== source && at - last.at < DUPLICATE_MS) {
       return true;
@@ -328,7 +481,14 @@ export class GitHubBrowser {
   home(): void {
     if (!this.#state.open) return;
     this.#hide();
-    this.#set({ open: false, viewFocused: false });
+    // A load still pending keeps going hidden; the next link closes the gate again.
+    const origin = this.#origin;
+    this.#origin = null;
+    this.#hiddenAt = this.#now();
+    this.#statusAtHide = this.#status(this.#link);
+    this.#endQuiet();
+    this.#set({ open: false, viewFocused: false, waiting: false, canReturn: false });
+    if (origin) this.#deps.onReturn?.(origin.value);
   }
 
   /** Close the view for good (Fleet's page unmounting). */
@@ -337,6 +497,9 @@ export class GitHubBrowser {
     this.#detach = null;
     const view = this.#view;
     this.#view = null;
+    this.#gate.cancel();
+    this.#endQuiet();
+    this.#link = "";
     this.#set(CLOSED_STATE);
     void view?.close().catch(() => {});
   }

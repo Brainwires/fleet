@@ -20,7 +20,11 @@ import {
   type WebViewEventMap,
   type WebViewHandle,
 } from "../app/web-panel/engine.ts";
-import { GITHUB_PARTITION, GitHubBrowser } from "../app/web-panel/github-browser.ts";
+import {
+  GITHUB_PARTITION,
+  GitHubBrowser,
+  type GitHubBrowserDeps,
+} from "../app/web-panel/github-browser.ts";
 import { GitHubPanel } from "../app/web-panel/github-panel.tsx";
 import {
   browserMenu,
@@ -31,6 +35,12 @@ import {
 import { browserShortcut, type ShortcutKey } from "../lib/shortcuts.ts";
 import config from "../denext.config.ts";
 import { panelCovered } from "../app/fleet-app.tsx";
+import { captureScroll, type PanelOrigin, restoreOrigin } from "../app/web-panel/origin.ts";
+import {
+  type LinkStatus,
+  reloadOnReopen,
+  UNKNOWN_STALE_MS,
+} from "../app/web-panel/reopen-policy.ts";
 
 const tick = () => new Promise<void>((r) => setTimeout(r, 0));
 
@@ -106,16 +116,21 @@ function fakeApi(opts: { supported?: boolean; reject?: unknown } = {}) {
   return { api, view, created, attached, detached: () => detached };
 }
 
-function browserWith(api: WebViewApi | null, extra: { now?: () => number } = {}) {
+function browserWith<O = unknown>(
+  api: WebViewApi | null,
+  extra: Partial<GitHubBrowserDeps<O>> = {},
+) {
   const external: string[] = [];
   let blurs = 0;
-  const browser = new GitHubBrowser({
+  const browser = new GitHubBrowser<O>({
     openExternal: (u) => {
       external.push(u);
       return Promise.resolve();
     },
     webViews: () => nativeWebViews(api ?? {}),
     onViewBlur: () => void blurs++,
+    // No fallback timer in the tests (each says when the page loads).
+    revealFallbackMs: 0,
     ...extra,
   });
   return { browser, external, blurs: () => blurs };
@@ -303,7 +318,7 @@ Deno.test("web panel: GitHub's own site and about:blank stay in the view", async
 // --- the panel ------------------------------------------------------------------------------
 
 /** FleetApp's wiring in small: the browser's state into the panel while it is open. */
-function Harness({ browser }: { browser: GitHubBrowser }) {
+function Harness<O>({ browser }: { browser: GitHubBrowser<O> }) {
   const [state, setState] = useState(browser.state);
   useEffect(() => browser.subscribe(setState), [browser]);
   return state.open ? <GitHubPanel browser={browser} state={state} /> : <p>fleet home</p>;
@@ -329,11 +344,20 @@ const button = (root: TestElement, name: string) =>
   )!;
 const isDisabled = (el: TestElement) => el.getAttribute("disabled") !== null;
 
+/** The link's page loads in `view`: started, committed, painted, finished. */
+function loads(view: FakeView, url = RUN, canGoBack = false) {
+  view.emit("load", { state: "loading", url });
+  view.emit("url", { url, canGoBack, canGoForward: false });
+  view.emit("load", { state: "interactive", url });
+  view.emit("load", { state: "complete", url });
+}
+
 async function openPanel() {
   const f = fakeApi();
   const b = browserWith(f.api);
   await b.browser.open(RUN);
   const screen = await render(<Harness browser={b.browser} />);
+  await screen.act(() => loads(f.view));
   await screen.act(tick);
   return { ...f, ...b, screen };
 }
@@ -440,6 +464,7 @@ Deno.test("web panel: hidden while another screen covers the panel, back after",
   const f = fakeApi();
   const { browser } = browserWith(f.api);
   await browser.open(RUN);
+  loads(f.view);
   browser.setAnchor(ANCHOR);
   await tick();
   assertEquals(f.attached.length, 1);
@@ -459,6 +484,7 @@ Deno.test("web panel: a link opened while covered shows only once uncovered", as
   browser.setAnchor(ANCHOR);
   browser.setCovered(true);
   await browser.open(RUN);
+  loads(f.view);
   await tick();
   assertEquals(f.attached.length, 0);
   browser.setCovered(false);
@@ -501,6 +527,11 @@ Deno.test("web panel keys: one press seen by the page and the app menu steps onc
   const f = fakeApi();
   const { browser } = browserWith(f.api, { now: () => t });
   await browser.open(RUN);
+  loads(f.view);
+  // Three pages further in, so Back steps within GitHub (not back to Fleet).
+  for (const n of [2, 3, 4]) {
+    f.view.emit("url", { url: `${RUN}/job/${n}`, canGoBack: true, canGoForward: false });
+  }
   browser.command("back", "page");
   browser.command("back", "menu");
   assertEquals(f.view.calls.filter((c) => c === "back").length, 1);
@@ -590,7 +621,7 @@ Deno.test("web panel menu: set on first open; Back/Forward accelerators follow t
 Deno.test("web panel menu: keeps the editing roles and never takes Esc", () => {
   for (const mac of [true, false]) {
     const json = JSON.stringify(
-      browserMenu({ open: true, canGoBack: true, canGoForward: true }, mac),
+      browserMenu({ open: true, canGoBack: true, canGoForward: true, canReturn: true }, mac),
     );
     for (const role of ["undo", "redo", "cut", "copy", "paste", "selectAll"]) {
       assert(json.includes(`"role":"${role}"`), role);
@@ -611,4 +642,363 @@ Deno.test("web panel: covered by loading, the wizard, the token screen and Setti
   assertFalse(panelCovered(ok, "settings", "mac-pool"), "a pool screen over Settings shows it");
   assertFalse(panelCovered(ok, "main", null));
   assertFalse(panelCovered(ok, "main", "mac-pool"));
+});
+
+// --- never blank ----------------------------------------------------------------------------
+
+const OTHER = "https://github.com/Brainwires/denext/actions/runs/2";
+
+Deno.test("web panel: a new view requests the page at creation and shows only once it has loaded", async () => {
+  const f = fakeApi();
+  const { browser } = browserWith(f.api);
+  await browser.open(RUN);
+  assertEquals(f.created[0].url, RUN, "the first load is requested at creation");
+  assertEquals(f.created[0].visible, false);
+  browser.setAnchor(ANCHOR);
+  await tick();
+  assert(browser.state.waiting);
+  assertEquals(f.attached.length, 0, "no blank view while the page loads");
+  assertFalse(f.view.calls.includes("setVisible:true"));
+  f.view.emit("load", { state: "loading", url: RUN });
+  f.view.emit("url", { url: RUN, canGoBack: false, canGoForward: false });
+  await tick();
+  assertEquals(f.attached.length, 0, "committed is not painted yet");
+  f.view.emit("load", { state: "interactive", url: RUN });
+  await tick();
+  assertEquals(f.attached.length, 1, "shown on the first paint");
+  assertFalse(browser.state.waiting);
+});
+
+Deno.test("web panel: a different link hides the view, navigates, and shows it on the new load", async () => {
+  const f = fakeApi();
+  const { browser } = browserWith(f.api);
+  await browser.open(RUN);
+  loads(f.view);
+  browser.setAnchor(ANCHOR);
+  await tick();
+  assertEquals(f.attached.length, 1);
+  browser.home();
+  browser.setAnchor(null);
+  f.view.calls = [];
+  await browser.open(OTHER);
+  browser.setAnchor(ANCHOR);
+  await tick();
+  const hide = f.view.calls.indexOf("setVisible:false");
+  const nav = f.view.calls.indexOf(`navigate:${OTHER}`);
+  assert(hide >= 0 && nav > hide, `hidden before navigating: ${f.view.calls.join(", ")}`);
+  assertEquals(f.attached.length, 1, "not shown on the previous page");
+  assert(browser.state.waiting);
+  assertEquals(browser.state.url, OTHER);
+  assertEquals(browser.state.title, "", "no stale title from the previous page");
+  // A late "complete" of the page it was on doesn't count.
+  f.view.emit("load", { state: "complete", url: RUN });
+  await tick();
+  assertEquals(f.attached.length, 1);
+  loads(f.view, OTHER);
+  await tick();
+  assertEquals(f.attached.length, 2, "shown once the new page has loaded");
+});
+
+Deno.test("web panel: a failed first load stays hidden with its error; Reload waits for the page", async () => {
+  const f = fakeApi();
+  const { browser } = browserWith(f.api);
+  await browser.open(RUN);
+  browser.setAnchor(ANCHOR);
+  f.view.emit("load", { state: "loading", url: RUN });
+  f.view.emit("load", {
+    state: "failed",
+    url: RUN,
+    error: { code: "network", message: "offline" },
+  });
+  await tick();
+  assertEquals(f.attached.length, 0);
+  assertEquals(browser.state.error, "offline");
+  assertFalse(browser.state.waiting);
+  browser.command("reload");
+  assert(browser.state.waiting);
+  assert(f.view.calls.includes("reload"));
+  loads(f.view);
+  await tick();
+  assertEquals(f.attached.length, 1);
+});
+
+Deno.test("web panel: Fleet's own loading state shows under the hidden view until the page loads", async () => {
+  const f = fakeApi();
+  const { browser } = browserWith(f.api);
+  await browser.open(RUN);
+  const screen = await render(<Harness browser={browser} />);
+  await screen.act(tick);
+  const wait = byClass(screen.container, "webpanel-wait");
+  assert(wait, "a loading state, not a blank panel");
+  assert((wait.textContent ?? "").includes(RUN));
+  assert(byClass(screen.container, "webpanel-spinner"));
+  await screen.act(() => loads(f.view));
+  assertEquals(byClass(screen.container, "webpanel-wait"), undefined);
+});
+
+Deno.test("web panel: with no load event the view shows after the fallback, with a warning", async () => {
+  const f = fakeApi();
+  const { browser } = browserWith(f.api, { revealFallbackMs: 5 });
+  const warn = console.warn;
+  const warned: string[] = [];
+  console.warn = (m: string) => void warned.push(m);
+  try {
+    await browser.open(RUN);
+    browser.setAnchor(ANCHOR);
+    await new Promise((r) => setTimeout(r, 30));
+  } finally {
+    console.warn = warn;
+  }
+  assertEquals(f.attached.length, 1);
+  assertEquals(warned.length, 1);
+  browser.dispose();
+});
+
+// --- Back returns to Fleet ------------------------------------------------------------------
+
+const DASHBOARD: PanelOrigin = { pool: null, range: "24h", tab: "usage", scroll: [] };
+
+/** A browser whose returns are recorded. */
+function returningBrowser(extra: Partial<GitHubBrowserDeps<PanelOrigin>> = {}) {
+  const f = fakeApi();
+  const returned: PanelOrigin[] = [];
+  const b = browserWith<PanelOrigin>(f.api, { onReturn: (o) => void returned.push(o), ...extra });
+  return { ...f, ...b, returned };
+}
+
+Deno.test("web panel back: from the link's first page restores the dashboard", async () => {
+  const { browser, view, returned } = returningBrowser();
+  await browser.open(RUN, DASHBOARD);
+  // The reused view still has earlier sessions' pages behind it.
+  loads(view, RUN, true);
+  assert(browser.state.canGoBack);
+  browser.command("back");
+  assertFalse(view.calls.includes("back"), "not into an earlier session's pages");
+  assertFalse(browser.state.open);
+  assertEquals(returned, [DASHBOARD]);
+});
+
+Deno.test("web panel back: from the first page restores a pool screen with its range, tab and scroll", async () => {
+  const lane = { scrollTop: 340, scrollLeft: 0 };
+  const page = {
+    scrollTop: 120,
+    scrollLeft: 0,
+    querySelectorAll: () => [lane, { scrollTop: 0, scrollLeft: 0 }],
+  };
+  const origin: PanelOrigin = {
+    pool: "mac-arm",
+    range: "7d",
+    tab: "logs",
+    scroll: captureScroll([page, null]),
+  };
+  assertEquals(origin.scroll.length, 2, "only the scrolled ones");
+  const { browser, view, returned } = returningBrowser();
+  await browser.open(RUN, origin);
+  loads(view);
+  // The main view is display: none under the panel: its scrollers lose their offsets.
+  page.scrollTop = 0;
+  lane.scrollTop = 0;
+  browser.command("back");
+  assertEquals(returned.length, 1);
+  const restored: Record<string, unknown> = {};
+  restoreOrigin(returned[0], {
+    setPool: (p) => void (restored.pool = p),
+    setRange: (r) => void (restored.range = r),
+    setTab: (t) => void (restored.tab = t),
+  }, (fn) => fn());
+  assertEquals(restored, { pool: "mac-arm", range: "7d", tab: "logs" });
+  assertEquals([page.scrollTop, lane.scrollTop], [120, 340]);
+});
+
+Deno.test("web panel back: mid-history goes back within GitHub, then to Fleet", async () => {
+  const { browser, view, returned } = returningBrowser();
+  await browser.open(RUN, DASHBOARD);
+  loads(view);
+  view.emit("url", { url: `${RUN}/job/7`, canGoBack: true, canGoForward: false });
+  browser.command("back");
+  assertEquals(view.calls.filter((c) => c === "back").length, 1, "within GitHub");
+  assert(browser.state.open);
+  assertEquals(returned, []);
+  view.emit("url", { url: RUN, canGoBack: true, canGoForward: true });
+  browser.command("back");
+  assertEquals(view.calls.filter((c) => c === "back").length, 1);
+  assertEquals(returned, [DASHBOARD]);
+});
+
+Deno.test("web panel back: the button stays enabled at the first page while there is a Fleet screen", async () => {
+  const { browser, view } = returningBrowser();
+  await browser.open(RUN, DASHBOARD);
+  const screen = await render(<Harness browser={browser} />);
+  await screen.act(() => loads(view));
+  assertFalse(browser.state.canGoBack);
+  assertFalse(isDisabled(button(screen.container, "Back")));
+  await screen.fireEvent.click(button(screen.container, "Back"));
+  assertFalse(browser.state.open);
+});
+
+Deno.test("web panel back: Esc and the Fleet button restore the origin too", async () => {
+  const { browser, view, returned } = returningBrowser();
+  await browser.open(RUN, DASHBOARD);
+  loads(view);
+  browser.command("home");
+  assertEquals(returned, [DASHBOARD]);
+});
+
+// --- reopen where you left it ---------------------------------------------------------------
+
+Deno.test("web panel reopen: the same link shows at once on the page and history left", async () => {
+  const { browser, view, attached, returned } = returningBrowser();
+  const pool: PanelOrigin = { pool: "mac-arm", range: "24h", tab: "usage", scroll: [] };
+  await browser.open(RUN, DASHBOARD);
+  loads(view);
+  view.emit("url", { url: `${RUN}/job/7`, canGoBack: true, canGoForward: false });
+  view.emit("title", { title: "job 7" });
+  browser.setAnchor(ANCHOR);
+  await tick();
+  browser.command("home");
+  browser.setAnchor(null);
+  view.calls = [];
+  assertEquals(await browser.open(RUN, pool), "panel");
+  browser.setAnchor(ANCHOR);
+  await tick();
+  assertEquals(attached.length, 2, "shown at once");
+  assertFalse(browser.state.waiting, "no loading state");
+  assertFalse(view.calls.some((c) => c.startsWith("navigate") || c === "reload"));
+  assertEquals(browser.state.url, `${RUN}/job/7`);
+  assertEquals(browser.state.title, "job 7");
+  // History intact: Back steps to the run page, then returns to the new click's screen.
+  browser.command("back");
+  assertEquals(view.calls.filter((c) => c === "back").length, 1);
+  view.emit("url", { url: RUN, canGoBack: true, canGoForward: true });
+  browser.command("back");
+  assertEquals(returned, [DASHBOARD, pool], "Back's target is the screen clicked from now");
+});
+
+/** A browser over a link whose run / job status the test sets, on a clock the test moves. */
+function statusBrowser(status: { now: LinkStatus }) {
+  const clock = { t: 1_000_000 };
+  const b = returningBrowser({
+    now: () => clock.t,
+    quietReloadMs: 15,
+    linkStatus: () => status.now,
+  });
+  return { ...b, clock };
+}
+
+const STEP = `${RUN}/job/7#step:4:120`;
+
+/** Open RUN, follow to a job's step, go back to Fleet. */
+async function openAndLeave(b: ReturnType<typeof statusBrowser>) {
+  await b.browser.open(RUN, DASHBOARD);
+  loads(b.view);
+  b.view.emit("url", { url: STEP, canGoBack: true, canGoForward: false });
+  b.browser.setAnchor(ANCHOR);
+  await tick();
+  b.browser.command("home");
+  b.view.calls = [];
+}
+
+Deno.test("web panel reopen: a run in progress reloads in place, keeping the step hash and history", async () => {
+  const status = { now: "live" as LinkStatus };
+  const b = statusBrowser(status);
+  await openAndLeave(b);
+  b.clock.t += 1000;
+  await b.browser.open(RUN, DASHBOARD);
+  await tick();
+  assertEquals(b.view.calls.filter((c) => c === "reload").length, 1, "reloaded, even after 1 s");
+  assertFalse(
+    b.view.calls.some((c) => c.startsWith("navigate")),
+    "the page in place, not the link",
+  );
+  assertEquals(b.attached.length, 2, "shown at once, not hidden for the reload");
+  assertEquals(b.browser.state.url, STEP, "the #step hash is kept");
+  // Quick: no loading bar.
+  b.view.emit("load", { state: "loading", url: STEP });
+  assertFalse(b.browser.state.loading);
+  b.view.emit("url", { url: STEP, canGoBack: true, canGoForward: false });
+  b.view.emit("load", { state: "complete", url: STEP });
+  await new Promise((r) => setTimeout(r, 30));
+  assertFalse(b.browser.state.loading, "finished before the bar was due");
+  // History kept: Back steps to the run page.
+  b.browser.command("back");
+  assert(b.view.calls.includes("back"));
+});
+
+Deno.test("web panel reopen: a slow reload shows the loading bar after the quiet period", async () => {
+  const status = { now: "live" as LinkStatus };
+  const b = statusBrowser(status);
+  await openAndLeave(b);
+  await b.browser.open(RUN, DASHBOARD);
+  b.view.emit("load", { state: "loading", url: STEP });
+  assertFalse(b.browser.state.loading);
+  await new Promise((r) => setTimeout(r, 30));
+  assert(b.browser.state.loading);
+  b.view.emit("load", { state: "complete", url: STEP });
+  assertFalse(b.browser.state.loading);
+});
+
+Deno.test("web panel reopen: a completed run reopens as it was, with no reload", async () => {
+  const status = { now: "done" as LinkStatus };
+  const b = statusBrowser(status);
+  await openAndLeave(b);
+  b.clock.t += 60 * 60_000;
+  await b.browser.open(RUN, DASHBOARD);
+  await tick();
+  assertFalse(b.view.calls.includes("reload"), "a finished page can't change");
+  assertEquals(b.attached.length, 2, "shown at once");
+  assertEquals(b.browser.state.url, STEP);
+});
+
+Deno.test("web panel reopen: a run that completed while hidden reloads once", async () => {
+  const status = { now: "live" as LinkStatus };
+  const b = statusBrowser(status);
+  await openAndLeave(b);
+  status.now = "done";
+  await b.browser.open(RUN, DASHBOARD);
+  assertEquals(b.view.calls.filter((c) => c === "reload").length, 1, "the final state shows");
+  b.view.emit("load", { state: "complete", url: STEP });
+  b.browser.command("home");
+  b.view.calls = [];
+  await b.browser.open(RUN, DASHBOARD);
+  assertFalse(b.view.calls.includes("reload"), "only once");
+});
+
+Deno.test("web panel reopen: an unknown page reloads after 30 s hidden, not before", async () => {
+  const status = { now: null as LinkStatus };
+  const b = statusBrowser(status);
+  await openAndLeave(b);
+  b.clock.t += UNKNOWN_STALE_MS - 1;
+  await b.browser.open(RUN, DASHBOARD);
+  assertFalse(b.view.calls.includes("reload"), "within 30 s: as it was");
+  b.browser.command("home");
+  b.view.calls = [];
+  b.clock.t += UNKNOWN_STALE_MS + 1;
+  await b.browser.open(RUN, DASHBOARD);
+  assertEquals(b.view.calls.filter((c) => c === "reload").length, 1);
+});
+
+Deno.test("web panel reopen policy: live reloads, done only if it finished while hidden, unknown after 30 s", () => {
+  assert(reloadOnReopen("live", "live", 0));
+  assert(reloadOnReopen(null, "live", 0));
+  assertFalse(reloadOnReopen("done", "done", 10 * UNKNOWN_STALE_MS));
+  assert(reloadOnReopen("live", "done", 0));
+  assertFalse(reloadOnReopen(null, null, UNKNOWN_STALE_MS));
+  assert(reloadOnReopen(null, null, UNKNOWN_STALE_MS + 1));
+  assert(reloadOnReopen("live", null, UNKNOWN_STALE_MS + 1));
+});
+
+Deno.test("web panel reopen: a different link always starts fresh", async () => {
+  const { browser, view, returned } = returningBrowser();
+  await browser.open(RUN, DASHBOARD);
+  loads(view);
+  view.emit("url", { url: `${RUN}/job/7`, canGoBack: true, canGoForward: false });
+  browser.command("home");
+  view.calls = [];
+  await browser.open(OTHER, DASHBOARD);
+  assert(view.calls.includes(`navigate:${OTHER}`));
+  assert(browser.state.waiting);
+  loads(view, OTHER, true);
+  browser.command("back");
+  assertFalse(view.calls.includes("back"), "a fresh history: Back returns to Fleet");
+  assertEquals(returned.length, 2);
 });

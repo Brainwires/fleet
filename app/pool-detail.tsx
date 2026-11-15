@@ -51,8 +51,10 @@ export interface PoolDetailProps {
   readonly now: number;
   readonly controls?: ControlHandlers;
   readonly logs?: LogsApi;
-  /** The tab to open on (tests). */
+  /** The tab to open on (a restored screen; tests). */
   readonly initialTab?: "usage" | "logs";
+  /** Hears the tab (on mount and on every change), so a screen can be restored on it. */
+  readonly onTab?: (tab: "usage" | "logs") => void;
   readonly error?: string;
 }
 
@@ -693,6 +695,8 @@ function LinesBox({ lines, empty }: { lines: readonly string[] | null; empty: st
 export function PoolDetailView(props: PoolDetailProps) {
   const { detail: d, onBack } = props;
   const [tab, setTab] = useState<"usage" | "logs">(props.initialTab ?? "usage");
+  const { onTab } = props;
+  useEffect(() => onTab?.(tab), [tab, onTab]);
   const [opened, setOpened] = useState<LogView | LogError | "loading" | null>(null);
   const heading = useRef<HTMLHeadingElement | null>(null);
 

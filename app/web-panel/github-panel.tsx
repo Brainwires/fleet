@@ -2,14 +2,15 @@
 // The in-app GitHub browser's panel: a toolbar (back, forward, reload, Fleet's home, the page's title
 // and URL, Open in browser), a loading bar, an inline error for a failed load, and the placeholder
 // the native web view is glued to (app/web-panel/github-browser.ts). It covers Fleet's main view
-// while it shows.
+// while it shows. Until the link's page has loaded the view stays hidden and the placeholder shows
+// Fleet's own loading state (a spinner, the page's title or URL), never a blank view.
 
 import { useEffect, useRef } from "denext";
-import type { BrowserState, GitHubBrowser } from "./github-browser.ts";
+import type { BrowserControls, BrowserState } from "./github-browser.ts";
 import type { WebViewAnchor } from "./engine.ts";
 
 export interface GitHubPanelProps {
-  readonly browser: GitHubBrowser;
+  readonly browser: BrowserControls;
   readonly state: BrowserState;
   /** Whether the keys are Cmd (macOS) or Ctrl, for the buttons' hints. */
   readonly mac?: boolean;
@@ -33,7 +34,7 @@ export function GitHubPanel({ browser, state, mac = false }: GitHubPanelProps) {
           class="btn webpanel-nav"
           aria-label="Back"
           title={`Back (${mod}[)`}
-          disabled={!state.canGoBack}
+          disabled={!state.canGoBack && !state.canReturn}
           onClick={() => browser.command("back")}
         >
           ←
@@ -82,7 +83,16 @@ export function GitHubPanel({ browser, state, mac = false }: GitHubPanelProps) {
         ? <div class="webpanel-loading" role="progressbar" aria-label="Loading" />
         : <div class="webpanel-loading-off" aria-hidden="true" />}
       {state.error ? <p class="webpanel-error" role="alert">{state.error}</p> : null}
-      <div class="webpanel-view" ref={placeholder} />
+      <div class="webpanel-view" ref={placeholder}>
+        {state.waiting
+          ? (
+            <div class="webpanel-wait" role="status">
+              <span class="webpanel-spinner" aria-hidden="true" />
+              <span class="webpanel-wait-text">Loading {state.title || state.url}</span>
+            </div>
+          )
+          : null}
+      </div>
     </section>
   );
 }
