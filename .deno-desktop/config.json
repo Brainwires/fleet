@@ -4,10 +4,7 @@
       "macos": [
         "dmg"
       ],
-      "linux": [
-        "tar.gz",
-        "deb"
-      ],
+      "linux": [],
       "windows": [
         "zip"
       ]
@@ -23,7 +20,7 @@
       "origin": "fleet://app",
       "singleInstance": true,
       "keepAlive": true,
-      "dock": "while-window-open"
+      "activationPolicy": "accessory"
     },
     "window": {
       "defaultWidth": 1320,
@@ -74,11 +71,6 @@
         }
       ]
     },
-    "webViews": {
-      "allowedOrigins": [
-        "https://github.com"
-      ]
-    },
     "secureStore": {
       "legacy": false
     },
@@ -92,28 +84,7 @@
     },
     "extraPermissions": {
       "netConnect": [
-        "api.github.com",
-        "productionresultssa0.blob.core.windows.net",
-        "productionresultssa1.blob.core.windows.net",
-        "productionresultssa2.blob.core.windows.net",
-        "productionresultssa3.blob.core.windows.net",
-        "productionresultssa4.blob.core.windows.net",
-        "productionresultssa5.blob.core.windows.net",
-        "productionresultssa6.blob.core.windows.net",
-        "productionresultssa7.blob.core.windows.net",
-        "productionresultssa8.blob.core.windows.net",
-        "productionresultssa9.blob.core.windows.net",
-        "productionresultssa10.blob.core.windows.net",
-        "productionresultssa11.blob.core.windows.net",
-        "productionresultssa12.blob.core.windows.net",
-        "productionresultssa13.blob.core.windows.net",
-        "productionresultssa14.blob.core.windows.net",
-        "productionresultssa15.blob.core.windows.net",
-        "productionresultssa16.blob.core.windows.net",
-        "productionresultssa17.blob.core.windows.net",
-        "productionresultssa18.blob.core.windows.net",
-        "productionresultssa19.blob.core.windows.net",
-        "pipelines.actions.githubusercontent.com"
+        "api.github.com"
       ],
       "run": [
         "/opt/homebrew/bin/gh",
@@ -121,16 +92,10 @@
         "/usr/bin/gh",
         "/usr/local/bin/gh",
         "C:\\Program Files\\GitHub CLI\\gh.exe",
-        "/usr/bin/security",
-        "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister",
-        "/usr/bin/open",
-        "/Users/nightness/Source/Brainwires/denext-internal/ops/runners/pause-pool.sh",
-        "/Users/nightness/Source/Brainwires/denext-internal/ops/runners/watchdog.sh",
-        "/bin/launchctl"
+        "/usr/bin/security"
       ],
       "write": [
-        "$APPDATA",
-        "/Users/nightness/.denext-runners/hooks"
+        "$APPDATA"
       ]
     }
   }
