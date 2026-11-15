@@ -572,6 +572,16 @@ const OURS = [
 /** The project's own home URL (a link to the docs), the one place its owner's name may appear. */
 const HOME_URL = "https://github.com/Brainwires/fleet";
 
+/** The `.ts` / `.tsx` / `.json` files under `root` (relative to this file), at any depth. */
+async function sourcesUnder(root: string): Promise<string[]> {
+  const out: string[] = [];
+  for await (const e of Deno.readDir(new URL(root, import.meta.url))) {
+    if (e.isDirectory) out.push(...await sourcesUnder(`${root}${e.name}/`));
+    else if (e.isFile && /\.(ts|tsx|json)$/.test(e.name)) out.push(`${root}${e.name}`);
+  }
+  return out;
+}
+
 Deno.test("defaults: no owner, no pools, no paths, nothing of any one setup", async () => {
   const text = JSON.stringify(DEFAULT_SETTINGS);
   for (const re of OURS) assertFalse(re.test(text), `defaults match ${re}`);
@@ -583,19 +593,18 @@ Deno.test("defaults: no owner, no pools, no paths, nothing of any one setup", as
   assertFalse(DEFAULT_SETTINGS.webhooks.enabled);
   // Under the defaults nothing is seeded.
   await withSettings(DEFAULT_SETTINGS, () => assertEquals(seedPools(), []));
-  // And the code that ships: the app, the backend, the MCP server, the build config.
-  const roots = ["../lib/", "../app/", "../desktop/", "../mcp/"];
+  // And the code that ships: the app, the backend, the MCP server, the build config, and the
+  // tracked generated config (an internal package run writes local paths there:
+  // scripts/package-internal.ts restores it), every directory walked to the bottom.
+  const roots = ["../lib/", "../app/", "../desktop/", "../mcp/", "../scripts/"];
   const files = [
     "../desktop.ts",
     "../hooks-only.ts",
     "../denext.config.ts",
     "../deno.json",
+    "../.deno-desktop/config.json",
   ];
-  for (const root of roots) {
-    for await (const e of Deno.readDir(new URL(root, import.meta.url))) {
-      if (e.isFile && /\.(ts|tsx)$/.test(e.name)) files.push(`${root}${e.name}`);
-    }
-  }
+  for (const root of roots) files.push(...await sourcesUnder(root));
   for (const f of files) {
     const src = (await Deno.readTextFile(new URL(f, import.meta.url))).replaceAll(HOME_URL, "");
     for (const re of OURS) assertFalse(re.test(src), `${f} matches ${re}`);

@@ -6,7 +6,7 @@
     "desktop": "deno run -A jsr:@denext/denext@^4.18.0/cli desktop run .",
     "desktop:build": "deno run -A jsr:@denext/denext@^4.18.0/cli desktop build .",
     "desktop:package": "deno run -A jsr:@denext/denext@^4.18.0/cli desktop package .",
-    "desktop:package:internal": "FLEET_INTERNAL=1 deno run -A jsr:@denext/denext@^4.18.0/cli desktop package .",
+    "desktop:package:internal": "deno run -A scripts/package-internal.ts",
     "desktop:package:windows": "deno run -A jsr:@denext/denext@^4.18.0/cli run -A scripts/package-windows.ts --arch x86_64",
     "test": "deno run -A jsr:@denext/denext@^4.18.0/cli test",
     "check": "deno fmt --check && deno lint && deno task test",
