@@ -55,7 +55,7 @@ export const ORG_SETTINGS_DOC = {
         { id: "linux-x64-docker", label: "denext-linux-x64-docker", slots: 1 },
         { id: "win-arm64", label: "denext-windows-arm64", slots: 2 },
         { id: "win-x64", label: "denext-windows-x64", slots: 1 },
-        { id: "win-x64-brain", label: "denext-windows-x64", slots: 1 },
+        { id: "win-x64-pc", label: "denext-windows-x64", slots: 1 },
       ],
       runnerNamePrefix: "denext-",
       labelPrefix: "denext-",

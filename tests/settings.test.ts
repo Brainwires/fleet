@@ -560,6 +560,13 @@ const OURS = [
   /ci-hooks\.denext\.dev/,
   /denext-ci-hooks/,
   /\bbiscuits\b/,
+  /\bbrain\b/,
+  /\bmacbook\b/i,
+  /\bpeachy\b/,
+  /\bMac mini\b/,
+  /\/Users\/[a-z]/,
+  /\bops\/runners\b/,
+  /192\.168\./,
 ];
 
 /** The project's own home URL (a link to the docs), the one place its owner's name may appear. */

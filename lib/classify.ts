@@ -77,7 +77,7 @@ export function classifyJob(job: GhJob): JobClass | null {
       return {
         lane,
         target: "pool",
-        // The runner's name first: pools that share a label (win-x64, win-x64-brain) differ there.
+        // The runner's name first: pools that share a label (win-x64, win-x64-pc) differ there.
         pool: poolFromRunnerName(runner) ?? labelPool ?? "self-hosted",
       };
     }

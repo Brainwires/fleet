@@ -213,7 +213,7 @@ Deno.test("health: a good variable parses; pools by label, alerts newest first, 
   assertEquals(h.doc.pools["denext-windows-x64"].ok, false);
   assertEquals(
     h.doc.pools["denext-windows-x64"].reason,
-    "the Windows guest on macbook unreachable",
+    "the Windows guest on host-b unreachable",
   );
   assertEquals(h.doc.pools["denext-macos-x64"].paused, true);
   assertEquals(h.doc.alerts[0].pool, "win-x64");
@@ -836,7 +836,7 @@ function sharedHostCase(busyA: number, busyB: number) {
     slots: 3,
     ...(host ? { host } : {}),
   });
-  setPools([mk("linux-x64", "biscuits"), mk("linux-arm", "biscuits"), mk("mac")]);
+  setPools([mk("linux-x64", "host-a"), mk("linux-arm", "host-a"), mk("mac")]);
   try {
     const cards = poolCards([], [], { state: "unavailable", message: "" } as never, null);
     const a = cards.find((c) => c.id === "linux-x64")!;
@@ -853,7 +853,7 @@ function sharedHostCase(busyA: number, busyB: number) {
 
 Deno.test("shared host: pools on one machine report host load", () => {
   const { a, mac } = sharedHostCase(0, 0);
-  assertEquals([a.host, a.hostSlots], ["biscuits", 3]);
+  assertEquals([a.host, a.hostSlots], ["host-a", 3]);
   assertEquals(mac.host, undefined);
 });
 

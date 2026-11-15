@@ -66,7 +66,7 @@ Deno.test("view: counts, pools, lanes, alerts and finished jobs from the fixture
   assertStringIncludes(html, "sev-alert");
   assertEquals(one(screen.container, ".count-run .num")?.textContent, "2");
   assertEquals(one(screen.container, ".count-q .num")?.textContent, "3");
-  // One card per pool (per host: win-x64 and win-x64-brain share a label) plus GitHub-hosted.
+  // One card per pool (per host: win-x64 and win-x64-pc share a label) plus GitHub-hosted.
   const names = all(screen.container, ".pool-name").map((n) => n.textContent);
   assertEquals(names, [
     "mac-arm",
@@ -76,11 +76,11 @@ Deno.test("view: counts, pools, lanes, alerts and finished jobs from the fixture
     "linux-x64-docker",
     "win-arm64",
     "win-x64",
-    "win-x64-brain",
+    "win-x64-pc",
     "GitHub-hosted",
   ]);
   assertStringIncludes(html, "pool pool-unhealthy");
-  assertStringIncludes(html, "the Windows guest on macbook unreachable");
+  assertStringIncludes(html, "the Windows guest on host-b unreachable");
   assertStringIncludes(html, "pool pool-paused");
   // linux-x64: 3 slots, 3 busy pips; its oldest queued job waited 47 min.
   const linux = all(screen.container, ".pool")[2];
@@ -104,7 +104,7 @@ Deno.test("view: counts, pools, lanes, alerts and finished jobs from the fixture
   // Not a default branch: no marker.
   assertFalse(html.includes("run-default"));
   // Side: alerts and finished.
-  assertStringIncludes(html, "RECOVERED: biscuits reachable again");
+  assertStringIncludes(html, "RECOVERED: host-a reachable again");
   assertEquals(all(one(screen.container, ".finished")!, ".done").length, 5);
   assertStringIncludes(html, "API");
   assertStringIncludes(html, "4,999");

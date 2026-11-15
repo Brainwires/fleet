@@ -1,4 +1,4 @@
-// The live pool list: pools that share a runs-on label (win-x64 and win-x64-brain on
+// The live pool list: pools that share a runs-on label (win-x64 and win-x64-pc on
 // denext-windows-x64) get one card each with their own slots, busy and state; runner names attribute
 // to the right host; the list is rebuilt from the data (a pool leaves and joins on the next poll);
 // a label with one pool behaves as before. No network.
@@ -64,15 +64,15 @@ const HOSTS = {
     paused: false,
     runner_prefix: "denext-win-x64-",
   },
-  "win-x64-brain": {
+  "win-x64-pc": {
     label: WIN_LABEL,
     ok: false,
-    reason: "brain unreachable",
+    reason: "pc unreachable",
     since: 2,
     slots: 1,
     busy: 0,
     paused: false,
-    runner_prefix: "denext-win-x64-brain-",
+    runner_prefix: "denext-win-x64-pc-",
   },
 };
 
@@ -117,7 +117,7 @@ function withPools<T>(h: HealthState, runners: GhRunner[] | null, fn: () => T): 
 
 Deno.test("pools: runner names attribute to the host, the longest prefix winning", () => {
   assertEquals(poolFromRunnerName("denext-win-x64-1-1794493083"), "win-x64");
-  assertEquals(poolFromRunnerName("denext-win-x64-brain-1-1794493083"), "win-x64-brain");
+  assertEquals(poolFromRunnerName("denext-win-x64-pc-1-1794493083"), "win-x64-pc");
   // A queued job's label names the FIRST pool on it.
   assertEquals(poolFromLabels(["self-hosted", WIN_LABEL]), "win-x64");
   // A running job: its runner's name wins over the shared label.
@@ -131,7 +131,7 @@ Deno.test("pools: runner names attribute to the host, the longest prefix winning
     created_at: "2026-11-12T14:00:00Z",
     started_at: "2026-11-12T14:01:00Z",
   });
-  assertEquals(classifyJob(running("denext-win-x64-brain-1-17944"))?.pool, "win-x64-brain");
+  assertEquals(classifyJob(running("denext-win-x64-pc-1-17944"))?.pool, "win-x64-pc");
   assertEquals(classifyJob(running("denext-win-x64-1-17944"))?.pool, "win-x64");
 });
 
@@ -145,40 +145,40 @@ Deno.test("pools: two pools on one label → two cards with their own slots, bus
       [runner("denext-win-x64-1-1", true)],
     ));
   const win = cards.find((c) => c.id === "win-x64")!;
-  const brain = cards.find((c) => c.id === "win-x64-brain")!;
-  assertEquals(cards.map((c) => c.id), ["mac-x64", "win-x64", "win-x64-brain", "github"]);
+  const pc = cards.find((c) => c.id === "win-x64-pc")!;
+  assertEquals(cards.map((c) => c.id), ["mac-x64", "win-x64", "win-x64-pc", "github"]);
   assertEquals([win.slots, win.busy, win.state, win.queued], [1, 1, "ok", 1]);
-  assertEquals([brain.slots, brain.busy, brain.state, brain.reason], [
+  assertEquals([pc.slots, pc.busy, pc.state, pc.reason], [
     1,
     0,
     "unhealthy",
-    "brain unreachable",
+    "pc unreachable",
   ]);
-  assertEquals([brain.label, brain.queued], [WIN_LABEL, 0]);
+  assertEquals([pc.label, pc.queued], [WIN_LABEL, 0]);
 });
 
 Deno.test("pools: a shared label without per-host data never shows the merged numbers", () => {
-  // An older watchdog: only the label-merged entry (slots 2, busy 1); brain's runner is busy.
+  // An older watchdog: only the label-merged entry (slots 2, busy 1); the pc's runner is busy.
   const h = variable();
-  const runners = [runner("denext-win-x64-brain-1-9", true, ["self-hosted", WIN_LABEL])];
+  const runners = [runner("denext-win-x64-pc-1-9", true, ["self-hosted", WIN_LABEL])];
   const cards = withPools(
     h,
     runners,
-    () => poolCards([row("win-x64-brain", "running", "denext-win-x64-brain-1-9")], [], h, runners),
+    () => poolCards([row("win-x64-pc", "running", "denext-win-x64-pc-1-9")], [], h, runners),
   );
   const win = cards.find((c) => c.id === "win-x64")!;
-  const brain = cards.find((c) => c.id === "win-x64-brain")!;
+  const pc = cards.find((c) => c.id === "win-x64-pc")!;
   assertEquals([win.slots, win.busy, win.state], [1, 0, "ok"]);
-  assertEquals([brain.slots, brain.busy, brain.running, brain.state], [1, 1, 1, "ok"]);
+  assertEquals([pc.slots, pc.busy, pc.running, pc.state], [1, 1, 1, "ok"]);
   // A label with one pool: exactly as before (the variable's slots and busy).
   const mac = cards.find((c) => c.id === "mac-x64")!;
   assertEquals([mac.slots, mac.busy, mac.state], [1, 1, "ok"]);
 });
 
 Deno.test("pools: the list follows the data — a pool leaves, a new one joins", () => {
-  const { "win-x64-brain": _gone, ...rest } = HOSTS;
+  const { "win-x64-pc": _gone, ...rest } = HOSTS;
   const before = derivePools(docOf(variable(HOSTS)), null)!.map((p) => p.id);
-  assertEquals(before, ["mac-x64", "win-x64", "win-x64-brain"]);
+  assertEquals(before, ["mac-x64", "win-x64", "win-x64-pc"]);
   const fewer = derivePools(docOf(variable(rest)), null)!.map((p) => p.id);
   assertEquals(fewer, ["mac-x64", "win-x64"]);
   const more = derivePools(
@@ -199,7 +199,7 @@ Deno.test("pools: the list follows the data — a pool leaves, a new one joins",
   assertEquals(currentPools(), seedPools());
   // Once set, lookups follow it: a pool gone from the list is no runner's pool any more.
   withPools(variable(rest), null, () => {
-    assertEquals(poolFromRunnerName("denext-win-x64-brain-1-17944"), "win-x64");
+    assertEquals(poolFromRunnerName("denext-win-x64-pc-1-17944"), "win-x64");
     assertEquals(poolFromRunnerName("denext-mac-arm-1-17944"), null);
   });
 });
@@ -212,7 +212,7 @@ Deno.test("pools: an older variable's labels plus the registered runners' names"
   assertEquals(defs.map((d) => [d.id, d.label, d.slots]), [
     ["mac-x64", "denext-macos-x64", 1],
     ["win-x64", WIN_LABEL, 1],
-    ["win-x64-brain", WIN_LABEL, 1],
+    ["win-x64-pc", WIN_LABEL, 1],
     ["win-x64-new", WIN_LABEL, null],
   ]);
 });
@@ -231,22 +231,22 @@ Deno.test("local health: the mini's health.json keys hosts by pool, merging a sh
         runner_prefix: "denext-win-x64-",
       },
       // No label from an older watchdog: the static list knows it.
-      "win-x64-brain": { healthy: false, reason: "brain unreachable", since_epoch: 20 },
+      "win-x64-pc": { healthy: false, reason: "pc unreachable", since_epoch: 20 },
     },
   };
-  const m = mergeLocalHealth(base, local, new Set(["win-x64-brain"]), NOW);
+  const m = mergeLocalHealth(base, local, new Set(["win-x64-pc"]), NOW);
   const doc = docOf(m)!;
-  assertEquals(Object.keys(doc.hosts), ["win-x64", "win-x64-brain"]);
+  assertEquals(Object.keys(doc.hosts), ["win-x64", "win-x64-pc"]);
   assertEquals(doc.hosts["win-x64"].ok, true);
-  assertEquals(doc.hosts["win-x64-brain"].label, WIN_LABEL);
-  assertEquals(doc.hosts["win-x64-brain"].runnerPrefix, "denext-win-x64-brain-");
-  assertEquals([doc.hosts["win-x64-brain"].ok, doc.hosts["win-x64-brain"].paused], [false, true]);
+  assertEquals(doc.hosts["win-x64-pc"].label, WIN_LABEL);
+  assertEquals(doc.hosts["win-x64-pc"].runnerPrefix, "denext-win-x64-pc-");
+  assertEquals([doc.hosts["win-x64-pc"].ok, doc.hosts["win-x64-pc"].paused], [false, true]);
   // The label entry: ok while any host is, slots and busy the variable's.
   assertEquals(doc.pools[WIN_LABEL].ok, true);
   assertEquals([doc.pools[WIN_LABEL].slots, doc.pools[WIN_LABEL].busy], [2, 1]);
   const cards = withPools(m, null, () => poolCards([], [], m, []));
   assertEquals(
     cards.filter((c) => c.label === WIN_LABEL).map((c) => [c.id, c.slots, c.state]),
-    [["win-x64", 1, "ok"], ["win-x64-brain", 1, "unhealthy"]],
+    [["win-x64", 1, "ok"], ["win-x64-pc", 1, "unhealthy"]],
   );
 });

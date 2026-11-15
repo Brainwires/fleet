@@ -1,7 +1,7 @@
 // Fleet Notifier (notifier/): the small macOS helper app shell scripts post notifications through,
 // so a click opens Fleet (an `osascript` notification is Script Editor's, and its click opens an
 // untitled script). Fleet's macOS package embeds it at Contents/Helpers/Fleet Notifier.app
-// (tools/notifier.ts); the runner watchdog (ops/runners/lib/common.sh `alert_notify`) calls it.
+// (tools/notifier.ts); a runner watchdog script (its `alert_notify`) calls it.
 //
 // Its alerts are the watchdog's conditions, so where the watchdog notifies through it Fleet leaves
 // out its own notice for the one condition both detect the same way: a job queued over 15 min on a

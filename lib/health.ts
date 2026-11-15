@@ -38,7 +38,7 @@ export interface PoolHealthDoc {
   readonly checkedAt: number;
   /** By runs-on label. */
   readonly pools: Readonly<Record<string, PoolHealth>>;
-  /** By pool name (`win-x64-brain`), in the watchdog's order; empty from an older watchdog. */
+  /** By pool name (`win-x64-pc`), in the watchdog's order; empty from an older watchdog. */
   readonly hosts: Readonly<Record<string, HostHealth>>;
   readonly alerts: readonly HealthAlert[];
 }
