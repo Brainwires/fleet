@@ -57,6 +57,12 @@ export default {
       tooltip: "Fleet",
       menu: [...INITIAL_MENU],
     },
+    // The in-app GitHub browser (app/web-panel/): what Fleet itself loads in a web view (create and
+    // navigate) is github.com only. Its sign-in, 2FA and passkey pages are on github.com too; the
+    // assets and avatars hosts are subresources, which this list does not govern. A link the user
+    // follows off github.com leaves the view for the system browser (app/web-panel/github-browser.ts).
+    // The view never gets the desktop bridge.
+    webViews: { allowedOrigins: ["https://github.com"] },
     // Keychain items written by this app's own process only (no /usr/bin/security).
     secureStore: { legacy: false },
     capabilities: {

@@ -1676,6 +1676,81 @@ code {
   }
 }
 
+/* ---- in-app GitHub browser (app/web-panel/) ---- */
+
+/* The native web view sits over .webpanel-view; everything else here is Fleet's HTML. */
+.webpanel {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+.webpanel:focus {
+  outline: none;
+}
+.webpanel-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+}
+.webpanel-nav {
+  min-width: 34px;
+}
+.webpanel-where {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+  padding: 0 8px;
+}
+.webpanel-title {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.webpanel-url {
+  font: 400 12.5px/1.3 var(--mono);
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: text;
+}
+/* A fixed 2px strip either way, so the view below never moves when loading starts or ends. */
+.webpanel-loading,
+.webpanel-loading-off {
+  height: 2px;
+  flex: none;
+}
+.webpanel-loading {
+  background: linear-gradient(90deg, transparent, var(--run), transparent) 0 0 / 40% 100% no-repeat;
+  animation: webpanel-loading 1.1s linear infinite;
+}
+@keyframes webpanel-loading {
+  from {
+    background-position: -40% 0;
+  }
+  to {
+    background-position: 140% 0;
+  }
+}
+.webpanel-error {
+  margin: 0;
+  padding: 8px 16px;
+  background: var(--bad-soft);
+  color: var(--bad);
+  font-size: 14px;
+}
+.webpanel-view {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 /* Motion only for those who want it. */
 @media (prefers-reduced-motion: reduce) {
   *,

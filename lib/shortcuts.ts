@@ -27,3 +27,21 @@ export function windowShortcut(e: ShortcutKey, mac: boolean): WindowShortcut | n
   const key = e.key.toLowerCase();
   return key === "w" || key === "q" ? "close" : null;
 }
+
+/** What a key press asks of the in-app GitHub browser (app/web-panel/github-browser.ts). */
+export type BrowserShortcut = "back" | "forward" | "home";
+
+/**
+ * The browser shortcut a key press is, while the GitHub panel shows: Cmd+[ / Cmd+] (Ctrl+[ /
+ * Ctrl+] off macOS) go back / forward, and Esc returns to Fleet's view. Fleet's page sees these
+ * only while the keyboard is in its own HTML; with the web view focused, the app menu's
+ * accelerators carry back / forward (app/web-panel/browser-menu.ts) and Esc stays GitHub's.
+ */
+export function browserShortcut(e: ShortcutKey, mac: boolean): BrowserShortcut | null {
+  if (e.key === "Escape") {
+    return e.metaKey || e.ctrlKey || e.altKey || e.shiftKey ? null : "home";
+  }
+  const mod = mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+  if (!mod || e.altKey || e.shiftKey) return null;
+  return e.key === "[" ? "back" : e.key === "]" ? "forward" : null;
+}
