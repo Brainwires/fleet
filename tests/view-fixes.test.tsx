@@ -188,3 +188,18 @@ Deno.test("view: job ages tick on GitHub's clock (the snapshot's offset)", async
   const minutes = (t: string) => Number(/(\d+)m/.exec(t)?.[1] ?? NaN);
   assertEquals(minutes(ahead) - minutes(base), 10);
 });
+
+Deno.test("styles: every .lanes-q-empty rule keeps the Queued column at a 240px minimum", () => {
+  const rules = [...CSS.matchAll(/\.lanes-q-empty\s*\{([^}]*)\}/g)];
+  assert(
+    rules.length >= 3,
+    `expected the base rule and two breakpoint rules, found ${rules.length}`,
+  );
+  for (const [, body] of rules) {
+    const columns = /grid-template-columns:\s*([^;]+);/.exec(body)?.[1];
+    if (columns === undefined) continue;
+    const cols = columns.match(/minmax\([^)]*\)|[^\s]+/g) ?? [];
+    if (cols.length < 2) continue; // the single-column stack has no Queued column to size
+    assertStringIncludes(cols[1], "minmax(240px", `.lanes-q-empty columns: ${columns}`);
+  }
+});

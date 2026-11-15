@@ -608,7 +608,8 @@ a:hover {
   min-height: 0;
 }
 /* Nothing queued: the Queued lane narrows so Running takes the width, but keeps a usable minimum
-   (its title, count and "Nothing queued." stay on one line and the column doesn't jump around). */
+   (its title, count and "Nothing queued." stay on one line and the column doesn't jump around).
+   The minimum holds at every breakpoint: the wide and narrow media queries restate the rule with it. */
 .lanes-q-empty {
   grid-template-columns: minmax(0, 1fr) minmax(240px, 0.4fr) minmax(290px, 360px);
 }
@@ -1637,7 +1638,7 @@ code {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(320px, 420px);
   }
   .lanes-q-empty {
-    grid-template-columns: minmax(0, 1fr) 170px minmax(320px, 420px);
+    grid-template-columns: minmax(0, 1fr) minmax(240px, 0.4fr) minmax(320px, 420px);
   }
 }
 
@@ -1657,7 +1658,7 @@ code {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
   .lanes-q-empty {
-    grid-template-columns: minmax(0, 1fr) 150px;
+    grid-template-columns: minmax(0, 1fr) minmax(240px, 0.4fr);
   }
   .side {
     grid-column: 1 / -1;
