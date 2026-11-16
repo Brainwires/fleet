@@ -338,6 +338,14 @@ function RunBlock(
           : null}
         <span class="sha">{run.sha}</span>
         <span class="event">{run.event.replace(/_/g, " ")}</span>
+        {run.ci
+          ? (
+            <span class="event ci-owner" title={`dispatched through ci by ${run.ci.owner}`}>
+              {run.ci.owner}
+              {run.ci.purpose ? ` · ${run.ci.purpose}` : ""}
+            </span>
+          )
+          : null}
         {controls ? <RunControls repo={run.repo} runId={run.id} c={controls} /> : null}
       </header>
       {run.pendingJobs ? <p class="run-pending">queued, no jobs yet</p> : (

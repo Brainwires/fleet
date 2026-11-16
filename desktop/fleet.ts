@@ -38,6 +38,7 @@ import {
   runPoolControl,
 } from "../lib/control-runner.ts";
 import { home, localHealthReader, localPoolPaths, runProgram } from "../lib/deno-pools.ts";
+import { ciLedgerDir, ciLedgerReader } from "../lib/ci-ledger.ts";
 import {
   hooksUnavailable,
   readHookSecret,
@@ -115,6 +116,10 @@ function start(host: DesktopExtensionHost): void {
     loadHistory: () => loadHistory(dir),
     saveHistory: (doc) => saveHistory(dir, doc),
     readJournal: () => readJournal(dir),
+    // The `ci` MCP server's ledger beside the scheduler's health file: events and run owners.
+    readCiLedger: ciLedgerReader(() =>
+      ciLedgerDir(settings().integrations.runnerScheduler?.localHealthFile, home())
+    ),
   });
   jobLogs = createJobLogs({ github: () => service?.github() ?? null });
   service.onChange(() => {

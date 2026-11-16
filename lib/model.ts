@@ -60,6 +60,8 @@ export interface RunGroup {
   readonly forkOwner?: string;
   /** Queued with no jobs listed yet (GitHub hasn't expanded the run). */
   readonly pendingJobs: boolean;
+  /** Dispatched (or re-run) through the `ci` MCP server: the agent and why (lib/ci-ledger.ts). */
+  readonly ci?: { readonly owner: string; readonly purpose: string };
   readonly jobs: readonly JobRow[];
 }
 

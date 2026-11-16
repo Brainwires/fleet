@@ -20,6 +20,14 @@
 // `logging/setLevel`, every problem event (warn / bad) also arrives as `notifications/message`.
 
 import {
+  INVALID_REQUEST,
+  onNotification,
+  progressFor,
+  protocolFor,
+  rpcRequest,
+  serveLines,
+} from "./stdio.ts";
+import {
   AGENT_SNAPSHOT_FILE,
   APP_ID,
   HISTORY_FILE,
@@ -57,8 +65,6 @@ import {
 
 /** The server's version (the app's). */
 export const SERVER_VERSION = "0.1.0";
-/** MCP protocol versions this server speaks (newest first). */
-const PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 /** fleet_wait re-reads the files at least this often, whatever the watcher says. */
 export const WAIT_POLL_MS = 2_000;
 /** fleet_wait sends a progress notification this often (when the client asked for progress). */
@@ -752,30 +758,17 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
 
   /** Answer one message (`null` for a notification). */
   async function handle(msg: unknown, send: Send): Promise<Json | null> {
-    if (typeof msg !== "object" || msg === null || Array.isArray(msg)) {
-      return { jsonrpc: "2.0", id: null, error: { code: -32600, message: "invalid request" } };
-    }
-    const m = msg as Json;
-    const id = m.id as string | number | undefined;
-    const method = typeof m.method === "string" ? m.method : "";
-    const params = (typeof m.params === "object" && m.params !== null ? m.params : {}) as Json;
-    const reply = (result: unknown): Json => ({ jsonrpc: "2.0", id: id ?? null, result });
-    const fail = (code: number, message: string): Json => ({
-      jsonrpc: "2.0",
-      id: id ?? null,
-      error: { code, message },
-    });
+    const rq = rpcRequest(msg);
+    if (!rq) return INVALID_REQUEST;
+    const { id, method, params, reply, fail } = rq;
     if (id === undefined) {
-      if (method === "notifications/cancelled") {
-        inflight.get(params.requestId as string | number)?.abort();
-      }
+      onNotification(rq, inflight);
       return null; // notifications/initialized and the rest: nothing to answer
     }
     switch (method) {
       case "initialize": {
-        const asked = typeof params.protocolVersion === "string" ? params.protocolVersion : "";
         return reply({
-          protocolVersion: PROTOCOLS.includes(asked) ? asked : PROTOCOLS[0],
+          protocolVersion: protocolFor(params),
           capabilities: {
             tools: { listChanged: false },
             resources: { subscribe: true, listChanged: false },
@@ -838,16 +831,7 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
           (typeof params.arguments === "object" && params.arguments !== null
             ? params.arguments
             : {}) as Json;
-        const meta = params._meta as Json | undefined;
-        const token = meta?.progressToken;
-        const progress = (s: number) => {
-          if (token === undefined) return;
-          send({
-            jsonrpc: "2.0",
-            method: "notifications/progress",
-            params: { progressToken: token, progress: s, message: `waiting ${s} s` },
-          });
-        };
+        const progress = progressFor(send, params);
         const ac = new AbortController();
         inflight.set(id, ac);
         try {
@@ -878,46 +862,9 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
 }
 
 /** Serve MCP over stdin / stdout until stdin closes. */
-export async function serveStdio(files: FleetFiles, options: ServerOptions = {}): Promise<void> {
+export function serveStdio(files: FleetFiles, options: ServerOptions = {}): Promise<void> {
   const server = createFleetMcp(files, options);
-  const enc = new TextEncoder();
-  let out: Promise<void> = Promise.resolve();
-  const send: Send = (msg) => {
-    const bytes = enc.encode(JSON.stringify(msg) + "\n");
-    out = out.then(async () => {
-      let off = 0;
-      while (off < bytes.length) off += await Deno.stdout.write(bytes.subarray(off));
-    }).catch(() => {});
-  };
-  const pending = new Set<Promise<void>>();
-  let buf = "";
-  const dispatch = (line: string) => {
-    if (!line.trim()) return;
-    let msg: unknown;
-    try {
-      msg = JSON.parse(line);
-    } catch {
-      send({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } });
-      return;
-    }
-    // Each request runs on its own: a fleet_wait doesn't hold up the others.
-    const p = server.handle(msg, send).then((r) => {
-      if (r) send(r);
-    }).catch(() => {}).finally(() => pending.delete(p));
-    pending.add(p);
-  };
-  for await (const chunk of Deno.stdin.readable.pipeThrough(new TextDecoderStream())) {
-    buf += chunk;
-    let i;
-    while ((i = buf.indexOf("\n")) >= 0) {
-      dispatch(buf.slice(0, i));
-      buf = buf.slice(i + 1);
-    }
-  }
-  dispatch(buf);
-  server.abortAll();
-  await Promise.all(pending);
-  await out;
+  return serveLines({ handle: server.handle, close: server.abortAll });
 }
 
 /**

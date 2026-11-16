@@ -38,6 +38,7 @@ import { type PoolDetail, poolDetail } from "./pool-detail.ts";
 import type { HistoryRange } from "./history.ts";
 import { rowsOf } from "./snapshot.ts";
 import { currentPools } from "./pools.ts";
+import { ciEvent, type CiOwnership, type CiRecord, ownershipOf } from "./ci-ledger.ts";
 import {
   discoverToken,
   listOwnerRepos,
@@ -119,7 +120,20 @@ export interface ServiceDeps {
   readonly readJournal?: () => Promise<FleetEvent[]>;
   /** Where a recovered fault is noted (never a token or a payload). Default `console.warn`. */
   readonly warn?: (message: string) => void;
+  /**
+   * The `ci` MCP server's ledger (lib/ci-ledger.ts): the records appended since the previous call
+   * (everything held on the first). Each new one becomes an event, and dispatches / re-runs name a
+   * run's owner and purpose on its card. Absent: no ledger.
+   */
+  readonly readCiLedger?: () => Promise<CiRecord[]>;
+  /** How often the ledger is read (default {@linkcode CI_LEDGER_POLL_MS}). */
+  readonly ciLedgerPollMs?: number;
 }
+
+/** The `ci` ledger is read this often. */
+const CI_LEDGER_POLL_MS = 3_000;
+/** On a log with no lines yet, ledger records this recent still become events at startup. */
+const CI_FRESH_MS = 60 * 60_000;
 
 /** A token's check result. */
 export type TokenCheck = { ok: true } | { ok: false; message: string };
@@ -258,6 +272,10 @@ export function createFleetService(deps: ServiceDeps): FleetService {
   /** The token in use's kind (never the token): for the wizard's scope check. */
   let currentKind = tokenKind(null);
   let settingsRequested = false;
+  /** Run id → who dispatched it through the `ci` server (the run card's owner chip). */
+  let ciOwners = new Map<number, CiOwnership>();
+  let ciTimer: number | null = null;
+  let ciFirst = true;
   const settingsListeners = new Set<(s: FleetSettings, previous: FleetSettings) => void>();
   let settingsLoaded: Promise<void> | null = null;
   const localHealth = () => deps.localHealth ?? deps.localHealthFor?.(activeSettings());
@@ -315,14 +333,56 @@ export function createFleetService(deps: ServiceDeps): FleetService {
     poller.intervalMs = pl.intervalMs;
     poller.slow = pl.slow;
     poller.auth = auth;
+    const base = poller.snapshot();
     return {
-      ...poller.snapshot(),
+      ...base,
+      ...(ciOwners.size ? { running: withCi(base.running), queued: withCi(base.queued) } : {}),
       setupComplete: activeSettings().setupComplete,
       settingsRequested,
       eventSeq: log.lastSeq,
       notificationsPaused: paused(),
       hooks: { state: hooks(), lastDeliveryAt: lastDelivery, via: hooksVia },
     };
+  };
+
+  /** Runs the `ci` ledger names get their owner and purpose. */
+  const withCi = (groups: Snapshot["running"]): Snapshot["running"] =>
+    groups.map((g) => ({
+      ...g,
+      runs: g.runs.map((r) => {
+        const o = ciOwners.get(r.id);
+        return o ? { ...r, ci: o } : r;
+      }),
+    }));
+
+  /** Read the `ci` ledger: new records become events; ownership follows. */
+  const readCi = async () => {
+    const read = deps.readCiLedger;
+    if (!read || stopped) return;
+    let recs: CiRecord[];
+    try {
+      recs = await read();
+    } catch {
+      recs = [];
+    }
+    const first = ciFirst;
+    ciFirst = false;
+    if (recs.length) {
+      const next = new Map(ciOwners);
+      for (const [id, o] of ownershipOf(recs)) next.set(id, o);
+      // Bounded: the newest 2,000 runs.
+      ciOwners = new Map([...next].slice(-2000));
+      // At startup only what came after the log's newest line (it happened while Fleet was closed).
+      const since = first ? logEndAt ?? now() - CI_FRESH_MS : -Infinity;
+      const fresh = recs.filter((r) => r.at > since).map(ciEvent);
+      if (fresh.length) {
+        const added = log.insert(fresh);
+        await saveLog();
+        await journal(added);
+      }
+      emit();
+    }
+    if (!stopped) ciTimer = setT(() => void readCi(), deps.ciLedgerPollMs ?? CI_LEDGER_POLL_MS);
   };
 
   /** Sample the pool cards into the history (each series at most every 10 s). */
@@ -689,6 +749,7 @@ export function createFleetService(deps: ServiceDeps): FleetService {
       await loadSettings();
       await loadState();
       await backfill();
+      await readCi();
       // In the background: a first-run back-fill reads the whole spool.
       void loadHistory();
       if (!(await tryGh())) {
@@ -861,6 +922,8 @@ export function createFleetService(deps: ServiceDeps): FleetService {
       heartbeat = null;
       if (pollWatchdog !== null) clearT(pollWatchdog);
       pollWatchdog = null;
+      if (ciTimer !== null) clearT(ciTimer);
+      ciTimer = null;
     },
   };
 }

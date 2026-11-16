@@ -555,6 +555,78 @@ clients surface these varies**: the MCP Inspector shows both; Claude Code reads 
 to the model. For an agent the guaranteed realtime path is the [event stream](#realtime-stream)
 through `fleet-stream` under a Monitor.
 
+## The `ci` MCP server (dispatch contract)
+
+`mcp/fleet-mcp.ts` only reads. `mcp/ci-mcp.ts` is the second server, `ci`: the one way agents touch
+GitHub Actions, so the rules live in the tool instead of in every agent's brief. It reads Fleet's
+cache first (`snapshot.json`) and GitHub for the rest, and its mutations are guarded and audited.
+Like the read-only server it is zero-dependency MCP over stdio; unlike it, it talks to GitHub
+(`api.github.com` and the job-log hosts) with the GitHub CLI's token (or `GH_TOKEN` / `GITHUB_TOKEN`
+when granted) and writes exactly four files: the ledger beside the runner scheduler's health file.
+
+**Nothing blocks.** Every tool answers within 60 s (a call that runs longer is cut off and says so),
+except `ci_wait`, which waits at most 300 s and then answers `still_running`. `ci_watch` answers at
+once with a watch id; the outcome arrives later.
+
+| Tool          | Arguments                                                                                                  | Does                                                                                                                                                                                                                                      |
+| ------------- | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ci_status`   | `run_id`, `repo?`                                                                                          | the run live: status, conclusion, `protected`, `owner` / `purpose`, job counts, every job with runner, pool, `queue_wait_s`, `duration_s`, `picker`, and for a failure `failed_step` plus its check-run annotations (failures first, ≤ 5) |
+| `ci_logs`     | `job_id`, `repo?`, `grep?`, `case_sensitive?`, `context?` (≤ 10), `tail?` (≤ 1000), `max_matches?` (≤ 200) | a redacted log excerpt: the last lines, or the numbered matches with context; `available: false` and when it will be while GitHub won't serve it (before the job completes)                                                               |
+| `ci_capacity` | none                                                                                                       | per pool: health, slots, busy, free, queued, oldest wait; GitHub-hosted families (macos / ubuntu / windows) with `saturated` (a job queued ≥ 3 min); the shared VM budget (`--shared-budget`); the scheduler's health. No GitHub call     |
+| `ci_watch`    | `run_ids`, `owner`, `repo?`, `until?` (`any_failure` / `completed`), `notify?`, `expires_in_s?` (≤ 24 h)   | returns `watch_id` at once; at the first failure (or completion) sends `notifications/message` (logger `ci`) and writes a notice Fleet logs as an event `ci[<owner>] watch <id>: run N failed: <jobs>`                                    |
+| `ci_wait`     | `run_ids` or `watch_id`, `repo?`, `until?`, `timeout_s?` (≤ 300, default 120)                              | `triggered: failure / completed` with the runs, or `still_running`                                                                                                                                                                        |
+| `ci_dispatch` | `repo`, `workflow`, `ref`, `expect_sha`, `purpose`, `owner`, `inputs?`, `unlisted_ref_ok?`                 | dispatches a workflow, guarded (below); returns `run_id` (GitHub's `return_run_details`, else found by SHA), or `deduped: true` with the in-flight run's id                                                                               |
+| `ci_rerun`    | `run_id`, `owner`, `repo?`, `jobs?` (`"failed"` or ids), `reroute?` (default `true`), `purpose?`           | re-runs a finished run; with `reroute` and a `pick runners` job, re-runs the picker (GitHub then re-runs every job that needs it, routed afresh) and says how many passing jobs re-run                                                    |
+| `ci_cancel`   | `run_id`, `reason`, `owner`, `repo?`, `superseded_by?`                                                     | cancels a run, guarded (below)                                                                                                                                                                                                            |
+
+`purpose` is `pre-test`, `release-gate`, `diagnostic` or `rerun`; `owner` is the agent's id. The
+guards:
+
+- **No stale head.** `ci_dispatch` resolves `ref` (a branch, else a tag, annotated tags followed) on
+  GitHub and refuses unless it is at `expect_sha`: a push that didn't land is never dispatched.
+- **No [skip ci] release gate.** With `purpose: "release-gate"` a head commit carrying `[skip ci]`
+  (or `[ci skip]`, `[no ci]`, `[skip actions]`, `skip-checks: true`) is refused.
+- **The runner allowlist, read-only.** With `--allowlist` (the scheduler's `allowlist.json`), a ref
+  that is not the default branch, a tag or a listed `refs` entry is refused when any pool label is
+  outside `widened_labels` (that pool's vetter refuses the job and the pool closes); the refusal
+  names the accepted prefixes and a suggestion (`pretest/<name>`). `unlisted_ref_ok: true` passes it
+  for a workflow none of whose jobs can reach those pools.
+- **No duplicates.** An identical dispatch (repo, workflow, ref, SHA, inputs) whose run hasn't
+  completed is answered with that run (`deduped: true`, `dispatched_by`); nothing new is queued.
+- **Protected runs.** A run on the repo's default branch or a branch Fleet's `branches.rules`
+  protect (never a fork's or a PR's) is never cancelled, and its passing jobs are never re-run:
+  `reroute` is skipped there (re-running the picker would re-run them) and a passing job id is
+  refused.
+- **Ownership.** `ci_cancel` refuses a run another agent dispatched (the ledger says who) unless
+  `superseded_by` names the run that replaces it.
+
+**The ledger.** Every mutation, refused ones included, appends a line to `ci-audit.log` in the
+runner folder (`--runners-dir`; JSONL
+`{ v: 1, kind: "audit", at, op, ok, owner, purpose, repo,
+run_id, workflow?, ref?, sha?, inputs?, deduped?, jobs?, reroute?, reason?, superseded_by?,
+refused?, url? }`,
+0600, one write per line so several agents' servers never interleave, rotated to `.1` past 8 MB);
+watch outcomes go to `ci-notices.jsonl`. The ledger is also how separate agents' servers agree on
+ownership and in-flight dispatches. Without `--runners-dir` the reads work and every mutation is
+refused. Fleet (with the runner scheduler integration) tails both files beside its local health
+file: each new line is an event (kind `action`; a refusal warns, a failed watch is `bad`, so
+`fleet-stream --kinds problems` carries it to the owner's monitor), and a run dispatched or re-run
+through `ci` shows its owner and purpose on its card.
+
+**Register it** for agents with the line the server prints for your paths (every grant least
+privilege: reads only its files, writes only the four ledger files, network only GitHub's API and
+log hosts, runs only `gh`):
+
+```sh
+deno run --no-config mcp/ci-mcp.ts --data-dir "<Fleet data dir>" --runners-dir "<runner folder>" \
+  --allowlist "<allowlist.json>" --tunables "<tunables file>" \
+  --shared-budget "<machine>:<pool>,<pool>:<KEY in the tunables file, or a number>" --print-command
+```
+
+It prints a JSON argv; put its first element as `command` and the rest as `args` in an `mcpServers`
+entry named `ci` (`.mcp.json` in a project, or `~/.claude.json` for every project). Watches live in
+the server process: a session that ends drops its watches.
+
 ## Realtime stream
 
 The Fleet app pushes its events to agents and monitors as they happen, so nothing polls: a loopback
@@ -689,7 +761,8 @@ the first failure annotation). `clock_offset_ms` is GitHub's clock minus the Mac
 
 Outside it, only where the settings say: a webhook spool outside the data folder
 (`webhooks.spoolDir`). Fleet reads, never writes, the runner scheduler integration's local health
-file and `paused-<pool>` files.
+file and `paused-<pool>` files, and the `ci` server's ledger beside the health file (`ci-audit.log`,
+`ci-notices.jsonl`).
 
 ## Permissions
 
@@ -781,6 +854,9 @@ this repo.
 | `lib/link-status.ts`                   | A run / job link's status from the snapshot (the panel's reopen rule)                                    |
 | `lib/icons.ts`, `png.ts`               | The tray and app icons, drawn in code (`denext task icons`)                                              |
 | `mcp/fleet-mcp.ts`, `mcp/queries.ts`   | The read-only MCP server for agents (stdio) and its tools' answers                                       |
+| `mcp/ci-mcp.ts`, `ci-tools.ts`         | The `ci` MCP server: guarded dispatch / re-run / cancel, status, logs, capacity, watches                 |
+| `mcp/ci-guards.ts`, `ci-github.ts`     | Its guards and plans (pure), its GitHub access                                                           |
+| `lib/ci-ledger.ts`                     | The `ci` ledger (audit log, watch notices): records, events, run owners, the tail Fleet reads            |
 | `lib/stream.ts`, `stream-format.ts`    | The loopback event stream (SSE / WebSocket): filters, replay, guards, backpressure; its wire messages    |
 | `lib/deno-stream.ts`                   | The stream's token file, `fleet-stream.json`, the 127.0.0.1 listener                                     |
 | `mcp/fleet-stream.ts`                  | `fleet-stream`: the stream as one line per event, reconnecting with `since_seq` (for monitors)           |
