@@ -32,6 +32,20 @@ const SWIFT = Deno.build.os === "darwin" && (() => {
   }
 })();
 
+/**
+ * Tests that build a stand-in app bundle with Fleet's own bundle id (dev.brainwires.fleet) and sign
+ * it run only on CI or in a VM (`CI=true` or `FLEET_DESKTOP_TESTS=1`): on a desktop where Fleet is in
+ * use, LaunchServices registers that stand-in under Fleet's id, so an `open -b` (a notification
+ * click, a Dock reopen) may resolve to it instead of the installed app.
+ */
+const DESKTOP_TESTS = (() => {
+  try {
+    return Deno.env.get("CI") === "true" || Deno.env.get("FLEET_DESKTOP_TESTS") === "1";
+  } catch {
+    return false;
+  }
+})();
+
 async function run(cmd: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   const p = await new Deno.Command(cmd[0], { args: cmd.slice(1), stdout: "piped", stderr: "piped" })
     .output();
@@ -318,7 +332,7 @@ Deno.test({
 
 Deno.test({
   name: "notifier (swift): embedded in a bundle, signed, and its CLI's exit codes (--dry-run only)",
-  ignore: !SWIFT,
+  ignore: !SWIFT || !DESKTOP_TESTS,
   sanitizeResources: false,
   async fn() {
     const dir = await Deno.makeTempDir({ prefix: "fleet-notifier-pkg-" });
