@@ -6,6 +6,7 @@
 //   server process reads for ownership (who dispatched run N) and in-flight de-duplication, since
 //   each agent runs its own server process.
 // - `ci-notices.jsonl`: a watch's outcome (`ci_watch`), addressed to its owner.
+// - `jev-shadow.jsonl`: the runner scripts' jev shadow (J1); only live disagreements are read.
 //
 // Fleet logs each new line as an event (kind `action`, so the event stream and fleet_events carry
 // it to the owner's monitor) and shows a run's owner and purpose on its card. Pure apart from the
@@ -19,6 +20,12 @@ import type { NewEvent } from "./events.ts";
 export const CI_AUDIT_FILE = "ci-audit.log";
 /** The watch notices' name in the same folder. */
 export const CI_NOTICES_FILE = "ci-notices.jsonl";
+/**
+ * The jev shadow's decisions (the runner scripts' `jev-shadow.sh`, phase J1 of the CI dispatch
+ * contract's "Judgment-assisted dispatch"): what jev would decide next to what the rules decided. Only a
+ * live disagreement becomes an event; agreements, failed calls and replay lines are not read.
+ */
+export const JEV_SHADOW_FILE = "jev-shadow.jsonl";
 /** Past this size a file is rotated to `<name>.1` (one kept) by the writer. */
 export const CI_LEDGER_MAX_BYTES = 8 * 1024 * 1024;
 /** A reader starting cold reads at most this much of a file's end. */
@@ -77,7 +84,23 @@ export interface CiNoticeRecord {
   readonly url?: string | null;
 }
 
-export type CiRecord = CiAuditRecord | CiNoticeRecord;
+/** One jev shadow line Fleet keeps: a live decision where jev and the rules disagreed. */
+export interface CiShadowRecord {
+  readonly v: 1;
+  readonly kind: "shadow";
+  readonly at: number;
+  /** `route` (ours / github) or `stuck` (stuck / slow). */
+  readonly type: string;
+  readonly subject: string;
+  readonly rule: string;
+  readonly jev: string;
+  readonly jev_p: number | null;
+  readonly rule_reason: string;
+  readonly repo: string;
+  readonly run_id: number | null;
+}
+
+export type CiRecord = CiAuditRecord | CiNoticeRecord | CiShadowRecord;
 
 const str = (v: unknown, max: number): string | undefined =>
   typeof v === "string" ? capText(v, max) : undefined;
@@ -145,6 +168,32 @@ function noticeOf(r: Record<string, unknown>, owner: string, repo: string): CiNo
   };
 }
 
+const WORD_RE = /^[a-z][a-z-]{0,19}$/;
+
+/** A jev shadow line as a record: only a live, compared disagreement; anything else is `null`. */
+function shadowOf(o: Record<string, unknown>): CiShadowRecord | null {
+  if (o.mode !== "live" || o.agree !== false) return null;
+  for (const k of ["type", "rule", "jev"] as const) {
+    if (typeof o[k] !== "string" || !WORD_RE.test(o[k] as string)) return null;
+  }
+  const subject = str(o.subject, 160);
+  if (!subject) return null;
+  const p = typeof o.jev_p === "number" && o.jev_p >= 0 && o.jev_p <= 1 ? o.jev_p : null;
+  return {
+    v: 1,
+    kind: "shadow",
+    at: o.at as number,
+    type: o.type as string,
+    subject,
+    rule: o.rule as string,
+    jev: o.jev as string,
+    jev_p: p,
+    rule_reason: str(o.rule_reason, 160) ?? "",
+    repo: str(o.repo, 140) ?? "",
+    run_id: int(o.run_id),
+  };
+}
+
 /** One line as a record, or `null` (garbled, another version, a field out of shape). */
 export function parseCiLine(line: string): CiRecord | null {
   let r: unknown;
@@ -156,6 +205,7 @@ export function parseCiLine(line: string): CiRecord | null {
   if (typeof r !== "object" || r === null || Array.isArray(r)) return null;
   const o = r as Record<string, unknown>;
   if (o.v !== 1 || typeof o.at !== "number" || !Number.isFinite(o.at)) return null;
+  if (o.kind === "shadow") return shadowOf(o);
   const owner = str(o.owner, 64);
   const repo = str(o.repo, 140);
   if (!owner || repo === undefined) return null;
@@ -219,9 +269,30 @@ function auditText(r: CiAuditRecord): string {
   return `cancelled${run}: ${r.reason ?? ""}${by}`;
 }
 
+/** A jev shadow disagreement as an event line (`jev-shadow: …`, info: it changed nothing). */
+function shadowEvent(r: CiShadowRecord): NewEvent {
+  const p = r.jev_p === null ? "" : ` (p=${r.jev_p.toFixed(2)})`;
+  const why = r.rule_reason ? `; rule: ${r.rule_reason}` : "";
+  return {
+    at: r.at,
+    sev: "info",
+    kind: "action",
+    repo: r.repo,
+    workflow: "",
+    job: null,
+    text: capText(
+      `jev-shadow: ${r.type} ${r.subject}: rules ${r.rule}, jev ${r.jev}${p}${why}`,
+      300,
+    ),
+    url: null,
+    ...(r.run_id ? { run_id: r.run_id } : {}),
+  };
+}
+
 /** A record as a Fleet event line (kind `action`; refusals warn, a failed watch is bad). */
 export function ciEvent(r: CiRecord): NewEvent {
   if (r.kind === "notice") return noticeEvent(r);
+  if (r.kind === "shadow") return shadowEvent(r);
   return {
     at: r.at,
     sev: r.ok ? "info" : "warn",
@@ -314,7 +385,11 @@ export function ciLedgerTail(dir: string): () => Promise<CiRecord[]> {
     return parseCiText(text);
   };
   return async () => {
-    const out = [...await one(CI_AUDIT_FILE), ...await one(CI_NOTICES_FILE)];
+    const out = [
+      ...await one(CI_AUDIT_FILE),
+      ...await one(CI_NOTICES_FILE),
+      ...await one(JEV_SHADOW_FILE),
+    ];
     return out.sort((a, b) => a.at - b.at);
   };
 }
