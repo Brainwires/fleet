@@ -9,7 +9,7 @@
 import type { HistoryRange } from "../../lib/history.ts";
 
 /** A pool detail screen's tab. */
-export type DetailTab = "usage" | "logs";
+export type DetailTab = "usage" | "logs" | "settings";
 
 /** A scroller and where it was. */
 export interface ScrollMark {

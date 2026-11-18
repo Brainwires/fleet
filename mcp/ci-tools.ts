@@ -48,6 +48,7 @@ import { type CiGitHub, GitHubError } from "./ci-github.ts";
 import { freshness } from "./queries.ts";
 import {
   annotationsOut,
+  failedTests,
   familiesOut,
   type GhCheckAnnotation,
   grepLines,
@@ -389,12 +390,20 @@ export class CiTools {
       throw err;
     }
     const lines = logLines(log.text);
+    // A failed job's answer names its failed tests, whatever excerpt was asked for.
+    const failed = job.conclusion === "success" ? null : failedTests(lines);
     const done = {
       ...base,
       available: true,
       conclusion: job.conclusion ?? null,
       total_lines: lines.length,
       truncated: log.truncated,
+      ...(failed && failed.tests.length
+        ? {
+          failed_tests: failed.tests.map((t) => capText(t, 200)),
+          ...(failed.more ? { failed_tests_more: true } : {}),
+        }
+        : {}),
     };
     if (!re) return { ...done, text: lines.slice(-tail).join("\n") };
     return { ...done, ...grepLines(lines, re, context, maxMatches) };

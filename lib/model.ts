@@ -1,6 +1,8 @@
 // What the backend hands the page (and the tray): plain JSON, no token, no Deno types. Times are
 // epoch ms; the page ticks elapsed / waited from them itself.
 
+import type { PoolStart } from "./pool-state.ts";
+
 /** Where a job runs (or waits to run). */
 export type JobTarget = "pool" | "github";
 
@@ -71,8 +73,11 @@ export interface RepoGroup {
   readonly runs: readonly RunGroup[];
 }
 
-/** A pool card's health. */
-export type PoolState = "ok" | "paused" | "unhealthy" | "unknown";
+/**
+ * A pool card's badge (lib/pool-status.ts): `paused` by hand, `unhealthy` a real failure (red),
+ * `blocked` a gate holds the launch, `busy` every slot busy with jobs queued, `ok`, or `unknown`.
+ */
+export type PoolState = "ok" | "paused" | "busy" | "blocked" | "unhealthy" | "unknown";
 
 /** One pool card. */
 export interface PoolCard {
@@ -93,6 +98,11 @@ export interface PoolCard {
   readonly since: number | null;
   /** The oldest queued job's `created_at`, or `null` with nothing queued. */
   readonly oldestQueuedSince: number | null;
+  /**
+   * Whether the pool can START jobs, and why not, from the runner scheduler's own decision
+   * (lib/pool-state.ts): a pool running a job fine may still be blocked, degraded, paused or down.
+   */
+  readonly start?: PoolStart | null;
   /**
    * Pools that share one machine (settings `host`): the machine's name, busy slots summed over its
    * pools and its shared capacity (the largest slot count among them). Absent: a machine of its own.

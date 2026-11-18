@@ -17,6 +17,7 @@ import type { GhJob, GhRun } from "./github-types.ts";
 import type { HealthState } from "./health.ts";
 import type { Observation } from "./poller.ts";
 import { currentPools, GITHUB_POOL, poolIdOfLabel, runnerHostRule } from "./pools.ts";
+import { healthIsPaused, poolStatus } from "./pool-status.ts";
 
 /** A line's severity: drawn as a colour AND a glyph. */
 export type EventSeverity = "info" | "ok" | "warn" | "bad" | "muted";
@@ -321,7 +322,7 @@ function jobPoolFull(job: GhJob, health: HealthState): boolean {
   const label = currentPools().find((p) => p.id === c.pool)?.label ?? c.pool;
   const h = health.doc.hosts?.[c.pool] ?? health.doc.pools[label];
   if (!h) return false;
-  const state = !h.ok ? "unhealthy" : h.paused ? "paused" : "ok";
+  const { state } = poolStatus(h, null);
   // Pools sharing one machine (settings `host`) share its capacity.
   const defs = currentPools();
   const host = defs.find((p) => p.id === c.pool)?.host;
@@ -385,14 +386,16 @@ function healthEvents(state: TrackerState, obs: Observation, seeding: boolean): 
     const prev = state.pools[label];
     if (prev && !seeding) {
       const id = poolIdOfLabel(label);
-      if (prev.ok && !p.ok) {
+      // A pause is reported as not healthy too: only a failure is "unhealthy" (lib/pool-status.ts).
+      const paused = healthIsPaused(p);
+      if (prev.ok && !p.ok && !paused) {
         out.push(pool(label, "bad", `${id} unhealthy${p.reason ? `: ${p.reason}` : ""}`));
       }
-      if (!prev.ok && p.ok) out.push(pool(label, "ok", `${id} healthy again`));
-      if (!prev.paused && p.paused) out.push(pool(label, "warn", `${id} paused`));
-      if (prev.paused && !p.paused) out.push(pool(label, "info", `${id} resumed`));
+      if (!prev.ok && !prev.paused && p.ok) out.push(pool(label, "ok", `${id} healthy again`));
+      if (!prev.paused && paused) out.push(pool(label, "warn", `${id} paused`));
+      if (prev.paused && !paused) out.push(pool(label, "info", `${id} resumed`));
     }
-    state.pools[label] = { ok: p.ok, paused: p.paused };
+    state.pools[label] = { ok: p.ok, paused: healthIsPaused(p) };
   }
   const known = new Set(state.alerts);
   for (const a of [...h.doc.alerts].sort((x, y) => x.at - y.at)) {

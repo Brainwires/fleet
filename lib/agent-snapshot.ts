@@ -19,6 +19,7 @@ import type { GhJob, GhRun } from "./github-types.ts";
 import type { HostHealth } from "./health.ts";
 import type { Snapshot } from "./model.ts";
 import { GITHUB_POOL, poolFromLabels, poolFromRunnerName } from "./pools.ts";
+import type { PoolStart } from "./pool-state.ts";
 
 /** Finished runs stay in the file this long. */
 export const AGENT_FINISHED_KEEP_MS = 2 * 60 * 60_000;
@@ -149,6 +150,37 @@ export interface AgentHost {
   readonly slots: number | null;
   readonly busy: number | null;
   readonly since: string | null;
+  /**
+   * Whether the pool can START jobs and why not, as the runner scheduler decided on its last tick
+   * (absent without a scheduler state file): `state` healthy / degraded / blocked / down / paused.
+   */
+  readonly start?: AgentPoolStart | null;
+}
+
+/** A pool's start state (lib/pool-state.ts) for agents. */
+export interface AgentPoolStart {
+  readonly state: string;
+  readonly code: string;
+  readonly reason: string;
+  readonly detail: string | null;
+  readonly state_since: string | null;
+  readonly reason_since: string | null;
+  readonly slots: number | null;
+  readonly busy: number | null;
+  readonly free: number | null;
+  readonly queued: number;
+  readonly blocked_jobs: readonly {
+    readonly repo: string;
+    readonly run_id: number;
+    readonly job_id: number;
+    readonly name: string;
+    readonly queued_at: string | null;
+  }[];
+  readonly slot_states: readonly {
+    readonly slot: number;
+    readonly phase: string;
+    readonly since: string | null;
+  }[];
 }
 
 /** The whole file. */
@@ -216,6 +248,30 @@ export interface AgentSnapshotInput {
 
 const iso = (ms: number | null | undefined): string | null =>
   typeof ms === "number" && Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+
+/** A pool's start state in the agents' shape (ISO times, capped text). */
+export function agentStart(st: PoolStart): AgentPoolStart {
+  return {
+    state: st.state,
+    code: st.code,
+    reason: capText(st.reason, AGENT_NOTE_MAX),
+    detail: st.detail === null ? null : capText(st.detail, AGENT_NOTE_MAX),
+    state_since: iso(st.stateSince),
+    reason_since: iso(st.reasonSince),
+    slots: st.slots,
+    busy: st.busy,
+    free: st.free,
+    queued: st.queued,
+    blocked_jobs: st.blockedJobs.slice(0, 20).map((j) => ({
+      repo: j.repo,
+      run_id: j.runId,
+      job_id: j.jobId,
+      name: capText(j.name, AGENT_NAME_MAX),
+      queued_at: iso(j.queuedAt),
+    })),
+    slot_states: st.slotStates.map((x) => ({ slot: x.slot, phase: x.phase, since: iso(x.since) })),
+  };
+}
 
 const FAILED = new Set(["failure", "timed_out", "startup_failure"]);
 
@@ -358,6 +414,7 @@ export function buildAgentSnapshot(input: AgentSnapshotInput): AgentSnapshot {
       slots: h.slots,
       busy: h.busy,
       since: iso(h.since),
+      ...(h.start ? { start: agentStart(h.start) } : {}),
     })),
     alerts: s.alerts.map((a) => ({
       at: iso(a.at) ?? "",

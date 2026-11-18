@@ -93,7 +93,9 @@ export const TOOLS = [
       "A job's log excerpt (redacted, timestamps stripped): the last `tail` lines (default 150, " +
       "≤ 1000), or with `grep` (a regular expression, case-insensitive unless case_sensitive) the " +
       "matching lines with `context` lines around each (default 2, ≤ 10), at most `max_matches` " +
-      "(default 40, ≤ 200), numbered. GitHub serves a job's log only once the job completes: " +
+      "(default 40, ≤ 200), numbered. A job that did not succeed also gets `failed_tests`: the " +
+      "failed test names its log shows (cargo / Deno test, TAP, FAIL lines; ≤ 100), so the names " +
+      "need no grep. GitHub serves a job's log only once the job completes: " +
       "before that the answer says `available: false` and when it will be. " + UNTRUSTED_NOTE,
     inputSchema: {
       type: "object",

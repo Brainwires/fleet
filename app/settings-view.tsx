@@ -18,6 +18,7 @@ import {
 import type { RepoChoice, TokenInfo } from "../lib/discover.ts";
 import type { AuthState } from "../lib/model.ts";
 import { TokenForm, type TokenScreenProps } from "./token-screen.tsx";
+import { type ConfigApi, RunnerConfigForm } from "./runner-config-form.tsx";
 
 /** What this machine looks like to the Settings view (paths for the MCP snippet). */
 export interface MachineInfo {
@@ -917,7 +918,12 @@ export function SetupWizard(props: SettingsScreenProps & { readonly onDone?: () 
 
 /** The Settings view: every section, Save and Close; "Run setup again" re-opens the wizard. */
 export function SettingsView(
-  props: SettingsScreenProps & { readonly onClose: () => void; readonly onRerun: () => void },
+  props: SettingsScreenProps & {
+    readonly onClose: () => void;
+    readonly onRerun: () => void;
+    /** The runner settings, when the scheduler's configuration helper is on this machine. */
+    readonly runnerConfig?: ConfigApi | null;
+  },
 ) {
   const [draft, set] = useDraft(props.settings);
   const [errors, setErrors] = useState<readonly string[]>([]);
@@ -942,6 +948,7 @@ export function SettingsView(
             ["set-branches", "Branches"],
             ["set-start", "Start"],
             ["set-integrations", "Integrations"],
+            ...(props.runnerConfig ? [["set-runner", "Runner settings"]] : []),
           ].map(([id, label]) => <a key={id} href={`#${id}-h`}>{label}</a>)}
         </nav>
         <div class="settings-actions">
@@ -976,6 +983,17 @@ export function SettingsView(
         <BranchesSection draft={draft} set={change} />
         <StartSection draft={draft} set={change} />
         <IntegrationsSection draft={draft} set={change} machine={props.machine} api={props.api} />
+        {props.runnerConfig
+          ? (
+            <Section
+              id="set-runner"
+              title="Runner settings"
+              lead="The runner scheduler's own settings, from its configuration helper. Changes are checked, applied by the scheduler at its next tick (nothing restarts), verified, and can be reverted. They are not part of Save above."
+            >
+              <RunnerConfigForm api={props.runnerConfig} />
+            </Section>
+          )
+          : null}
       </div>
     </div>
   );

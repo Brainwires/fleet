@@ -23,6 +23,8 @@ import { type MachineInfo, type SettingsApi, SettingsView, SetupWizard } from ".
 import type { FleetSettings } from "../lib/settings.ts";
 import { visibleClock } from "./visible-clock.ts";
 import { browserShortcut, windowShortcut } from "../lib/shortcuts.ts";
+import { ZOOM_EVENT, ZoomController, zoomShortcut } from "../lib/zoom.ts";
+import { watchZoom } from "./zoom-dom.ts";
 import { GitHubBrowser, isGitHubUrl } from "./web-panel/github-browser.ts";
 import { GitHubPanel } from "./web-panel/github-panel.tsx";
 import { connectBrowserMenu } from "./web-panel/browser-menu.ts";
@@ -34,6 +36,7 @@ import {
   type ScrollRoot,
 } from "./web-panel/origin.ts";
 import { type LogsApi, PoolDetailView } from "./pool-detail.tsx";
+import type { ConfigApi } from "./runner-config-form.tsx";
 import type { PoolDetail } from "../lib/pool-detail.ts";
 import type { HistoryRange } from "../lib/history.ts";
 
@@ -107,7 +110,9 @@ export function FleetApp() {
   const [now, setNow] = useState(() => Date.now());
   const [refreshing, setRefreshing] = useState(false);
   const [events, setEvents] = useState<FleetEvent[]>([]);
-  const [pools, setPools] = useState<{ pools: boolean; restart?: boolean; watchdog?: boolean }>({
+  const [pools, setPools] = useState<
+    { pools: boolean; restart?: boolean; watchdog?: boolean; config?: boolean }
+  >({
     pools: false,
   });
   /** The settings and machine facts while a settings screen is open (`null`: not loaded). */
@@ -146,15 +151,42 @@ export function FleetApp() {
     })
   );
   const [web, setWeb] = useState(browser.state);
+  /** The window zoom (lib/zoom.ts): the backend keeps it for every window; CSS zoom shows it here,
+   * the GitHub view's own page zoom there. View menu items and Cmd/Ctrl + = - 0 change it. */
+  const zoomView = useRef<{ update(): void } | null>(null);
+  const [zoom] = useState(() =>
+    new ZoomController({
+      apply: (pct) => {
+        zoomView.current?.update();
+        browser.setZoom(pct / 100);
+      },
+      save: (pct) => fleet.setZoom({ zoom: pct }),
+    })
+  );
+  useEffect(() => {
+    const view = watchZoom(() => zoom.level);
+    zoomView.current = view;
+    void fleet.zoom().then((pct) => zoom.set(pct), () => {});
+    const stop = onDesktopEvent<{ zoom?: unknown } | null>(
+      "fleet",
+      ZOOM_EVENT,
+      (d) => zoom.set(d?.zoom),
+    );
+    return () => {
+      stop();
+      view.stop();
+      zoomView.current = null;
+    };
+  }, [zoom]);
   useEffect(() => {
     const stop = browser.subscribe(setWeb);
-    const stopMenu = connectBrowserMenu(browser, { setAppMenu, onAppMenuItem }, isMac());
+    const stopMenu = connectBrowserMenu(browser, { setAppMenu, onAppMenuItem }, isMac(), zoom);
     return () => {
       stop();
       stopMenu();
       browser.dispose();
     };
-  }, [browser]);
+  }, [browser, zoom]);
   /** The screen showing now: a link's origin. */
   const screenNow = useRef({ pool: detailPool, range, tab: detailTab });
   screenNow.current = { pool: detailPool, range, tab: detailTab };
@@ -264,6 +296,14 @@ export function FleetApp() {
   useEffect(() => {
     const mac = /Mac/.test(navigator.userAgent);
     const onKey = (e: KeyboardEvent) => {
+      // Zoom first, and handled here (preventDefault) so the View menu's accelerator for the same
+      // press doesn't step it again (ZoomController drops such an echo too).
+      const z = zoomShortcut(e, mac);
+      if (z) {
+        e.preventDefault();
+        zoom.zoom(z, "page");
+        return;
+      }
       const nav = browser.showing ? browserShortcut(e, mac) : null;
       if (nav) {
         e.preventDefault();
@@ -277,7 +317,7 @@ export function FleetApp() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [browser]);
+  }, [browser, zoom]);
 
   // The native web view draws above all HTML: hidden while a screen the panel doesn't show over
   // (loading, the wizard, the token screen, Settings) replaces the dashboard / pool screens.
@@ -345,6 +385,13 @@ export function FleetApp() {
       await read();
     },
   };
+  const configApi: ConfigApi = {
+    configLoad: () => fleet.configLoad(),
+    configCheck: (a) => fleet.configCheck(a),
+    configApply: (a) => fleet.configApply(a),
+    configRevert: (a) => fleet.configRevert(a),
+    configStatus: (a) => fleet.configStatus(a),
+  };
   const settingsApi: SettingsApi = {
     save: async (settings) => {
       const r = await fleet.saveSettings({ settings });
@@ -387,6 +434,7 @@ export function FleetApp() {
         pool={detailPool}
         initialTab={detailTab}
         onTab={setDetailTab}
+        config={pools.config ? configApi : null}
         detail={detail && detail.pool === detailPool ? detail : null}
         range={range}
         onRange={setRange}
@@ -419,6 +467,7 @@ export function FleetApp() {
         signIn={signIn}
         onClose={() => setScreen("main")}
         onRerun={() => setScreen("wizard")}
+        runnerConfig={pools.config ? configApi : null}
       />
     );
   }

@@ -15,6 +15,13 @@ import type { HistoryRange } from "../lib/history.ts";
 import type { PoolDetail } from "../lib/pool-detail.ts";
 import type { LogError, LogView } from "../lib/logs.ts";
 import type { LauncherLog } from "../lib/runner-logs.ts";
+import type { ChangeRecord, ConfigSchema, ConfigShow, ValueChange } from "../lib/runner-config.ts";
+import type { ConfigResult } from "../lib/config-runner.ts";
+
+/** The runner settings' first load. */
+export type ConfigLoad =
+  | { ok: true; schema: ConfigSchema; show: ConfigShow; history: ChangeRecord[] }
+  | { ok: false; message: string };
 
 /** What the page can ask the backend. */
 export interface FleetClient {
@@ -23,7 +30,14 @@ export interface FleetClient {
   visibility(args: { visible: boolean }): Promise<null>;
   capabilities(
     args?: Record<never, never>,
-  ): Promise<{ pools: boolean; restart?: boolean; watchdog?: boolean }>;
+  ): Promise<{ pools: boolean; restart?: boolean; watchdog?: boolean; config?: boolean }>;
+  configLoad(args?: Record<never, never>): Promise<ConfigLoad>;
+  configCheck(
+    args: { changes: ValueChange[] },
+  ): Promise<{ ok: boolean; errors: string[]; warnings: string[] }>;
+  configApply(args: { generation: string; changes: ValueChange[] }): Promise<ConfigResult>;
+  configRevert(args: { id: string; generation: string }): Promise<ConfigResult>;
+  configStatus(args: { id: string }): Promise<ChangeRecord | null>;
   settings(args?: Record<never, never>): Promise<{ settings: FleetSettings; machine: MachineInfo }>;
   saveSettings(args: { settings: FleetSettings }): Promise<SettingsResult>;
   tokenInfo(args?: Record<never, never>): Promise<TokenInfo>;
@@ -48,6 +62,10 @@ export interface FleetClient {
   ): Promise<LogView | LogError>;
   runnerLogForJob(args: { jobId: number }): Promise<LogView | LogError>;
   jobLog(args: { repo: string; jobId: number }): Promise<LogView | LogError>;
+  /** The window zoom (percent, lib/zoom.ts) every page shows. */
+  zoom(args?: Record<never, never>): Promise<number>;
+  /** Keep a new window zoom; answers the level kept (clamped). */
+  setZoom(args: { zoom: number }): Promise<number>;
 }
 
 /** The backend. */

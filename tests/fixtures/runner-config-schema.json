@@ -1,0 +1,113 @@
+{
+  "ok": true,
+  "version": 1,
+  "constants": { "RACK_MEM_BUDGET_MB": 10000 },
+  "groups": {
+    "rack": { "title": "Rack host", "help": "The rack's pools share these." },
+    "fleet": { "title": "Scheduler", "help": "" }
+  },
+  "knobs": [
+    {
+      "key": "SLOTS_GPU_A",
+      "title": "Slots",
+      "scope": "pool",
+      "pool": "gpu-a",
+      "type": "int",
+      "min": 1,
+      "max": 2,
+      "unit": "slots",
+      "needsIdle": false,
+      "help": "Concurrent jobs."
+    },
+    {
+      "key": "MIN_DISK_GB_GPU_A",
+      "title": "Free disk",
+      "scope": "pool",
+      "pool": "gpu-a",
+      "type": "int",
+      "min": 10,
+      "max": 100,
+      "unit": "GB",
+      "needsIdle": false,
+      "help": ""
+    },
+    {
+      "key": "POOL_DISABLED_GPU_A",
+      "title": "Disabled",
+      "scope": "pool",
+      "pool": "gpu-a",
+      "type": "bool",
+      "unit": "",
+      "needsIdle": false,
+      "help": ""
+    },
+    {
+      "key": "RACK_SLOTS",
+      "title": "Containers",
+      "scope": "group",
+      "group": "rack",
+      "type": "int",
+      "min": 1,
+      "max": 3,
+      "unit": "containers",
+      "needsIdle": false,
+      "help": ""
+    },
+    {
+      "key": "RACK_MEM_MB",
+      "title": "Memory per container",
+      "scope": "group",
+      "group": "rack",
+      "type": "int",
+      "min": 1024,
+      "max": 8192,
+      "unit": "MB",
+      "needsIdle": false,
+      "help": ""
+    },
+    {
+      "key": "PAUSE_SECONDS",
+      "title": "Pause length",
+      "scope": "fleet",
+      "group": "fleet",
+      "type": "int",
+      "min": 60,
+      "max": 600,
+      "unit": "s",
+      "needsIdle": false,
+      "help": ""
+    }
+  ],
+  "rules": [
+    {
+      "id": "rack-mem",
+      "sev": "error",
+      "message": "RACK_SLOTS x RACK_MEM_MB <= RACK_MEM_BUDGET_MB",
+      "test": {
+        "le": [
+          { "mul": [{ "key": "RACK_SLOTS" }, { "key": "RACK_MEM_MB" }] },
+          { "const": "RACK_MEM_BUDGET_MB" }
+        ]
+      }
+    },
+    {
+      "id": "disk-floor",
+      "sev": "error",
+      "message": "MIN_DISK_GB_GPU_A > 12 and at least 2 per slot",
+      "test": {
+        "all": [
+          { "lt": [12, { "key": "MIN_DISK_GB_GPU_A" }] },
+          { "ge": [{ "key": "MIN_DISK_GB_GPU_A" }, { "mul": [2, { "key": "SLOTS_GPU_A" }] }] }
+        ]
+      }
+    },
+    {
+      "id": "busy-warn",
+      "sev": "warn",
+      "message": "two slots and three containers is a lot",
+      "test": {
+        "any": [{ "lt": [{ "key": "SLOTS_GPU_A" }, 2] }, { "lt": [{ "key": "RACK_SLOTS" }, 3] }]
+      }
+    }
+  ]
+}

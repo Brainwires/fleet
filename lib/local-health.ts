@@ -8,6 +8,7 @@
 // Pure: the files come in as values.
 
 import type { HealthState, HostHealth, PoolHealth, PoolHealthDoc } from "./health.ts";
+import type { PoolStart } from "./pool-state.ts";
 import { seedPools } from "./pools.ts";
 import { settings } from "./settings.ts";
 
@@ -22,12 +23,30 @@ type LocalPool = {
 
 const text = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
 
-/** Merge the local health file over the variable's state. */
+/** The state with each host's start state (why it cannot start jobs) attached; unchanged with none. */
+export function withStarts(
+  state: HealthState,
+  starts: Readonly<Record<string, PoolStart>>,
+): HealthState {
+  if (state.state !== "ok" && state.state !== "stale") return state;
+  if (Object.keys(starts).length === 0) return state;
+  const hosts: Record<string, HostHealth> = {};
+  for (const [id, h] of Object.entries(state.doc.hosts)) {
+    hosts[id] = { ...h, start: starts[id] ?? null };
+  }
+  return { state: state.state, doc: { ...state.doc, hosts } };
+}
+
+/**
+ * Merge the local health file over the variable's state. `starts` (the scheduler's pool-state file,
+ * by pool name) rides on each host.
+ */
 export function mergeLocalHealth(
   variable: HealthState,
   localJson: unknown,
   paused: ReadonlySet<string>,
   now: number,
+  starts: Readonly<Record<string, PoolStart>> = {},
 ): HealthState {
   const l = localJson as { checked_at_epoch?: unknown; pools?: Record<string, unknown> } | null;
   if (!l || typeof l.checked_at_epoch !== "number" || typeof l.pools !== "object" || !l.pools) {
@@ -35,7 +54,7 @@ export function mergeLocalHealth(
   }
   const checkedAt = l.checked_at_epoch * 1000;
   const base = variable.state === "ok" || variable.state === "stale" ? variable.doc : null;
-  if (base && base.checkedAt >= checkedAt) return variable;
+  if (base && base.checkedAt >= checkedAt) return withStarts(variable, starts);
   const known = new Map(seedPools().map((p) => [p.id, p]));
   const prefix = settings().integrations.runnerScheduler?.runnerNamePrefix ?? "";
   const hosts: Record<string, HostHealth> = {};
@@ -55,6 +74,7 @@ export function mergeLocalHealth(
       label,
       runnerPrefix: text(p.runner_prefix) ?? known.get(id)?.runnerPrefix ??
         (prefix ? `${prefix}${id}-` : null),
+      start: starts[id] ?? null,
     };
   }
   const byLabel = new Map<string, HostHealth[]>();

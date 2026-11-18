@@ -84,8 +84,9 @@ export default {
       // by absolute path only; an internal build adds the runner scheduler's pool commands.
       run: [...ALL_GH_PATHS, SECURITY_BIN, LSREGISTER, OPEN_BIN, ...INTERNAL.run],
       // The settings, state, event log and webhook spool: the app's own data folder only
-      // ($DENO_DESKTOP_DATA on the pinned runtime). No token is ever written there. An internal
-      // build adds a spool folder its local config puts outside it.
+      // ($DENO_DESKTOP_DATA on the pinned runtime). No GitHub token is ever written there (the
+      // runner settings' caller token, runner-config.token, is: mode 0600, only for the scheduler's
+      // configuration helper). An internal build adds a spool folder its local config puts outside it.
       write: ["$APPDATA", ...INTERNAL.write],
     },
   },

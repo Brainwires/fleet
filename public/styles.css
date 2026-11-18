@@ -351,6 +351,17 @@ a:hover {
   color: var(--warn);
   border-color: transparent;
 }
+/* Blocked: a gate holds the launch (amber); busy: every slot busy, jobs queued (informational). */
+.chip-blocked {
+  background: var(--warn-soft);
+  color: var(--warn);
+  border-color: transparent;
+}
+.chip-busy {
+  background: var(--run-soft);
+  color: var(--run);
+  border-color: transparent;
+}
 .chip-unhealthy {
   background: var(--bad);
   color: #fff;
@@ -413,6 +424,13 @@ a:hover {
 }
 .pool-paused {
   border-top-color: var(--warn);
+  background: var(--warn-soft);
+}
+.pool-blocked {
+  border-top-color: var(--warn);
+}
+.pool-busy {
+  border-top-color: var(--run);
 }
 .pool-unhealthy {
   border-top-color: var(--bad);
@@ -587,8 +605,12 @@ a:hover {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.pool-paused .pool-reason {
+.pool-paused .pool-reason,
+.pool-blocked .pool-reason {
   color: var(--warn);
+}
+.pool-busy .pool-reason {
+  color: var(--text-2);
 }
 .health-note {
   margin: 6px 0 0;
@@ -1856,8 +1878,12 @@ code {
 .detail.pool-ok {
   border-top-color: var(--ok);
 }
-.detail.pool-paused {
+.detail.pool-paused,
+.detail.pool-blocked {
   border-top-color: var(--warn);
+}
+.detail.pool-busy {
+  border-top-color: var(--run);
 }
 .detail.pool-unhealthy {
   border-top-color: var(--bad);
@@ -2401,4 +2427,205 @@ table.data .cell-actions {
 .ansi-black,
 .ansi-bright-black {
   color: var(--text-3);
+}
+
+/* Runner settings (app/runner-config-form.tsx): the scheduler's values from its helper's schema. */
+.rc-form input[type="number"] {
+  font: 400 14.5px/1.3 var(--sans);
+  padding: 6px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--line-strong);
+  background: var(--bg);
+  color: var(--text);
+  width: 8.5em;
+}
+.rc-number {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.rc-unit {
+  font-size: 13px;
+  color: var(--text-2);
+}
+.rc-field.is-changed input[type="number"] {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+}
+.rc-field.is-bad input[type="number"] {
+  border-color: var(--bad);
+}
+.rc-bad {
+  color: var(--bad);
+}
+.rc-review {
+  margin: 14px 0 0;
+}
+.rc-h {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.rc-diff {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 14px;
+}
+.rc-from {
+  text-decoration: line-through;
+  color: var(--text-2);
+}
+.rc-to {
+  font-weight: 600;
+}
+.rc-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 0;
+}
+.rc-history {
+  margin: 16px 0 0;
+}
+.rc-history ul {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13.5px;
+  display: grid;
+  gap: 6px;
+}
+.rc-revert {
+  margin-left: 8px;
+}
+.rc-gen {
+  margin-top: 12px;
+}
+
+/* ---- pool start state: why a pool cannot start its queued jobs (lib/pool-state.ts) ---- */
+.pool-start {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+/* Red only for a real failure (the host unreachable); a pause or a gate is amber, a full pool blue. */
+.pool-start-down {
+  color: var(--bad);
+}
+.pool-start-blocked,
+.pool-start-paused {
+  color: var(--warn);
+}
+.pool-start-degraded {
+  color: var(--run);
+}
+
+/* ---- window zoom (lib/zoom.ts, app/zoom-dom.ts): View → Zoom In / Zoom Out / Actual Size ----
+   The page scales its body with CSS zoom; the root carries --fleet-zoom (the factor), its inverse,
+   --fleet-vh (the window's height in zoomed px) and, when zoomed, data-fleet-zoomed. Nothing here
+   applies at 100%. Media queries see the window's real width, not the zoomed one, so the page sets
+   data-fleet-mid / -narrow / -tiny from the effective width (the window's divided by the zoom) and
+   the rules below repeat the breakpoints' rules under them (tests/zoom.test.ts checks they match).
+   Viewport units scale differently per engine under zoom: zoomed heights read --fleet-vh instead. */
+:root[data-fleet-zoomed] body {
+  zoom: var(--fleet-zoom);
+}
+/* The GitHub panel stays at 100%, so the native view's placeholder measures in the window's own px
+   in every engine; the panel's own HTML (toolbar, messages) is zoomed again. */
+:root[data-fleet-zoomed] .webpanel {
+  zoom: var(--fleet-zoom-inv);
+}
+:root[data-fleet-zoomed] .webpanel-bar,
+:root[data-fleet-zoomed] .webpanel-loading,
+:root[data-fleet-zoomed] .webpanel-loading-off,
+:root[data-fleet-zoomed] .webpanel-error,
+:root[data-fleet-zoomed] .webpanel-wait {
+  zoom: var(--fleet-zoom);
+}
+:root[data-fleet-zoomed] .fleet {
+  height: var(--fleet-vh);
+}
+:root[data-fleet-zoomed] .loading {
+  height: var(--fleet-vh);
+}
+:root[data-fleet-zoomed] .detail {
+  height: var(--fleet-vh);
+}
+:root[data-fleet-zoomed] .signin {
+  min-height: var(--fleet-vh);
+}
+:root[data-fleet-zoomed] .setup {
+  min-height: var(--fleet-vh);
+}
+:root[data-fleet-zoomed] .settings {
+  min-height: var(--fleet-vh);
+}
+:root[data-fleet-zoomed] .logview {
+  height: calc(var(--fleet-vh) - 210px);
+}
+/* Rows of fixed-size pieces wrap instead of running off the right edge. */
+:root[data-fleet-zoomed] .top,
+:root[data-fleet-zoomed] .top-right,
+:root[data-fleet-zoomed] .status,
+:root[data-fleet-zoomed] .settings-head,
+:root[data-fleet-zoomed] .settings-nav,
+:root[data-fleet-zoomed] .webpanel-bar,
+:root[data-fleet-zoomed] .log-head,
+:root[data-fleet-zoomed] .log-filters,
+:root[data-fleet-zoomed] .setup-nav,
+:root[data-fleet-zoomed] .tabs {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+:root[data-fleet-zoomed] .top-right {
+  min-width: 0;
+}
+:root[data-fleet-zoomed] .charts {
+  grid-template-columns: repeat(auto-fill, minmax(min(420px, 100%), 1fr));
+}
+/* A real narrow window under 80%: the 1080 px breakpoint's height rule, with --fleet-vh. */
+@media (max-width: 1080px) {
+  :root[data-fleet-zoomed] .fleet {
+    height: auto;
+    min-height: var(--fleet-vh);
+  }
+}
+/* The 1000 px breakpoint, by effective width. */
+:root[data-fleet-narrow] .pools-row {
+  grid-template-columns: minmax(0, 1fr);
+}
+:root[data-fleet-narrow] .pool-github .runners {
+  contain: none;
+  max-height: 220px;
+}
+/* The 1080 px breakpoint, by effective width. */
+:root[data-fleet-mid] .lanes {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+:root[data-fleet-mid] .lanes-q-empty {
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 0.4fr);
+}
+:root[data-fleet-mid] .side {
+  grid-column: 1 / -1;
+  border-left: 0;
+  border-top: 1px solid var(--line);
+}
+:root[data-fleet-mid] .fleet {
+  height: auto;
+  min-height: var(--fleet-vh);
+}
+:root[data-fleet-mid] .ev {
+  grid-template-columns: 76px 18px 84px minmax(0, 1fr) auto;
+}
+:root[data-fleet-mid] .ev-where {
+  display: none;
+}
+/* Under 720 px effective (a small window at 150%, any window near 200%): one lane per row. */
+:root[data-fleet-tiny] .lanes,
+:root[data-fleet-tiny] .lanes-q-empty {
+  grid-template-columns: minmax(0, 1fr);
+}
+:root[data-fleet-tiny] .ev {
+  grid-template-columns: 76px 18px minmax(0, 1fr) auto;
+}
+:root[data-fleet-tiny] .ev-repo {
+  display: none;
 }

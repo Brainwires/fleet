@@ -161,14 +161,16 @@ with `~/`.
   integration's local health file merged in when fresher), else its labels plus the registered
   runners. The scheduler integration's declared pools are only the first render's, before any data
   arrives; a pool that leaves the data leaves the cards. Each card: slots as pips (filled = busy), a
-  state chip (ok / paused / unhealthy / no health) with its reason, and the oldest queued wait, red
-  past 15 min (amber when every slot is busy: the jobs are waiting for capacity, not faulting).
-  Hosts that share a runs-on label (`win-x64` and `win-x64-pc` on `denext-windows-x64`) each show
-  their own numbers; a running job is placed by its runner's name, and a queued job of a shared
-  label sits on that label's first card (its label can't say which host will take it). A long pool
-  name truncates with "…" (full name on hover); the state chip stays on its line. A self-hosted card
-  is compact; when its pool has running jobs, its `busy/slots` count is a toggle that widens the
-  card to two columns and lists the busy runners.
+  state chip with its reason: ok, busy (blue: every slot busy, jobs queued), blocked (amber: a free
+  slot, a gate holds the launch), Paused (amber: paused by hand), unhealthy (red: a real failure,
+  the host unreachable, registration failing, not clean) or no health (`lib/pool-status.ts`), and
+  the oldest queued wait, red past 15 min (amber when every slot is busy: the jobs are waiting for
+  capacity, not faulting). Hosts that share a runs-on label (`win-x64` and `win-x64-pc` on
+  `denext-windows-x64`) each show their own numbers; a running job is placed by its runner's name,
+  and a queued job of a shared label sits on that label's first card (its label can't say which host
+  will take it). A long pool name truncates with "…" (full name on hover); the state chip stays on
+  its line. A self-hosted card is compact; when its pool has running jobs, its `busy/slots` count is
+  a toggle that widens the card to two columns and lists the busy runners.
 - **GitHub-hosted panel**: a wider card beside the self-hosted grid (stacked below it under 1000
   px), as tall as the cards and scrolling inside, with one row per running job's runner: the image
   label from the job's runs-on labels (`macos-15-intel`, `ubuntu-22.04`) and the short runner id
@@ -190,6 +192,12 @@ with `~/`.
   name takes a row's spare width; the runner (`#id` for GitHub's) is capped and gives way first. A
   long branch moves to its own header line before it truncates. With nothing queued, the Queued lane
   shrinks to a narrow column and Running takes the width.
+- **Zoom** (larger text): View → Zoom In (Cmd/Ctrl + or =), Zoom Out (Cmd/Ctrl −) and Actual Size
+  (Cmd/Ctrl 0), 80% to 200% in 10% steps. The keys work in the window itself too (where a menu
+  accelerator doesn't reach). The level is kept in `fleet-view.json` ([Data files](#data-files)),
+  every window opens at it, and a change in one reaches the others. Fleet's page scales itself (CSS
+  `zoom`; at the larger levels the narrow window layouts take over), and the in-app GitHub browser's
+  page follows through the web view's own page zoom where its engine has one.
 - **Side**: the pool-health variable's recent alerts (each clamped to three lines; a click expands
   it, the full text is also the tooltip), and jobs finished in the last 30 min with ✓ / ✕ / ⊘.
 - A click on a run or job opens it on github.com: in the in-app GitHub browser where the window can
@@ -243,8 +251,8 @@ browser instead.
   the keyboard is in GitHub's page or in Fleet's toolbar (as app-menu items while GitHub's page has
   it). Esc returns to Fleet only while the keyboard is in Fleet's own part of the panel (click the
   toolbar first): in GitHub's page, Esc stays with GitHub's own menus and dialogs. Fleet sets its
-  app menu (Edit and Go, the editing items kept) the first time the panel opens; on Windows and
-  Linux that menu is a menu bar in the window.
+  app menu (Edit, View and Go, the editing items kept) when the window opens; on Windows and Linux
+  that menu is a menu bar in the window.
 
 ## Pool detail screens
 
@@ -500,15 +508,26 @@ deno run --no-config --no-prompt "--allow-read=<data dir>[,<spool>][,<health fil
 `claude mcp add --scope user fleet -- …` line for this machine, with its paths. Fleet itself must be
 running for the answers to be fresh. `fleet_status` names the watched owners.
 
-| Tool                 | Arguments                                                                           | Returns                                                                                                                                                                                |
-| -------------------- | ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fleet_status`       | none                                                                                | pools and hosts (health, slots, busy, paused), queue counts and the oldest wait, rate budget, webhooks, the watchdog's `health.json`                                                   |
-| `fleet_runs`         | `repo?`, `branch?`, `sha?` (prefix), `status?`, `limit?`                            | runs newest first, each with its jobs' counts and failed jobs (name + failed step)                                                                                                     |
-| `fleet_jobs`         | `run_id?`, `repo?`, `status?`, `conclusion?`, `pool?`, `limit?`                     | jobs; steps for failed jobs, and for every job when `run_id` is given; `conclusion: "failed"` = failure, timed_out, startup_failure                                                    |
-| `fleet_events`       | `since_seq?`, `kinds?`, `repo?`, `limit?`                                           | `{ events, next_seq, has_more }`: pass `next_seq` back as `since_seq` for only what's new                                                                                              |
-| `fleet_wait`         | `run_ids?`, `job_ids?`, `until`, `timeout_s?` (≤ 1800, default 600)                 | blocks until `any_failure` / `completed` / `first_event`, then `{ triggered, runs, failed_jobs, jobs, events, next_seq }`                                                              |
-| `fleet_pool_history` | `pool` (a pool, `github`, `github:<image>`), `range?` (`1h` / `24h` / `7d` / `30d`) | the pool's bucketed usage (≤ 168 points: busy, slots, utilization, queue, longest wait, jobs by conclusion, minutes, median / p90), totals, the duration histogram, its 20 latest jobs |
-| `fleet_runner_log`   | `job_id` or `pool` + `file`, `tail?` (≤ 2000, default 200)                          | a launcher log's last lines (≤ 256 KB), redacted; only when the server runs with `--logs-dir`                                                                                          |
+| Tool                 | Arguments                                                                           | Returns                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| -------------------- | ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fleet_status`       | none                                                                                | pools and hosts (health, slots, busy, paused), queue counts and the oldest wait, rate budget, webhooks, the watchdog's `health.json`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `fleet_runs`         | `repo?`, `branch?`, `sha?` (prefix), `status?`, `limit?`                            | runs newest first, each with its jobs' counts and failed jobs (name + failed step)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `fleet_jobs`         | `run_id?`, `repo?`, `status?`, `conclusion?`, `pool?`, `limit?`                     | jobs; steps for failed jobs, and for every job when `run_id` is given; `conclusion: "failed"` = failure, timed_out, startup_failure                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `fleet_events`       | `since_seq?`, `kinds?`, `repo?`, `limit?`                                           | `{ events, next_seq, has_more }`: pass `next_seq` back as `since_seq` for only what's new                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `fleet_wait`         | `run_ids?`, `job_ids?`, `until`, `timeout_s?` (≤ 1800, default 600)                 | blocks until `any_failure` / `completed` / `first_event`, then `{ triggered, runs, failed_jobs, jobs, events, next_seq }`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `fleet_pool_health`  | `pool?`                                                                             | WHY a pool is not starting jobs: per pool its start `state` (`healthy` / `degraded` = every slot busy / `blocked` = a free slot, a gate holds the launch / `down` / `paused`), a `code`, the `reason` in plain words with the numbers, `since` / `for_s`, slots / busy / free, each busy slot's phase, and the queued jobs it cannot start with their wait; `status` is the badge Fleet shows (`ok` / `busy` / `blocked` / `paused` / `unhealthy`); `unhealthy` lists the pools to look at, worst first. From a runner scheduler's `pool-state.json` beside `--health-file` (name that file in `--allow-read` too), else the snapshot's `hosts[].start`, else the watchdog's health (`source`) |
+| `fleet_pool_history` | `pool` (a pool, `github`, `github:<image>`), `range?` (`1h` / `24h` / `7d` / `30d`) | the pool's bucketed usage (≤ 168 points: busy, slots, utilization, queue, longest wait, jobs by conclusion, minutes, median / p90), totals, the duration histogram, its 20 latest jobs                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `fleet_runner_log`   | `job_id` or `pool` + `file`, `tail?` (≤ 2000, default 200)                          | a launcher log's last lines (≤ 256 KB), redacted; only when the server runs with `--logs-dir`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+
+**Why a pool is not starting jobs.** A runner scheduler that writes `pool-state.json` beside its
+health file (settings `integrations.runnerScheduler.localHealthFile`) says, per pool, whether it can
+START jobs and why not; Fleet never guesses it. A pool whose job runs fine but which cannot start
+the next one is `degraded`, `blocked`, `paused` or `down`, not healthy. The pool's card badge
+follows it (degraded is "busy", down is "unhealthy", a watchdog report of a paused pool is "Paused",
+never "unhealthy") with the scheduler's reason line ("waiting for RAM: 12 of 16 GB in use by …,
+needs 8", the state's duration and the waiting jobs in its tooltip), the pool's detail page repeats
+it, and the summary (the tray's tooltip) names a pool blocked with a free slot and waiting jobs for
+15 minutes (amber); a down host is red at once. The file's schema and states: `lib/pool-state.ts`.
 
 `repo` takes `owner/name` or just `name`; `status` also takes `active` (anything not completed).
 `fleet_wait` watches the data folder and the webhook spool's folder (plus a 2 s re-read), returns at
@@ -751,6 +770,7 @@ never the GitHub token or any GitHub secret (only the local event stream's own t
 | `snapshot.json`                              | the agents' snapshot, written atomically after every poll and webhook update and at least once a minute (a heartbeat that bumps `written_at` only)                  |
 | `fleet-stream-token`                         | the [event stream](#realtime-stream)'s bearer token: random per install, made on the first start (the one secret here; 0600)                                        |
 | `fleet-stream.json`                          | where the event stream listens (`{ port, pid, started_at }`), written when it starts                                                                                |
+| `fleet-view.json`                            | the window zoom (`{ version: 1, zoom }`, percent; [The window](#the-window)), written when it changes                                                               |
 
 `snapshot.json` is
 `{ v: 1, updated_at, written_at, source: "poll" | "hook", auth, poll, rate, hooks, health, summary, pools, hosts, alerts, event_seq, clock_offset_ms, runs, jobs }`.

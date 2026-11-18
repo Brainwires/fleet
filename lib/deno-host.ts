@@ -6,6 +6,7 @@ import type { FleetNotification } from "./notify.ts";
 import type { PersistedState } from "./poller.ts";
 import { type FleetSettings, LOCAL_CONFIG_FILE, SETTINGS_FILE } from "./settings.ts";
 import type { FleetEvent } from "./events.ts";
+import { parseZoomPrefs, ZOOM_DEFAULT, ZOOM_FILE, zoomPrefs } from "./zoom.ts";
 import {
   LSREGISTER,
   NOTIFIER_STAMP_FILE,
@@ -182,6 +183,20 @@ export async function loadHistory(dir: string): Promise<unknown> {
 /** Write the usage history (0600, atomically). */
 export function saveHistory(dir: string, doc: unknown): Promise<void> {
   return writeJson(dir, HISTORY_FILE, doc);
+}
+
+/** The window zoom the preference file keeps (lib/zoom.ts; the default without a readable file). */
+export async function loadZoom(dir: string): Promise<number> {
+  try {
+    return parseZoomPrefs(JSON.parse(await Deno.readTextFile(join(dir, ZOOM_FILE))));
+  } catch {
+    return ZOOM_DEFAULT;
+  }
+}
+
+/** Write the window zoom's preference file (0600, atomically). */
+export function saveZoom(dir: string, pct: number): Promise<void> {
+  return writeJson(dir, ZOOM_FILE, zoomPrefs(pct), 2);
 }
 
 /** The event journal's events (the rotated file, then the live one), oldest first. */

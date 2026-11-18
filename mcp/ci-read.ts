@@ -128,6 +128,47 @@ export function logLines(text: string): string[] {
   );
 }
 
+/** At most this many failed test names per job. */
+export const FAILED_TESTS_MAX = 100;
+
+/**
+ * The failed tests a job's log names, in order, without duplicates (at most FAILED_TESTS_MAX; `more`
+ * says whether there were others): what an agent needs before reading any log text.
+ * Recognised: cargo test / libtest and Deno's test runners (`test a::b ... FAILED`, `a => ./f.ts:1:2`
+ * under FAILURES, the `failures:` list), TAP (`not ok 3 - name`), and runners that print
+ * `FAIL <file>` / `[FAIL] <name>` / `✗ name` / `× name` (node_compat, vitest, jest).
+ */
+export function failedTests(lines: readonly string[]): { tests: string[]; more: boolean } {
+  const seen = new Set<string>();
+  const add = (raw: string) => {
+    const name = raw.trim().replace(/\s+\(\d+(\.\d+)?\s*m?s\)$/, "").slice(0, 200);
+    if (name && !/^(stdout|stderr|failures)\b:?$/i.test(name)) seen.add(name);
+  };
+  let inList = false;
+  for (const line of lines) {
+    const l = line.replace(/\s+$/, "");
+    let m: RegExpMatchArray | null;
+    if ((m = l.match(/^(?:test )?(.+?) \.\.\. (?:FAILED|failed|TIMED OUT|panicked)\b/))) add(m[1]);
+    else if ((m = l.match(/^---- (.+?) (?:stdout|stderr|output) ----$/))) add(m[1]);
+    else if ((m = l.match(/^(.+?) => (?:\.{0,2}\/|file:\/\/|[A-Za-z]:\\)\S+:\d+:\d+$/))) add(m[1]);
+    else if ((m = l.match(/^not ok \d+ -? ?(.+?)(?: # .*)?$/))) add(m[1]);
+    else if ((m = l.match(/^\s*(?:\[FAIL\]|FAIL:?)\s+(\S*[\/.:]\S*(?: > .*)?)$/))) add(m[1]);
+    else if ((m = l.match(/^\s*(?:✗|×|✖|✘)\s+(\S.*)$/))) add(m[1]);
+    // libtest's closing list: `failures:` then indented names until a blank line.
+    if (/^failures:$/.test(l)) {
+      inList = true;
+      continue;
+    }
+    if (inList) {
+      if ((m = l.match(/^ {4}(\S.*)$/))) add(m[1]);
+      else if (l === "" && seen.size > 0) inList = false;
+      else if (l !== "" && !l.startsWith("----")) inList = false;
+    }
+  }
+  const all = [...seen];
+  return { tests: all.slice(0, FAILED_TESTS_MAX), more: all.length > FAILED_TESTS_MAX };
+}
+
 /** The lines matching `re` with `context` around each, numbered, `--` between separate hunks. */
 export function grepLines(lines: readonly string[], re: RegExp, context: number, max: number) {
   const keep = new Set<number>();

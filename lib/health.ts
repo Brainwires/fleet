@@ -4,6 +4,8 @@
 // `pools` merges the pools that share a label; `hosts` (newer watchdogs) keeps each pool apart. The variable may be missing (404), garbage, or stale (the watchdog
 // down); every case parses to a result the UI can show, never a throw.
 
+import type { PoolStart } from "./pool-state.ts";
+
 /** One pool's health as published. */
 export interface PoolHealth {
   readonly ok: boolean;
@@ -21,6 +23,8 @@ export interface HostHealth extends PoolHealth {
   readonly label: string | null;
   /** The runner-name prefix (`acme-win-x64-b-`), `null` when the source doesn't say. */
   readonly runnerPrefix: string | null;
+  /** Whether the pool can START jobs and why not (the scheduler's pool-state file); absent without one. */
+  readonly start?: PoolStart | null;
 }
 
 /** One alert line. */

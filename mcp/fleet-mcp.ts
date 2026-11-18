@@ -11,7 +11,7 @@
 //
 // (`deno task mcp` does, for macOS's data folder; the Settings view shows the command for this
 // machine.) Tools: fleet_status, fleet_runs, fleet_jobs, fleet_events, fleet_wait,
-// fleet_pool_history, fleet_runner_log (with --logs-dir). Every answer
+// fleet_pool_health, fleet_pool_history, fleet_runner_log (with --logs-dir). Every answer
 // carries its freshness (`as_of`, `stale`, `warning`); fleet_status names the watched owners.
 //
 // Realtime: the resources `fleet://events` and `fleet://status` take `resources/subscribe`, and
@@ -35,7 +35,8 @@ import {
   JOURNAL_OLD_FILE,
   LOG_FILE,
 } from "../lib/agent-files.ts";
-import type { AgentSnapshot } from "../lib/agent-snapshot.ts";
+import { type AgentPoolStart, type AgentSnapshot, agentStart } from "../lib/agent-snapshot.ts";
+import { currentPoolStarts, parsePoolState } from "../lib/pool-state.ts";
 import { type FleetEvent, isProblem } from "../lib/events.ts";
 import { HistoryStore } from "../lib/history.ts";
 import { launcherForJob, launcherPath, readTail } from "../lib/deno-logs.ts";
@@ -53,6 +54,7 @@ import {
   freshness,
   jobsResult,
   MAX_WAIT_S,
+  poolHealthResult,
   runsResult,
   statusResult,
   type WaitArgs,
@@ -266,6 +268,20 @@ export class FleetFiles {
     return typeof raw === "object" && raw !== null ? raw as WatchdogFile : null;
   }
 
+  /**
+   * The runner scheduler's `pool-state.json` beside the watchdog's health file (each pool's start
+   * state), or `null`: no health file given, the file unreadable (the server's read grant must name
+   * it), not written yet, or older than the scheduler's last ticks.
+   */
+  async poolStarts(now: number): Promise<Record<string, AgentPoolStart> | null> {
+    if (!this.paths.healthFile) return null;
+    const file = join(this.paths.healthFile.replace(/[/\\][^/\\]*$/, ""), "pool-state.json");
+    const cur = currentPoolStarts(parsePoolState(await readJson(file)), now);
+    const ids = Object.keys(cur);
+    if (ids.length === 0) return null;
+    return Object.fromEntries(ids.map((id) => [id, agentStart(cur[id])]));
+  }
+
   /** When the webhook spool was last written (epoch ms), or `null`. */
   async hooksSpoolAt(): Promise<number | null> {
     if (!this.paths.hooksDir) return null;
@@ -386,6 +402,28 @@ export const TOOLS = [
         },
         repo: repoProp,
         limit: { type: "integer", minimum: 1, maximum: 500, default: 100 },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "fleet_pool_health",
+    description:
+      "WHY a runner pool is not starting jobs (no GitHub API call): per pool its start state " +
+      "(healthy / degraded = every slot busy / blocked = a free slot but a gate holds the launch / " +
+      "down = host unreachable / paused), the reason in plain words with the numbers as the runner " +
+      'scheduler decided it on its last tick ("waiting for RAM: 12 of 16 GB in use by ...", ' +
+      '"disk 31 GB < 35 needed", "paused by ... , 4 min left"), since when, running / queued / ' +
+      "free slots, each busy slot's phase, and the queued jobs it cannot start with their wait. A " +
+      "pool whose job runs fine but which cannot start the next one is NOT healthy here. " +
+      "`status` is the badge Fleet shows (ok / busy / blocked / Paused / unhealthy, red only for " +
+      "a real failure: host unreachable, registration failing). `unhealthy` lists the pools to " +
+      "look at, worst first. `pool` narrows to one. " +
+      UNTRUSTED_NOTE,
+    inputSchema: {
+      type: "object",
+      properties: {
+        pool: { type: "string", description: "Pool short name (as fleet_status lists)." },
       },
       additionalProperties: false,
     },
@@ -730,6 +768,8 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
         return eventsResult(await files.snapshot(), await files.events(), now(), args);
       case "fleet_wait":
         return await wait(waitArgs(args), signal, progress);
+      case "fleet_pool_health":
+        return poolHealthResult(await files.snapshot(), now(), args, await files.poolStarts(now()));
       case "fleet_pool_history":
         return poolHistoryResult(
           await files.history(),

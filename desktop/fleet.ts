@@ -12,6 +12,7 @@ import {
   loadLog,
   loadSettingsFiles,
   loadState,
+  loadZoom,
   postNotification,
   readJournal,
   registerNotifierHelper,
@@ -20,7 +21,9 @@ import {
   saveLog,
   saveSettings,
   saveState,
+  saveZoom,
 } from "../lib/deno-host.ts";
+import { createZoomStore, ZOOM_EVENT, type ZoomStore } from "../lib/zoom.ts";
 import { CHANGED_EVENT, type Snapshot } from "../lib/model.ts";
 import type { FleetEvent } from "../lib/events.ts";
 import { createStream, type FleetStream, replayFrom, statusMessage } from "../lib/stream.ts";
@@ -39,6 +42,17 @@ import {
 } from "../lib/control-runner.ts";
 import { home, localHealthReader, localPoolPaths, runProgram } from "../lib/deno-pools.ts";
 import { ciLedgerDir, ciLedgerReader } from "../lib/ci-ledger.ts";
+import { ensureConfigToken, localConfigHelper, runProgramJson } from "../lib/deno-config.ts";
+import {
+  configCheck,
+  type ConfigDeps,
+  configHistory,
+  configSchema,
+  configShow,
+  configStatus,
+  runConfigApply,
+  runConfigRevert,
+} from "../lib/config-runner.ts";
 import {
   hooksUnavailable,
   readHookSecret,
@@ -59,6 +73,8 @@ import { launcherForJob, listLauncherLogs, poolLogLines, runnerLogView } from ".
 let service: FleetService | undefined;
 let jobLogs: JobLogs | undefined;
 let extHost: DesktopExtensionHost | undefined;
+/** The window zoom every page shows (lib/zoom.ts), kept in the data folder's `fleet-view.json`. */
+let zoom: ZoomStore | undefined;
 /** The pool commands the settings configure here (the runner scheduler integration), or `null`. */
 const pools = (): PoolPaths | null => localPoolPaths(settings().integrations.runnerScheduler);
 /** Test builds: controls show their dialogs and send nothing (set in the environment at launch). */
@@ -76,6 +92,17 @@ function start(host: DesktopExtensionHost): void {
   if (service) return;
   extHost = host;
   const dir = host.appSupportDir;
+  zoom = createZoomStore({
+    load: () => loadZoom(dir),
+    save: (pct) => saveZoom(dir, pct),
+    onChange: (pct) => {
+      try {
+        host.emit(ZOOM_EVENT, { zoom: pct });
+      } catch {
+        // No page subscribed: each reads the level when it opens.
+      }
+    },
+  });
   // The embedded Fleet Notifier, registered with LaunchServices once per build (a ditto install
   // doesn't), then asked for its notification permission (the prompt shows at Fleet's launch).
   void registerNotifierHelper(dir);
@@ -286,6 +313,32 @@ function controlDeps(): ControlDeps {
   };
 }
 
+/** The runner settings' machine access, or `null` when no configuration helper exists here. */
+function configDeps(): ConfigDeps | null {
+  const helper = localConfigHelper(settings().integrations.runnerScheduler);
+  if (!helper || !extHost) return null;
+  const dir = extHost.appSupportDir;
+  let user = "";
+  try {
+    user = (Deno.env.get("USER") ?? "").replace(/[^A-Za-z0-9._-]/g, "").slice(0, 32);
+  } catch {
+    user = "";
+  }
+  return {
+    run: (args, input) => runProgramJson(helper, args, input),
+    token: () => ensureConfigToken(dir),
+    confirm: async (o) => {
+      if (!extHost) throw new DesktopCapError("unavailable", "no desktop host");
+      return await extHost.confirm(o);
+    },
+    log: (e) => svc().logAction(e),
+    actor: user ? `fleet-${user}` : "fleet",
+    dryRun: DRY_RUN,
+  };
+}
+
+const NO_CONFIG = "Runner settings need the scheduler's configuration helper on this machine.";
+
 function obj(raw: unknown): Record<string, unknown> {
   return typeof raw === "object" && raw !== null ? raw as Record<string, unknown> : {};
 }
@@ -307,7 +360,7 @@ const optNum = (v: unknown): number | undefined =>
 
 export default defineDesktopExtension({
   name: "fleet",
-  events: [CHANGED_EVENT],
+  events: [CHANGED_EVENT, ZOOM_EVENT],
   setup: start,
   methods: {
     /** The snapshot; `visible` says whether the calling page is on screen (poll rate). */
@@ -348,7 +401,12 @@ export default defineDesktopExtension({
     capabilities: {
       handler: () => {
         const p = pools();
-        return { pools: p !== null, restart: !!p?.launchdLabel, watchdog: !!p?.watchdog };
+        return {
+          pools: p !== null,
+          restart: !!p?.launchdLabel,
+          watchdog: !!p?.watchdog,
+          config: localConfigHelper(settings().integrations.runnerScheduler) !== null,
+        };
       },
     },
     /** The settings, and what the Settings view shows about this machine. */
@@ -408,6 +466,54 @@ export default defineDesktopExtension({
     poolControl: {
       timeoutMs: false,
       handler: (raw: unknown) => runPoolControl(controlDeps(), raw),
+    },
+    /** Runner settings: the helper's schema, the live values and the newest changes. */
+    configLoad: {
+      timeoutMs: 90_000,
+      handler: async () => {
+        const d = configDeps();
+        if (!d) return { ok: false, message: NO_CONFIG };
+        const [schema, show, history] = await Promise.all([
+          configSchema(d),
+          configShow(d),
+          configHistory(d),
+        ]);
+        if (!schema.ok) return { ok: false, message: schema.message };
+        if (!show.ok) return { ok: false, message: show.message };
+        return { ok: true, schema: schema.schema, show: show.show, history };
+      },
+    },
+    /** Runner settings: the helper's check of a change (nothing written). */
+    configCheck: {
+      timeoutMs: 90_000,
+      handler: (raw: unknown) => {
+        const d = configDeps();
+        return d ? configCheck(d, raw) : { ok: false, errors: [NO_CONFIG], warnings: [] };
+      },
+    },
+    /** Runner settings: apply a change (guardrails, the OS dialog, the helper). */
+    configApply: {
+      timeoutMs: false,
+      handler: (raw: unknown) => {
+        const d = configDeps();
+        return d ? runConfigApply(d, raw) : { ok: false, message: NO_CONFIG };
+      },
+    },
+    /** Runner settings: revert the newest change (the OS dialog, the helper). */
+    configRevert: {
+      timeoutMs: false,
+      handler: (raw: unknown) => {
+        const d = configDeps();
+        return d ? runConfigRevert(d, raw) : { ok: false, message: NO_CONFIG };
+      },
+    },
+    /** Runner settings: one change's status while the helper verifies it. */
+    configStatus: {
+      timeoutMs: 30_000,
+      handler: (raw: unknown) => {
+        const d = configDeps();
+        return d ? configStatus(d, raw) : null;
+      },
     },
     /** A pool's detail (or `github`): its usage history over a range, recent jobs and events. */
     poolDetail: {
@@ -472,6 +578,21 @@ export default defineDesktopExtension({
         const repo = typeof r.repo === "string" ? r.repo : rec?.repo ?? "";
         const title = rec ? `${rec.workflow} · ${rec.name}` : `job ${jobId}`;
         return jobLogs!.get(repo, jobId, title, rec !== undefined);
+      },
+    },
+    /** The window zoom (percent) every page shows. */
+    zoom: {
+      handler: async () => {
+        if (!zoom) throw new DesktopCapError("unavailable", "Fleet's backend is starting");
+        await zoom.ready();
+        return zoom.level();
+      },
+    },
+    /** A new window zoom: clamped, saved, pushed to every page; answers the level kept. */
+    setZoom: {
+      handler: (raw: unknown) => {
+        if (!zoom) throw new DesktopCapError("unavailable", "Fleet's backend is starting");
+        return zoom.set(obj(raw).zoom);
       },
     },
     clearToken: {

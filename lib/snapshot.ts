@@ -29,6 +29,11 @@ import {
   poolFromRunnerName,
   poolIdOfLabel,
 } from "./pools.ts";
+import { startLine } from "./pool-state.ts";
+import { poolStatus } from "./pool-status.ts";
+
+/** A pool blocked (a free slot, jobs waiting) this long shows in the summary. */
+export const POOL_BLOCKED_WARN_MS = 15 * 60_000;
 
 /** What the builder reads. */
 export interface SnapshotInput {
@@ -116,8 +121,7 @@ export function poolCards(
     let state: PoolCard["state"] = "unknown";
     let reason = "";
     if (h) {
-      state = !h.ok ? "unhealthy" : h.paused ? "paused" : "ok";
-      reason = h.reason;
+      ({ state, reason } = poolStatus(h, host?.start ?? null));
     } else if (sh) {
       reason = "health is stale";
     } else if (def?.labels && runners) {
@@ -140,6 +144,7 @@ export function poolCards(
       reason,
       since: h?.since ?? null,
       oldestQueuedSince: q.length ? Math.min(...q.map((r) => r.since)) : null,
+      start: host?.start ?? null,
     };
   });
   // Pools that share a machine share its capacity: sum their busy slots against the largest slot count.
@@ -180,8 +185,9 @@ export function poolCards(
 /**
  * The summary: `N running · M queued`, red (`alert`) when a pool is unhealthy or a job has been
  * queued over 15 min (a wait for a free slot on a full pool is only noted: "N waiting for
- * capacity", no severity), amber (`warn`) for a paused pool, a job over its usual length, stale health
- * or a failing poll.
+ * capacity", no severity), amber (`warn`) for a paused pool, a pool blocked for a while (a free slot,
+ * jobs waiting), a job over its usual length, stale health or a failing poll. A busy pool (every slot
+ * busy) is no severity; only `unhealthy` (a real failure) is red (lib/pool-status.ts).
  */
 export function summarize(
   running: readonly JobRow[],
@@ -203,6 +209,15 @@ export function summarize(
       raise("warn");
       reasons.push(`${p.title} paused`);
     }
+  }
+  // A pool blocked from STARTING its queued jobs (the scheduler's own reason), for a while.
+  for (const p of pools) {
+    const st = p.start;
+    if (!st || p.state !== "blocked") continue;
+    if ((st.free ?? 0) <= 0 || st.blockedJobs.length === 0) continue;
+    if (st.stateSince === null || now - st.stateSince < POOL_BLOCKED_WARN_MS) continue;
+    raise("warn");
+    reasons.push(`${p.title} ${startLine(st, now)}`);
   }
   const late = queued.filter((r) => jobWarning(r, now) === "queued-long").length;
   if (late) {

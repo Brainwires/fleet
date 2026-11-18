@@ -6,6 +6,8 @@
 // its lines about the pool (when configured), and any recent job's GitHub log, in the log viewer.
 // Presentational over props, like the main view: the data and the loaders come in.
 
+import { type ConfigApi, RunnerConfigForm } from "./runner-config-form.tsx";
+import type { DetailTab } from "./web-panel/origin.ts";
 import { useCallback, useEffect, useRef, useState } from "denext";
 import { type ChartSeries, Histogram, TimeChart } from "./charts.tsx";
 import { LogViewer } from "./log-viewer.tsx";
@@ -23,6 +25,8 @@ import type { PoolDetail } from "../lib/pool-detail.ts";
 import type { LogError, LogView } from "../lib/logs.ts";
 import type { LauncherLog } from "../lib/runner-logs.ts";
 import { formatAgo, formatClock, formatDuration, shortRepo, shortRunner } from "../lib/format.ts";
+import { startLine } from "../lib/pool-state.ts";
+import { POOL_STATE_TEXT } from "../lib/pool-status.ts";
 
 /** What the Logs tab loads (the backend's methods). */
 export interface LogsApi {
@@ -52,9 +56,11 @@ export interface PoolDetailProps {
   readonly controls?: ControlHandlers;
   readonly logs?: LogsApi;
   /** The tab to open on (a restored screen; tests). */
-  readonly initialTab?: "usage" | "logs";
+  readonly initialTab?: DetailTab;
   /** Hears the tab (on mount and on every change), so a screen can be restored on it. */
-  readonly onTab?: (tab: "usage" | "logs") => void;
+  readonly onTab?: (tab: DetailTab) => void;
+  /** The runner settings (when the scheduler's configuration helper is here): a Settings tab. */
+  readonly config?: ConfigApi | null;
   readonly error?: string;
 }
 
@@ -66,7 +72,6 @@ const RANGE_TEXT: Record<HistoryRange, string> = {
 };
 const STEP_TEXT = (ms: number) =>
   ms >= 3600_000 ? `${ms / 3600_000} h` : ms >= 60_000 ? `${ms / 60_000} min` : `${ms / 1000} s`;
-const STATE_TEXT = { ok: "ok", paused: "paused", unhealthy: "unhealthy", unknown: "no health" };
 
 const pct = (v: number | null) => (v === null ? "–" : `${Math.round(v * 100)}%`);
 const mins = (ms: number) => ms / 60_000;
@@ -694,7 +699,12 @@ function LinesBox({ lines, empty }: { lines: readonly string[] | null; empty: st
 /** The screen. */
 export function PoolDetailView(props: PoolDetailProps) {
   const { detail: d, onBack } = props;
-  const [tab, setTab] = useState<"usage" | "logs">(props.initialTab ?? "usage");
+  const tabs: readonly DetailTab[] = props.config && props.pool !== "github"
+    ? ["usage", "logs", "settings"]
+    : ["usage", "logs"];
+  const [tab, setTab] = useState<DetailTab>(
+    tabs.includes(props.initialTab ?? "usage") ? props.initialTab ?? "usage" : "usage",
+  );
   const { onTab } = props;
   useEffect(() => onTab?.(tab), [tab, onTab]);
   const [opened, setOpened] = useState<LogView | LogError | "loading" | null>(null);
@@ -743,9 +753,21 @@ export function PoolDetailView(props: PoolDetailProps) {
         </button>
         <div class="detail-title">
           <h1 class="detail-name" ref={heading} tabIndex={-1}>{title}</h1>
-          {card ? <span class={`chip chip-${card.state}`}>{STATE_TEXT[card.state]}</span> : null}
-          {card?.reason
+          {card
+            ? <span class={`chip chip-${card.state}`}>{POOL_STATE_TEXT[card.state]}</span>
+            : null}
+          {card?.reason && card.reason !== card.start?.reason
             ? <span class="muted small detail-reason" title={card.reason}>{card.reason}</span>
+            : null}
+          {card?.start && card.start.state !== "healthy"
+            ? (
+              <span
+                class={`small detail-reason pool-start-${card.start.state}`}
+                title={card.start.detail ?? card.start.reason}
+              >
+                {startLine(card.start, Date.now())}
+              </span>
+            )
             : null}
         </div>
         <dl class="detail-facts">
@@ -817,7 +839,7 @@ export function PoolDetailView(props: PoolDetailProps) {
       {props.error ? <p class="banner banner-warn" role="status">{props.error}</p> : null}
 
       <div class="tabs" role="tablist" aria-label="Pool detail">
-        {(["usage", "logs"] as const).map((k) => (
+        {tabs.map((k) => (
           <button
             key={k}
             type="button"
@@ -831,11 +853,12 @@ export function PoolDetailView(props: PoolDetailProps) {
             onKeyDown={(e) => {
               if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
                 e.preventDefault();
-                setTab(k === "usage" ? "logs" : "usage");
+                const i = tabs.indexOf(k) + (e.key === "ArrowRight" ? 1 : tabs.length - 1);
+                setTab(tabs[i % tabs.length]);
               }
             }}
           >
-            {k === "usage" ? "Usage" : "Logs"}
+            {k === "usage" ? "Usage" : k === "logs" ? "Logs" : "Settings"}
           </button>
         ))}
       </div>
@@ -919,6 +942,20 @@ export function PoolDetailView(props: PoolDetailProps) {
                 </section>
               </>
             )}
+          </main>
+        )
+        : tab === "settings" && props.config
+        ? (
+          <main
+            class="detail-body"
+            role="tabpanel"
+            id="panel-settings"
+            aria-labelledby="tab-settings"
+          >
+            <RunnerConfigForm api={props.config} pool={props.pool} />
+            <p class="set-hint">
+              Shared settings (host budgets, pauses, logs) are in Settings → Runner settings.
+            </p>
           </main>
         )
         : (

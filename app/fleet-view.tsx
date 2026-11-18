@@ -20,6 +20,8 @@ import { EventLog } from "./event-log.tsx";
 import { type ControlHandlers, PoolControls, RunControls } from "./controls.tsx";
 import type { FinishedJob, JobRow, PoolCard, RepoGroup, RunGroup, Snapshot } from "../lib/model.ts";
 import { type FreshState, statusFreshness } from "../lib/status-line.ts";
+import { startLine } from "../lib/pool-state.ts";
+import { POOL_STATE_TEXT } from "../lib/pool-status.ts";
 
 /** The view's props. */
 export interface FleetViewProps {
@@ -97,12 +99,13 @@ function Pips({ busy, slots }: { busy: number; slots: number | null }) {
   );
 }
 
-const STATE_TEXT: Record<PoolCard["state"], string> = {
-  ok: "ok",
-  paused: "paused",
-  unhealthy: "unhealthy",
-  unknown: "no health",
-};
+/** The scheduler's start line and the jobs it cannot start, when the badge's reason is its own. */
+function startTitle(pool: PoolCard, now: number): string | null {
+  const st = pool.start;
+  if (!st || st.state === "healthy" || st.reason !== pool.reason) return null;
+  return [startLine(st, now), ...st.blockedJobs.slice(0, 8).map((j) => `waiting: ${j.name}`)]
+    .join("\n");
+}
 
 /** A running job with the run it belongs to: one row of a pool's runner breakdown. */
 export interface RunnerEntry {
@@ -230,7 +233,7 @@ function PoolCardView(
             </button>
           )
           : <span class="pool-name" title={pool.title}>{pool.title}</span>}
-        <span class={`chip chip-${pool.state}`}>{STATE_TEXT[pool.state]}</span>
+        <span class={`chip chip-${pool.state}`}>{POOL_STATE_TEXT[pool.state]}</span>
       </div>
       <div class="pool-load">
         <Pips busy={pool.busy} slots={pool.slots} />
@@ -256,7 +259,26 @@ function PoolCardView(
           </>
         )}
       </div>
-      {pool.reason ? <div class="pool-reason" title={pool.reason}>{pool.reason}</div> : null}
+      {pool.reason
+        ? <div class="pool-reason" title={startTitle(pool, now) ?? pool.reason}>{pool.reason}</div>
+        : null}
+      {
+        /* Why it cannot start the queued jobs, in the scheduler's own words (lib/pool-state.ts),
+           when the badge's reason is another (the watchdog's). */
+        pool.start && pool.start.state !== "healthy" && pool.start.reason !== pool.reason
+          ? (
+            <div
+              class={`pool-reason pool-start pool-start-${pool.start.state}`}
+              title={[
+                startLine(pool.start, now),
+                ...pool.start.blockedJobs.slice(0, 8).map((j) => `waiting: ${j.name}`),
+              ].join("\n")}
+            >
+              {startLine(pool.start, now)}
+            </div>
+          )
+          : null
+      }
       {expanded
         ? (
           <RunnerList

@@ -247,6 +247,7 @@ Deno.test("local health: the mini's health.json keys hosts by pool, merging a sh
   const cards = withPools(m, null, () => poolCards([], [], m, []));
   assertEquals(
     cards.filter((c) => c.label === WIN_LABEL).map((c) => [c.id, c.slots, c.state]),
-    [["win-x64", 1, "ok"], ["win-x64-pc", 1, "unhealthy"]],
+    // Paused by hand: its badge is Paused whatever else the watchdog says (lib/pool-status.ts).
+    [["win-x64", 1, "ok"], ["win-x64-pc", 1, "paused"]],
   );
 });

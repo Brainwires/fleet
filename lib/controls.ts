@@ -413,6 +413,8 @@ export interface PoolPaths {
   readonly launchctl: string;
   /** The scheduler's launchd label (`""`: no restart offered). */
   readonly launchdLabel: string;
+  /** The configuration helper (`""`: no runner settings offered). */
+  readonly configHelper: string;
 }
 
 /** launchd's control tool. */
@@ -426,8 +428,15 @@ export function poolPaths(
   if (!controls) return null;
   const pausePool = expandHome(controls.pausePool, home);
   const watchdog = controls.watchdog ? expandHome(controls.watchdog, home) : "";
-  if (!pausePool || watchdog === null) return null;
-  return { pausePool, watchdog, launchctl: LAUNCHCTL, launchdLabel: controls.launchdLabel };
+  const configHelper = controls.configHelper ? expandHome(controls.configHelper, home) : "";
+  if (!pausePool || watchdog === null || configHelper === null) return null;
+  return {
+    pausePool,
+    watchdog,
+    launchctl: LAUNCHCTL,
+    launchdLabel: controls.launchdLabel,
+    configHelper,
+  };
 }
 
 /** A pool command. */
@@ -525,5 +534,6 @@ export function poolPrograms(paths: PoolPaths): string[] {
     paths.pausePool,
     ...(paths.watchdog ? [paths.watchdog] : []),
     ...(paths.launchdLabel ? [paths.launchctl] : []),
+    ...(paths.configHelper ? [paths.configHelper] : []),
   ];
 }

@@ -160,6 +160,8 @@ export class GitHubBrowser<O = unknown> {
   #statusAtHide: LinkStatus = null;
   /** A stale page's reload, quiet until its timer shows the loading bar. */
   #quiet: ReturnType<typeof setTimeout> | undefined;
+  /** The window zoom (a factor, lib/zoom.ts) the GitHub page shows too. */
+  #zoom = 1;
 
   constructor(deps: GitHubBrowserDeps<O>) {
     this.#deps = deps;
@@ -301,6 +303,7 @@ export class GitHubBrowser<O = unknown> {
       permissions: "deny",
     }).then((view) => {
       this.#view = view;
+      if (this.#zoom !== 1) this.#applyZoom(view);
       // The page was requested at creation (hidden); its "loading" may come before this listener.
       this.#gate.close(true);
       this.#listen(view);
@@ -489,6 +492,24 @@ export class GitHubBrowser<O = unknown> {
     this.#endQuiet();
     this.#set({ open: false, viewFocused: false, waiting: false, canReturn: false });
     if (origin) this.#deps.onReturn?.(origin.value);
+  }
+
+  /**
+   * The window zoom (a factor: 1.5 for 150%), for the GitHub page as well: the view's own page zoom
+   * where its engine has one (`setZoom`, `webViewCapabilities().zoom`); elsewhere it stays at 100%.
+   */
+  setZoom(factor: number): void {
+    if (!Number.isFinite(factor) || factor <= 0 || factor === this.#zoom) return;
+    this.#zoom = factor;
+    if (this.#view) this.#applyZoom(this.#view);
+  }
+
+  #applyZoom(view: WebViewHandle): void {
+    const set = (view as { setZoom?: (factor: number) => Promise<void> }).setZoom;
+    if (typeof set !== "function") return;
+    void set.call(view, this.#zoom).catch(() => {
+      // An engine without page zoom for its views: GitHub's page stays at 100%.
+    });
   }
 
   /** Close the view for good (Fleet's page unmounting). */

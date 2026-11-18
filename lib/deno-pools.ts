@@ -5,6 +5,7 @@
 import { type PoolPaths, poolPaths } from "./controls.ts";
 import type { HealthState } from "./health.ts";
 import { mergeLocalHealth } from "./local-health.ts";
+import { currentPoolStarts, parsePoolState, type PoolStart } from "./pool-state.ts";
 import { expandHome, type RunnerSchedulerIntegration } from "./settings.ts";
 
 /** $HOME, or `null`. */
@@ -63,7 +64,22 @@ export async function readLocalHealth(
       // No pauses readable: none shown.
     }
   }
-  return mergeLocalHealth(variable, json, paused, Date.now());
+  const now = Date.now();
+  return mergeLocalHealth(variable, json, paused, now, await readPoolStarts(file, now));
+}
+
+/** The scheduler's `pool-state.json` beside its health file: each pool's start state; none when unreadable or old. */
+export async function readPoolStarts(
+  healthFile: string,
+  now: number,
+): Promise<Readonly<Record<string, PoolStart>>> {
+  const dir = healthFile.replace(/[/\\][^/\\]*$/, "");
+  try {
+    const doc = parsePoolState(JSON.parse(await Deno.readTextFile(`${dir}/pool-state.json`)));
+    return currentPoolStarts(doc, now);
+  } catch {
+    return {};
+  }
 }
 
 /** Run one allowlisted program (argv, no shell), at most 10 minutes; its first 2 KB of output. */

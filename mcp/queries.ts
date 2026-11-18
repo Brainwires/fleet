@@ -6,11 +6,13 @@ import {
   AGENT_NAME_MAX,
   AGENT_NOTE_MAX,
   type AgentJob,
+  type AgentPoolStart,
   type AgentRun,
   type AgentSnapshot,
   capText,
 } from "../lib/agent-snapshot.ts";
 import type { FleetEvent } from "../lib/events.ts";
+import { healthIsPaused, poolStatus } from "../lib/pool-status.ts";
 
 /** Fleet counts as running while it wrote the snapshot this recently. */
 export const RUNNING_WITHIN_MS = 2 * 60_000;
@@ -225,6 +227,84 @@ export function statusResult(
     watchdog,
     hooks_spool: hooksSpool,
   };
+}
+
+// ---- fleet_pool_health ----
+
+/** A pool the watchdog says nothing about: the scheduler's word alone decides its badge. */
+const START_OK = { ok: true, paused: false, reason: "" };
+
+/**
+ * fleet_pool_health's answer: per pool whether it can START jobs and, when not, why — the runner
+ * scheduler's own reason with since-when and the jobs it cannot start. `starts` is the scheduler's
+ * state file read directly (fresher: every tick); without it the snapshot's hosts[].start; a pool the
+ * scheduler says nothing about falls back to the watchdog's health (`source: "watchdog"`).
+ * `unhealthy` lists the pools that are not healthy, worst first.
+ */
+export function poolHealthResult(
+  snap: AgentSnapshot | null,
+  now: number,
+  args: Args,
+  starts: Readonly<Record<string, AgentPoolStart>> | null = null,
+) {
+  const fresh = freshness(snap, now);
+  const only = optString(args, "pool");
+  const ghNow = now + (typeof snap?.clock_offset_ms === "number" ? snap.clock_offset_ms : 0);
+  const age = (iso: string | null, clock = now) =>
+    iso === null ? null : Math.max(0, Math.round((clock - Date.parse(iso)) / 1000));
+  const cards = new Map((snap?.pools ?? []).map((p) => [p.id, p]));
+  const hosts = new Map((snap?.hosts ?? []).map((h) => [h.id, h]));
+  const ids = [...new Set([...hosts.keys(), ...Object.keys(starts ?? {})])];
+  const pools = ids.filter((id) => !only || id === only).map((id) => {
+    const h = hosts.get(id) ?? null;
+    const card = cards.get(id);
+    const s = starts?.[id] ?? h?.start ?? null;
+    // Without the scheduler's word: the watchdog's (it knows unhealthy and paused, not blocked; a
+    // paused pool it reports as not healthy, "paused by pause-pool.sh", is paused, not down).
+    const paused = healthIsPaused(h);
+    const state = s?.state ?? (paused ? "paused" : h?.ok ? "healthy" : "down");
+    // The badge every Fleet surface shows (lib/pool-status.ts): red `unhealthy` only for a failure.
+    const status = h ? poolStatus(h, s).state : s ? poolStatus(START_OK, s).state : "unknown";
+    const since = s?.state_since ?? h?.since ?? null;
+    return {
+      pool: id,
+      label: h?.label ?? null,
+      state,
+      status,
+      code: s?.code ?? (paused ? "paused" : h?.ok ? "ok" : "watchdog"),
+      reason: s?.reason ?? h?.reason ?? "",
+      ...(s?.detail ? { detail: s.detail } : {}),
+      since,
+      for_s: age(since),
+      source: s ? "scheduler" : "watchdog",
+      ...(s && h && !h.ok && h.reason && h.reason !== s.reason
+        ? { watchdog_reason: h.reason }
+        : {}),
+      slots: s?.slots ?? h?.slots ?? null,
+      busy: s?.busy ?? h?.busy ?? null,
+      free: s?.free ?? null,
+      running: card?.running ?? null,
+      queued: s?.queued ?? card?.queued ?? 0,
+      blocked_jobs: (s?.blocked_jobs ?? []).map((j) => ({
+        ...j,
+        waiting_s: age(j.queued_at, ghNow),
+      })),
+      slot_states: (s?.slot_states ?? []).map((x) => ({ ...x, for_s: age(x.since) })),
+    };
+  });
+  const rank: Record<string, number> = { down: 0, blocked: 1, paused: 2, degraded: 3, healthy: 4 };
+  const unhealthy = pools.filter((p) => p.state !== "healthy")
+    .sort((a, b) => (rank[a.state] ?? 9) - (rank[b.state] ?? 9))
+    .map((p) => ({
+      pool: p.pool,
+      state: p.state,
+      status: p.status,
+      reason: p.reason,
+      for_s: p.for_s,
+      blocked_jobs: p.blocked_jobs.length,
+    }));
+  // The scheduler's own file is current even when Fleet's snapshot is not.
+  return { ...(starts ? { ...fresh, scheduler_state: "current" } : fresh), pools, unhealthy };
 }
 
 // ---- fleet_runs / fleet_jobs ----

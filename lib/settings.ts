@@ -121,6 +121,11 @@ export interface SchedulerControls {
   readonly watchdog: string;
   /** The scheduler's launchd label (Restart scheduler: `launchctl kickstart -k`); `""`: none. */
   readonly launchdLabel: string;
+  /**
+   * The scheduler's configuration helper (`--schema`, `--show`, `--check`, `--apply`, `--revert`,
+   * `--status`, `--history`; JSON on stdout): the runner settings view. `""` / absent: not offered.
+   */
+  readonly configHelper?: string;
 }
 
 /**
@@ -550,7 +555,14 @@ export function validateSettings(raw: unknown): SettingsResult {
         (s) => LABEL_ID.test(s),
         "a launchd label",
       );
-      if (pausePool) controls = { pausePool, watchdog, launchdLabel };
+      const configHelper = r.str(
+        co.configHelper,
+        `${p}.controls.configHelper`,
+        "",
+        validPath,
+        "an absolute or ~/ path",
+      );
+      if (pausePool) controls = { pausePool, watchdog, launchdLabel, configHelper };
     }
     runnerScheduler = {
       pools,

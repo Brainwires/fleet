@@ -116,13 +116,16 @@ export function jobAge(since: number, now: number): number {
   return Math.max(0, now - since);
 }
 
-/** A self-hosted pool that is ok with every slot busy: its queue is waiting for capacity. */
+/** A self-hosted pool up (ok, busy or blocked) with every slot busy: its queue is waiting for capacity. */
 export function poolIsFull(
   p:
     & Pick<PoolCard, "id" | "state" | "slots" | "busy">
     & Partial<Pick<PoolCard, "hostBusy" | "hostSlots">>,
 ): boolean {
-  if (p.id === GITHUB_POOL || p.state !== "ok" || p.slots === null || p.slots <= 0) return false;
+  if (
+    p.id === GITHUB_POOL || (p.state !== "ok" && p.state !== "busy" && p.state !== "blocked") ||
+    p.slots === null || p.slots <= 0
+  ) return false;
   if (p.busy >= p.slots) return true;
   // Pools sharing one machine share its capacity: the host being full fills each of them.
   return p.hostSlots !== undefined && p.hostSlots > 0 && (p.hostBusy ?? 0) >= p.hostSlots;

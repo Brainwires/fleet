@@ -246,6 +246,28 @@ Deno.test("events: pool health changes and new alerts", () => {
   assertEquals(diffObservation(t, obs(NOW + 3000, [])), []);
 });
 
+Deno.test('events: a pool the watchdog reports as "paused by …" (not healthy) is paused, not unhealthy', () => {
+  const health = (ok: boolean, reason: string) =>
+    parsePoolHealth(
+      JSON.stringify({
+        v: 1,
+        checked_at: NOW / 1000,
+        pools: { "denext-windows-x64": { ok, reason, since: 1, slots: 1, busy: 0, paused: false } },
+        alerts: [],
+      }),
+      NOW,
+    );
+  const t = newTracker();
+  assertEquals(diffObservation(t, obs(NOW, [], { health: health(true, "") })), []);
+  let ev = diffObservation(
+    t,
+    obs(NOW + 1000, [], { health: health(false, "paused by pause-pool.sh (288 s left)") }),
+  );
+  assertEquals(ev.map((e) => [e.sev, e.text]), [["warn", "win-x64 paused"]]);
+  ev = diffObservation(t, obs(NOW + 2000, [], { health: health(true, "") }));
+  assertEquals(ev.map((e) => [e.sev, e.text]), [["info", "win-x64 resumed"]]);
+});
+
 Deno.test("events: restart restore continues the diff; stale state re-seeds without a flood", () => {
   const t = newTracker();
   diffObservation(t, obs(NOW, [{ jobs: [job(1, { status: "in_progress" })] }]));
