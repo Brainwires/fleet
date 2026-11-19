@@ -185,6 +185,13 @@ export interface Snapshot {
     readonly backoffUntil: number | null;
     /** Why polling is slowed to protect the shared rate limit (the banner), or `null`. */
     readonly slow: "low" | "floor" | "budget" | null;
+    /**
+     * Polls are failing and the last good one is over 5 min old: the pools, runners and queue are
+     * what it saw then, not current (webhooks may still update jobs, but nothing reconciles).
+     */
+    readonly stale?: boolean;
+    /** Endpoints refused for permissions (403), each a line naming it; the others keep polling. */
+    readonly forbidden?: readonly string[];
   };
   readonly rate: RateInfo | null;
   readonly health: {

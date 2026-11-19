@@ -399,7 +399,8 @@ a scheduler would stop launching runners. So (`lib/budget.ts`):
 - below 1,500 remaining it polls at 60 s even with the window visible;
 - below 800, every 5 min, with the banner "Rate limit low: slowed down to protect the runner
   scheduler.";
-- below 300, not at all until the reset;
+- below 300, not at all until the reset (once the reset time passes, that figure is forgotten and
+  polling resumes: the budget has refilled);
 - past 1,200 counted (non-304) requests in Fleet's own last hour, every 5 min.
 
 What it polls, per round (every 15 s visible, 60 s hidden, unless the budget or webhooks slow it):
@@ -418,9 +419,14 @@ non-archived repo is covered by the 10-minute sweep.
 
 Every request has a 20 s deadline: a hung connection fails that round as a timeout (retried on the
 next), never a poll stuck forever; and a poll still running after 2 min (a bug) is dropped, logged
-to the console, and the next one goes ahead. A 403 / 429 with a rate-limit signal backs off until
-the reset or `Retry-After` (else 1 min, doubling to 15 min); a 403 that is a permission refusal (no
-admin read on runners, say) is retried every 10 min.
+to the console, and the next one goes ahead. A 403 / 429 with a rate-limit signal (no requests left,
+a `Retry-After` in seconds or as a date, or GitHub's message naming a secondary rate limit) backs
+off until the reset or `Retry-After` (else 1 min, doubling to 15 min; never over an hour), then
+polls at the normal interval again. A 403 that is a permission refusal (no admin read on runners,
+say) skips only that endpoint, retried every 10 min, while the others keep polling; the status names
+it (`no access (403)` banner, `poll.forbidden` in `snapshot.json`). While polls fail and the last
+good one is over 5 min old, the pool cards and lanes are dimmed and marked stale, and
+`snapshot.json` says `poll.stale` (and `stale` on each pool).
 
 ## Webhooks
 
@@ -544,12 +550,14 @@ fleet_events({ since_seq: <next_seq>, kinds: ["finished", "run-completed"] })  â
 
 **Freshness.** Every answer carries `as_of` (Fleet's last poll or webhook update), `age_s`,
 `written_at`, `fleet_running` (written in the last 2 min) and `stale`. It is stale when Fleet hasn't
-written for 5 min (not running), or its data is over 5 min old without live webhooks (polls failing
-or slowed); with live webhooks a quiet fleet is current however old `as_of` is. A stale answer says
-so in `warning`, and `fleet_wait` returns at once with `triggered: "stale"`: the agent then falls
-back to `gh`. Runs that finished over 2 h ago are not in the snapshot (a waited-for id that isn't is
-listed under `missing`). With no `snapshot.json` yet (Fleet not running, or an older Fleet build),
-every answer is `stale: true`, and events come from `fleet-events.json`.
+written for 5 min (not running), its polls have been failing for over 5 min (`poll.stale`, live
+webhooks or not: nothing reconciles missed deliveries or the pools), or its data is over 5 min old
+without live webhooks (polls slowed); with live webhooks a quiet fleet is current however old
+`as_of` is. A stale answer says so in `warning`, and `fleet_wait` returns at once with
+`triggered: "stale"`: the agent then falls back to `gh`. Runs that finished over 2 h ago are not in
+the snapshot (a waited-for id that isn't is listed under `missing`). With no `snapshot.json` yet
+(Fleet not running, or an older Fleet build), every answer is `stale: true`, and events come from
+`fleet-events.json`.
 
 **CI text is untrusted.** Run, job, step and branch names, titles, failure annotations and event
 text are written by whoever pushed or opened a PR; the server's instructions and the tools'

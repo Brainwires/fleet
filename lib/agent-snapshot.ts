@@ -138,6 +138,8 @@ export interface AgentPool {
   readonly queued: number;
   readonly state_since: string | null;
   readonly oldest_queued_since: string | null;
+  /** Present while polls fail (`poll.stale`): this is the last good poll's view, not current. */
+  readonly stale?: true;
 }
 
 /** One host (a pool on one machine) as the watchdog publishes it. */
@@ -200,6 +202,10 @@ export interface AgentSnapshot {
     readonly last_success_at: string | null;
     readonly interval_ms: number;
     readonly slow: string | null;
+    /** Polls are failing and the last good one is over 5 min old: pools and the queue are stale. */
+    readonly stale?: boolean;
+    /** Endpoints refused for permissions (403), each a line naming it. */
+    readonly forbidden?: readonly string[];
   };
   readonly rate:
     | { readonly remaining: number; readonly limit: number; readonly reset: string }
@@ -377,6 +383,8 @@ export function buildAgentSnapshot(input: AgentSnapshotInput): AgentSnapshot {
       last_success_at: iso(s.poll.lastSuccessAt),
       interval_ms: s.poll.intervalMs,
       slow: s.poll.slow,
+      stale: s.poll.stale === true,
+      forbidden: (s.poll.forbidden ?? []).map((f) => capText(f, AGENT_NOTE_MAX)),
     },
     rate: s.rate
       ? { remaining: s.rate.remaining, limit: s.rate.limit, reset: iso(s.rate.resetAt) ?? "" }
@@ -404,6 +412,7 @@ export function buildAgentSnapshot(input: AgentSnapshotInput): AgentSnapshot {
       queued: p.queued,
       state_since: iso(p.since),
       oldest_queued_since: iso(p.oldestQueuedSince),
+      ...(s.poll.stale ? { stale: true as const } : {}),
     })),
     hosts: Object.entries(input.hosts).map(([id, h]) => ({
       id,

@@ -684,6 +684,18 @@ a:hover {
 .empty-stale {
   font-style: italic;
 }
+/* Polls failing: pools and jobs are the last good poll's view, dimmed so they don't read as now. */
+.pool-stale,
+.lane-stale .repo {
+  opacity: 0.55;
+}
+.chip-stale {
+  margin-left: 6px;
+  background: var(--warn-soft);
+  color: var(--warn);
+  border-color: transparent;
+  vertical-align: middle;
+}
 .repo {
   margin-bottom: 14px;
 }

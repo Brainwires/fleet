@@ -194,7 +194,7 @@ export function summarize(
   queued: readonly JobRow[],
   pools: readonly PoolCard[],
   now: number,
-  extra: { pollOk: boolean; healthStale: boolean },
+  extra: { pollOk: boolean; healthStale: boolean; pollStale?: boolean; forbidden?: number },
 ): Summary {
   const reasons: string[] = [];
   let severity: Severity = "ok";
@@ -249,7 +249,15 @@ export function summarize(
   }
   if (!extra.pollOk) {
     raise("warn");
-    reasons.push("GitHub poll failing");
+    reasons.push(
+      extra.pollStale ? "GitHub poll failing: pools and queue are stale" : "GitHub poll failing",
+    );
+  }
+  if (extra.forbidden) {
+    raise("warn");
+    reasons.push(
+      `no access (403) to ${extra.forbidden} GitHub endpoint${extra.forbidden === 1 ? "" : "s"}`,
+    );
   }
   return { running: running.length, queued: queued.length, severity, reasons };
 }
@@ -280,6 +288,8 @@ export function buildSnapshot(input: SnapshotInput): Snapshot {
   const summary = summarize(runRows, qRows, pools, ghNow, {
     pollOk: input.poll.ok,
     healthStale: h.state === "stale",
+    pollStale: input.poll.stale === true,
+    forbidden: input.poll.forbidden?.length ?? 0,
   });
   return {
     at: input.now,

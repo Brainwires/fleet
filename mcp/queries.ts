@@ -41,9 +41,10 @@ export interface Freshness {
 const FALLBACK = "Fall back to gh / the GitHub API for anything that matters.";
 
 /**
- * How fresh the snapshot is. Stale when Fleet hasn't written it for 5 min (not running), or when
- * its data is over 5 min old and webhooks aren't live (with live webhooks a quiet fleet changes
- * nothing, and the heartbeat says Fleet is still listening).
+ * How fresh the snapshot is. Stale when Fleet hasn't written it for 5 min (not running), when its
+ * polls have been failing for over 5 min (`poll.stale`, live webhooks or not), or when its data is
+ * over 5 min old and webhooks aren't live (with live webhooks a quiet fleet changes nothing, and the
+ * heartbeat says Fleet is still listening).
  */
 export function freshness(snap: AgentSnapshot | null, now: number): Freshness {
   if (!snap) {
@@ -62,7 +63,10 @@ export function freshness(snap: AgentSnapshot | null, now: number): Freshness {
   const age = Number.isFinite(updated) ? now - updated : Infinity;
   const writtenAge = Number.isFinite(written) ? now - written : Infinity;
   const running = writtenAge < RUNNING_WITHIN_MS;
-  const stale = writtenAge > STALE_AFTER_MS ||
+  // Failing polls make the data stale even with live webhooks: deliveries update jobs, but the
+  // pools, runners and any missed delivery (a job left queued) are reconciled only by polling.
+  const pollStale = snap.poll?.stale === true;
+  const stale = writtenAge > STALE_AFTER_MS || pollStale ||
     (snap.hooks?.state !== "live" && age > STALE_AFTER_MS);
   const min = (ms: number) => Number.isFinite(ms) ? `${Math.round(ms / 60_000)} min` : "unknown";
   const out: Freshness = {
@@ -72,6 +76,16 @@ export function freshness(snap: AgentSnapshot | null, now: number): Freshness {
     fleet_running: running,
     stale,
   };
+  if (pollStale && writtenAge <= STALE_AFTER_MS) {
+    return {
+      ...out,
+      warning: `STALE: Fleet's GitHub polls are failing (${
+        snap.poll.message || "unknown error"
+      }); the last good poll was ${
+        snap.poll.last_success_at ?? "never"
+      }, so pools and queued jobs may be out of date. ${FALLBACK}`,
+    };
+  }
   if (stale) {
     return {
       ...out,
@@ -88,6 +102,14 @@ export function freshness(snap: AgentSnapshot | null, now: number): Freshness {
   }
   if (!snap.poll.ok && snap.poll.message) {
     return { ...out, warning: `Fleet's last poll failed: ${snap.poll.message}` };
+  }
+  if (snap.poll.forbidden?.length) {
+    return {
+      ...out,
+      warning: `Fleet's token is refused (403) on some endpoints (the rest are current): ${
+        snap.poll.forbidden.join("; ")
+      }`,
+    };
   }
   return out;
 }

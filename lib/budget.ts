@@ -4,7 +4,8 @@
 //
 // - below 1,500 remaining: 60 s, even with the window visible;
 // - below 800: every 5 min, with a "rate limit low" banner;
-// - below 300: no polling until the reset (a user-confirmed control may still go through);
+// - below 300: no polling until the reset (a user-confirmed control may still go through); once
+//   the reset time passes, the old figure is ignored and polling resumes;
 // - Fleet's own spend over 1,200 counted (non-304) requests in the last hour: every 5 min.
 //
 // Conditional requests answered 304 don't count against the limit, so they don't count here.
@@ -68,10 +69,12 @@ function basePlan(i: PlanInput): PollPlan {
   if (i.publicOnly) {
     return { intervalMs: PUBLIC_MS[i.visible ? 0 : 1], notBefore: null, slow: null };
   }
-  const remaining = i.rate?.remaining ?? null;
-  if (remaining !== null && remaining < RATE_FLOOR) {
-    const reset = i.rate!.resetAt > i.now ? i.rate!.resetAt : i.now + SLOW_MS;
-    return { intervalMs: SLOW_MS, notBefore: reset, slow: "floor" };
+  // A rate seen before its reset time says nothing after it: the budget has refilled. Holding on to
+  // its `remaining` would keep polling paused for good (no poll, so no newer headers to replace it).
+  const rate = i.rate !== null && i.rate.resetAt > i.now ? i.rate : null;
+  const remaining = rate?.remaining ?? null;
+  if (rate !== null && rate.remaining < RATE_FLOOR) {
+    return { intervalMs: SLOW_MS, notBefore: rate.resetAt, slow: "floor" };
   }
   if (remaining !== null && remaining < RATE_LOW) {
     return { intervalMs: SLOW_MS, notBefore: null, slow: "low" };

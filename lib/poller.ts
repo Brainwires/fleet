@@ -8,7 +8,7 @@
 
 import { type ActiveRun, durationKey, median, runProvenance, time } from "./classify.ts";
 import type { GitHubClient } from "./github.ts";
-import { API, GitHubError } from "./github.ts";
+import { API, endpoint, GitHubError } from "./github.ts";
 import type {
   GhAnnotation,
   GhJob,
@@ -72,6 +72,15 @@ export const IDLE_POLL_MS = 5 * 60_000;
 export const FINISHED_KEEP_MS = 30 * 60_000;
 /** An endpoint refused for permissions (403) is retried this often. */
 export const FORBIDDEN_RETRY_MS = 10 * 60_000;
+/** A refusal not retried for this long is of an endpoint no longer polled: it is forgotten. */
+const FORBIDDEN_FORGET_MS = 3 * FORBIDDEN_RETRY_MS;
+/** Refused endpoints named in the status at most. */
+const FORBIDDEN_SHOWN = 10;
+/**
+ * While polls fail, the polled data (pools, runners, the queue) is marked stale once the last
+ * successful poll is this old: webhooks may still update jobs, but nothing reconciles them.
+ */
+export const POLL_STALE_MS = 5 * 60_000;
 /** The run statuses that count as active. */
 export const ACTIVE_STATUSES = ["queued", "in_progress", "waiting"] as const;
 /** Lengths remembered per job. */
@@ -143,7 +152,8 @@ export class Poller {
   #finished = new Map<number, FinishedJob>();
   #durations = new Map<string, number[]>();
   #counted = new Set<number>();
-  #forbidden = new Map<string, number>();
+  /** Endpoints refused for permissions: when, and the refusal (it names the endpoint). */
+  #forbidden = new Map<string, { at: number; message: string }>();
   /** Polls in a row each repo had no active run, and when it was last polled. */
   #idle = new Map<string, number>();
   #polledAt = new Map<string, number>();
@@ -199,14 +209,15 @@ export class Poller {
   /** One GET, a 403 permission refusal remembered so it isn't retried every round. */
   async #get<T>(path: string): Promise<{ body: T; next: string | null } | null> {
     const refused = this.#forbidden.get(path);
-    if (refused !== undefined && this.#now() - refused < FORBIDDEN_RETRY_MS) return null;
+    if (refused !== undefined && this.#now() - refused.at < FORBIDDEN_RETRY_MS) return null;
     try {
       const r = await this.#client.get<T>(path);
       this.#forbidden.delete(path);
       return r;
     } catch (err) {
       if (err instanceof GitHubError && err.kind === "http" && err.status === 403) {
-        this.#forbidden.set(path, this.#now());
+        // Only this endpoint is skipped (and retried later); the rest of the round goes on.
+        this.#forbidden.set(path, { at: this.#now(), message: err.message });
         return null;
       }
       throw err;
@@ -696,6 +707,25 @@ export class Poller {
       if (!this.#runs.has(id)) this.#evictRun(r.repo, id, r.jobs);
     }
     if (this.#counted.size > 5000) this.#counted = new Set([...this.#counted].slice(-2000));
+    for (const [path, f] of this.#forbidden) {
+      if (now - f.at > FORBIDDEN_FORGET_MS) this.#forbidden.delete(path);
+    }
+  }
+
+  /** The endpoints refused for permissions (403), each once, the newest refusal first. */
+  forbidden(): string[] {
+    const seen = new Map<string, string>();
+    const all = [...this.#forbidden.entries()].sort((a, b) => b[1].at - a[1].at);
+    for (const [path, f] of all) {
+      const ep = endpoint(path);
+      if (!seen.has(ep)) seen.set(ep, f.message);
+    }
+    return [...seen.values()].slice(0, FORBIDDEN_SHOWN);
+  }
+
+  /** Polls are failing and the last good one is over {@linkcode POLL_STALE_MS} old (or none). */
+  #stale(): boolean {
+    return !this.#ok && (this.#lastOk === null || this.#now() - this.#lastOk > POLL_STALE_MS);
   }
 
   /** Drop a run's URLs from the client's ETag cache. */
@@ -730,6 +760,8 @@ export class Poller {
         intervalMs: this.#intervalMs,
         backoffUntil: this.#client.backoffUntil(),
         slow: this.slow,
+        stale: this.#stale(),
+        forbidden: this.forbidden(),
       },
       rate: this.#client.rate(),
       health: this.#health,

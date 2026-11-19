@@ -183,9 +183,11 @@ function onControl(target: EventTarget | null): boolean {
 }
 
 function PoolCardView(
-  { pool, now, onPool, runners, onOpen, onDetail }: {
+  { pool, now, onPool, runners, onOpen, onDetail, stale }: {
     pool: PoolCard;
     now: number;
+    /** Polls are failing: the card is the last good poll's view, not current. */
+    stale?: string | null;
     onPool?: ControlHandlers["onPool"];
     runners: readonly RunnerEntry[];
     onOpen: (u: string) => void;
@@ -212,7 +214,8 @@ function PoolCardView(
     <Tag
       class={`pool pool-${pool.state}${github ? " pool-github" : ""}${
         expanded && !github ? " pool-open" : ""
-      }${onDetail ? " pool-clickable" : ""}`}
+      }${onDetail ? " pool-clickable" : ""}${stale ? " pool-stale" : ""}`}
+      title={stale ?? undefined}
       onClick={onDetail
         ? (e) => {
           if (!onControl(e.target)) onDetail();
@@ -379,6 +382,17 @@ function RunBlock(
   );
 }
 
+/** While polls fail: what the pools and lanes show is the last good poll's view, said so. */
+function staleNote(s: Snapshot, now: number): string | null {
+  if (!s.poll.stale) return null;
+  const last = s.poll.lastSuccessAt === null
+    ? "no poll has succeeded yet"
+    : `last good poll ${formatAgo(s.poll.lastSuccessAt, now)}`;
+  return `Stale: GitHub polls are failing (${
+    s.poll.message || "unknown error"
+  }); pools and jobs are as of the ${last}.`;
+}
+
 /** An empty lane's line: a live dot while webhooks are live, muted while the data is behind. */
 function EmptyLane({ text, fresh }: { text: string; fresh?: FreshState }) {
   if (fresh === "live") {
@@ -407,14 +421,24 @@ function LaneView(
     controls?: ControlHandlers;
     /** Empty: shrink to a narrow column so the other lane gets the width. */
     collapsible?: boolean;
+    /** Polls are failing: the lane's jobs are the last good poll's, not current (the tooltip). */
+    stale?: string | null;
   },
 ) {
   const count = props.groups.reduce((n, g) => n + g.runs.reduce((k, r) => k + r.jobs.length, 0), 0);
   const collapsed = props.collapsible === true && props.groups.length === 0;
   return (
-    <section class={`lane${collapsed ? " lane-collapsed" : ""}`} aria-label={props.title}>
+    <section
+      class={`lane${collapsed ? " lane-collapsed" : ""}${
+        props.stale && count > 0 ? " lane-stale" : ""
+      }`}
+      aria-label={props.title}
+    >
       <h2 class="lane-title">
         {props.title} <span class="num lane-count">{count}</span>
+        {props.stale && count > 0
+          ? <span class="chip chip-stale" title={props.stale}>stale</span>
+          : null}
       </h2>
       {props.groups.length === 0
         ? <EmptyLane text={props.empty} fresh={props.fresh} />
@@ -627,6 +651,7 @@ export function FleetView(props: FleetViewProps) {
   const hosts = s.pools.filter((p) => p.id !== "github");
   // The status line's clock is this machine's (poll and delivery times are local).
   const fresh = statusFreshness(s, localNow).state;
+  const stale = staleNote(s, localNow);
   return (
     <div class={`fleet sev-${sum.severity}`}>
       <div class="stripe" aria-hidden="true" />
@@ -686,6 +711,7 @@ export function FleetView(props: FleetViewProps) {
                 runners={busy.get(p.id) ?? []}
                 onOpen={onOpen}
                 onDetail={props.onPoolDetail ? () => props.onPoolDetail!(p.id) : undefined}
+                stale={stale}
               />
             ))}
           </ul>
@@ -697,6 +723,7 @@ export function FleetView(props: FleetViewProps) {
                 runners={busy.get("github") ?? []}
                 onOpen={onOpen}
                 onDetail={props.onPoolDetail ? () => props.onPoolDetail!("github") : undefined}
+                stale={stale}
               />
             )
             : null}
@@ -748,6 +775,14 @@ export function FleetView(props: FleetViewProps) {
         )
         : null}
       {props.dispatchPanel as never}
+      {stale ? <p class="banner banner-warn" role="status">{stale}</p> : null}
+      {s.poll.forbidden?.length
+        ? (
+          <p class="banner banner-warn" role="status">
+            No access (403), still polling the rest: {s.poll.forbidden.join("; ")}
+          </p>
+        )
+        : null}
       {s.poll.slow
         ? (
           <p class={`banner banner-${s.poll.slow === "budget" ? "warn" : "bad"}`} role="status">
@@ -764,6 +799,7 @@ export function FleetView(props: FleetViewProps) {
           empty="Nothing running."
           fresh={fresh}
           controls={props.controls}
+          stale={stale}
         />
         <LaneView
           title="Queued"
@@ -774,6 +810,7 @@ export function FleetView(props: FleetViewProps) {
           fresh={fresh}
           controls={props.controls}
           collapsible
+          stale={stale}
         />
         <aside class="side">
           <section>

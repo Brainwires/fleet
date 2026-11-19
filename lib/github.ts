@@ -38,6 +38,8 @@ export interface DownloadResult {
 export const BACKOFF_FIRST_MS = 60_000;
 /** The longest back-off. */
 export const BACKOFF_MAX_MS = 15 * 60_000;
+/** No hint, however large, holds requests back longer than this (the primary limit's window). */
+export const BACKOFF_CEILING_MS = 60 * 60_000;
 /** Each request's deadline (connect, headers and body). */
 export const REQUEST_TIMEOUT_MS = 20_000;
 /** ETag cache entries kept (least recently used evicted first). */
@@ -104,7 +106,10 @@ export interface GitHubClient {
    * `maxBytes` (the end of a longer log). Rejects with a {@linkcode GitHubError}.
    */
   downloadLog(path: string, opts?: RequestOptions & { maxBytes?: number }): Promise<DownloadResult>;
-  /** The last rate limit seen. */
+  /**
+   * The last rate limit seen, or `null` once its reset time has passed (the budget is refilled and
+   * the old `remaining` says nothing any more; the next response reports the new one).
+   */
   rate(): RateInfo | null;
   /** While backing off: until when (epoch ms); else `null`. */
   backoffUntil(): number | null;
@@ -237,24 +242,53 @@ export function createGitHubClient(options: GitHubClientOptions): GitHubClient {
     }
   };
 
-  const backOff = (h: Headers, status: number): GitHubError => {
+  const backOff = (h: Headers, status: number, url: string): GitHubError => {
     const t = now();
-    const retryAfter = Number(h.get("retry-after"));
+    const retryAfter = retryAfterMs(h.get("retry-after"), t);
+    const reset = Number(h.get("x-ratelimit-reset"));
     let until: number;
-    if (Number.isFinite(retryAfter) && retryAfter > 0) {
-      until = t + retryAfter * 1000;
-    } else if (h.get("x-ratelimit-remaining") === "0" && Number(h.get("x-ratelimit-reset")) > 0) {
-      until = Number(h.get("x-ratelimit-reset")) * 1000;
+    if (retryAfter !== null) {
+      until = t + retryAfter;
+    } else if (h.get("x-ratelimit-remaining") === "0" && Number.isFinite(reset) && reset > 0) {
+      // The reset is on GitHub's clock: moved onto ours.
+      until = reset * 1000 - clockOffset();
     } else {
       until = t + Math.min(BACKOFF_MAX_MS, BACKOFF_FIRST_MS * 2 ** failures);
     }
     failures++;
-    backoff = Math.max(until, t + 1000);
+    // Never shorter than a second, never longer than an hour (a garbled header can't park polling).
+    backoff = Math.min(Math.max(until, t + 1000), t + BACKOFF_CEILING_MS);
     return new GitHubError(
-      status === 429 ? "rate limited (429)" : "rate limited or forbidden (403)",
+      `rate limited (${status}) on ${endpoint(url)}; retrying after ${
+        new Date(backoff).toISOString()
+      }`,
       status,
       "backoff",
     );
+  };
+  /** A 403 / 429 answer: a (primary or secondary) rate limit backs off, else a permission refusal. */
+  const refused = async (res: Response, url: string): Promise<GitHubError> => {
+    let message = "";
+    try {
+      const j = JSON.parse((await res.text()).slice(0, 4096)) as { message?: unknown };
+      if (typeof j?.message === "string") message = j.message;
+    } catch {
+      // No JSON body.
+    }
+    if (res.status === 429 || isRateLimited(res.headers, message)) {
+      return backOff(res.headers, res.status, url);
+    }
+    return new GitHubError(
+      `forbidden (403) on ${endpoint(url)}${message ? `: ${message.slice(0, 200)}` : ""}`,
+      403,
+      "http",
+    );
+  };
+  const clockOffset = (): number => {
+    if (clockSamples.length === 0) return 0;
+    const s = [...clockSamples].sort((a, b) => a - b);
+    const m = s[s.length >> 1];
+    return Math.abs(m) < CLOCK_NOISE_MS ? 0 : Math.round(m);
   };
 
   return {
@@ -291,10 +325,7 @@ export function createGitHubClient(options: GitHubClientOptions): GitHubClient {
           await res.body?.cancel();
           throw new GitHubError("the token was refused (401)", 401, "auth");
         }
-        if (res.status === 429 || (res.status === 403 && isRateLimited(res.headers))) {
-          await res.body?.cancel();
-          throw backOff(res.headers, res.status);
-        }
+        if (res.status === 429 || res.status === 403) throw await refused(res, url);
         if (res.status === 404) {
           await res.body?.cancel();
           throw new GitHubError("not found (404)", 404, "not-found");
@@ -372,11 +403,9 @@ export function createGitHubClient(options: GitHubClientOptions): GitHubClient {
         readClock(res.headers, sentAt, now());
         readRate(res.headers);
         count();
+        if (res.status === 429 || res.status === 403) throw await refused(res, API + path);
         await res.body?.cancel();
         if (res.status === 401) throw new GitHubError("the token was refused (401)", 401, "auth");
-        if (res.status === 429 || (res.status === 403 && isRateLimited(res.headers))) {
-          throw backOff(res.headers, res.status);
-        }
         if (res.status === 404 || res.status === 410) {
           throw new GitHubError(
             "no log (404: expired, or not visible to the token)",
@@ -425,16 +454,11 @@ export function createGitHubClient(options: GitHubClientOptions): GitHubClient {
         return { text, truncated, bytes: total };
       });
     },
-    rate: () => rate,
+    rate: () => (rate !== null && rate.resetAt > now() ? rate : null),
     backoffUntil: () => (backoff !== null && now() < backoff ? backoff : null),
     stats: () => ({ requests, notModified }),
     spentLastHour: () => spent.filter((x) => x > now() - 3600_000).length,
-    clockOffset: () => {
-      if (clockSamples.length === 0) return 0;
-      const s = [...clockSamples].sort((a, b) => a - b);
-      const m = s[s.length >> 1];
-      return Math.abs(m) < CLOCK_NOISE_MS ? 0 : Math.round(m);
-    },
+    clockOffset,
     evict: (match) => {
       for (const url of [...cache.keys()]) if (match(url)) cache.delete(url);
     },
@@ -443,7 +467,27 @@ export function createGitHubClient(options: GitHubClientOptions): GitHubClient {
   };
 }
 
-/** A 403 that is a rate limit (primary or secondary), not a permissions refusal. */
-function isRateLimited(h: Headers): boolean {
-  return h.get("x-ratelimit-remaining") === "0" || h.has("retry-after");
+/**
+ * A 403 that is a rate limit (primary or secondary), not a permissions refusal: no requests left,
+ * a `Retry-After`, or GitHub's message naming a (secondary) rate limit, which may come with
+ * neither header.
+ */
+function isRateLimited(h: Headers, message = ""): boolean {
+  return h.get("x-ratelimit-remaining") === "0" || h.has("retry-after") ||
+    /rate limit|abuse detection/i.test(message);
+}
+
+/** `Retry-After` in ms: delta seconds or an HTTP date; `null` when absent or unusable. */
+export function retryAfterMs(v: string | null, now: number): number | null {
+  if (v === null || v.trim() === "") return null;
+  const secs = Number(v);
+  if (Number.isFinite(secs)) return secs > 0 ? secs * 1000 : null;
+  const at = Date.parse(v);
+  return Number.isFinite(at) && at > now ? at - now : null;
+}
+
+/** An API URL as the status line names it: the method and path, without the query or origin. */
+export function endpoint(url: string): string {
+  const path = url.startsWith(API) ? url.slice(API.length) : url;
+  return `GET ${path.split("?")[0]}`;
 }
