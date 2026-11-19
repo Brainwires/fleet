@@ -126,6 +126,23 @@ export interface SchedulerControls {
    * `--status`, `--history`; JSON on stdout): the runner settings view. `""` / absent: not offered.
    */
   readonly configHelper?: string;
+  /**
+   * The scheduler's routing helper (`--schema`, `--show`, `--check`, `--preview`, `--apply`,
+   * `--revert`, `--history`; JSON on stdout): which pool takes which job, the Routing form. `""` /
+   * absent: not offered.
+   */
+  readonly routingHelper?: string;
+}
+
+/**
+ * A machines service Fleet reads hardware telemetry from (docs/machines.md): one card per physical
+ * machine with its pools nested, live stats and history. Inactive unless configured.
+ */
+export interface MachinesIntegration {
+  /** The service's origin (`http://127.0.0.1:3900`): `GET /api/telemetry/machines | history | stream`. */
+  readonly url: string;
+  /** The file holding its read token (`~/` allowed), sent as a bearer token; never kept by Fleet. */
+  readonly tokenFile: string;
 }
 
 /**
@@ -192,6 +209,7 @@ export interface FleetSettings {
   readonly stream: StreamSettings;
   readonly integrations: {
     readonly runnerScheduler: RunnerSchedulerIntegration | null;
+    readonly machines?: MachinesIntegration | null;
   };
 }
 
@@ -562,7 +580,22 @@ export function validateSettings(raw: unknown): SettingsResult {
         validPath,
         "an absolute or ~/ path",
       );
-      if (pausePool) controls = { pausePool, watchdog, launchdLabel, configHelper };
+      const routingHelper = r.str(
+        co.routingHelper,
+        `${p}.controls.routingHelper`,
+        "",
+        validPath,
+        "an absolute or ~/ path",
+      );
+      if (pausePool) {
+        controls = {
+          pausePool,
+          watchdog,
+          launchdLabel,
+          configHelper,
+          ...(routingHelper ? { routingHelper } : {}),
+        };
+      }
     }
     runnerScheduler = {
       pools,
@@ -593,6 +626,24 @@ export function validateSettings(raw: unknown): SettingsResult {
     };
   }
 
+  let machines: MachinesIntegration | null = null;
+  if (io.machines !== undefined && io.machines !== null) {
+    const mo = r.obj(io.machines, "integrations.machines");
+    const url = r.req(
+      mo.url,
+      "integrations.machines.url",
+      validServiceUrl,
+      "an http(s) origin without a path (http://127.0.0.1:3900)",
+    );
+    const tokenFile = r.req(
+      mo.tokenFile,
+      "integrations.machines.tokenFile",
+      validPath,
+      "an absolute or ~/ path",
+    );
+    if (url && tokenFile) machines = { url: url.replace(/\/$/, ""), tokenFile };
+  }
+
   const setupComplete = r.bool(doc.setupComplete, "setupComplete", false);
   const startAtLogin = r.bool(doc.startAtLogin, "startAtLogin", false);
   if (r.errors.length) return { ok: false, errors: r.errors };
@@ -610,9 +661,22 @@ export function validateSettings(raw: unknown): SettingsResult {
       startAtLogin,
       webhooks,
       stream,
-      integrations: { runnerScheduler },
+      integrations: machines ? { runnerScheduler, machines } : { runnerScheduler },
     },
   };
+}
+
+/** An http(s) origin, no path, query or credentials (the machines service's address). */
+export function validServiceUrl(s: string): boolean {
+  if (s.length > 200) return false;
+  let u: URL;
+  try {
+    u = new URL(s);
+  } catch {
+    return false;
+  }
+  return (u.protocol === "http:" || u.protocol === "https:") && !u.username && !u.password &&
+    (u.pathname === "/" || u.pathname === "") && !u.search && !u.hash;
 }
 
 /**

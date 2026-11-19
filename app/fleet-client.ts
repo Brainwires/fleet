@@ -18,6 +18,11 @@ import type { LauncherLog } from "../lib/runner-logs.ts";
 import type { ChangeRecord, ConfigSchema, ConfigShow, ValueChange } from "../lib/runner-config.ts";
 import type { ConfigResult } from "../lib/config-runner.ts";
 
+import type { MachineSeries, MachinesView } from "../lib/machines.ts";
+export { MACHINES_EVENT } from "../lib/machines.ts";
+import type { RoutingPreview, RoutingRules } from "../lib/routing.ts";
+import type { RoutingLoad, RoutingResult } from "../lib/routing-runner.ts";
+
 /** The runner settings' first load. */
 export type ConfigLoad =
   | { ok: true; schema: ConfigSchema; show: ConfigShow; history: ChangeRecord[] }
@@ -30,7 +35,23 @@ export interface FleetClient {
   visibility(args: { visible: boolean }): Promise<null>;
   capabilities(
     args?: Record<never, never>,
-  ): Promise<{ pools: boolean; restart?: boolean; watchdog?: boolean; config?: boolean }>;
+  ): Promise<
+    {
+      pools: boolean;
+      restart?: boolean;
+      watchdog?: boolean;
+      config?: boolean;
+      routing?: boolean;
+      machines?: boolean;
+    }
+  >;
+  /** Machines: each machine's newest reading, its pools and jobs, and the sparklines' trails. */
+  machines(args?: Record<never, never>): Promise<MachinesView>;
+  machineHistory(args: { host: string; range: string }): Promise<MachineSeries | { error: string }>;
+  routingLoad(args?: Record<never, never>): Promise<RoutingLoad>;
+  routingCheck(args: { draft: RoutingRules }): Promise<RoutingPreview>;
+  routingApply(args: { generation: string; draft: RoutingRules }): Promise<RoutingResult>;
+  routingRevert(args: { id: string; generation: string }): Promise<RoutingResult>;
   configLoad(args?: Record<never, never>): Promise<ConfigLoad>;
   configCheck(
     args: { changes: ValueChange[] },

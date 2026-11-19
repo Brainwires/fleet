@@ -21,3 +21,5 @@ export const STREAM_TOKEN_FILE = "fleet-stream-token";
 export const STREAM_STATE_FILE = "fleet-stream.json";
 /** The stream's default loopback port (the webhook receiver's default is 8789). */
 export const DEFAULT_STREAM_PORT = 8790;
+/** The machines document for agents (lib/machines.ts agentMachines): the latest stats per machine. */
+export const MACHINES_FILE = "machines.json";

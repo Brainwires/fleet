@@ -11,7 +11,7 @@
 //
 // (`deno task mcp` does, for macOS's data folder; the Settings view shows the command for this
 // machine.) Tools: fleet_status, fleet_runs, fleet_jobs, fleet_events, fleet_wait,
-// fleet_pool_health, fleet_pool_history, fleet_runner_log (with --logs-dir). Every answer
+// fleet_pool_health, fleet_pool_history, fleet_machines, fleet_runner_log (with --logs-dir). Every answer
 // carries its freshness (`as_of`, `stale`, `warning`); fleet_status names the watched owners.
 //
 // Realtime: the resources `fleet://events` and `fleet://status` take `resources/subscribe`, and
@@ -34,6 +34,7 @@ import {
   JOURNAL_FILE,
   JOURNAL_OLD_FILE,
   LOG_FILE,
+  MACHINES_FILE,
 } from "../lib/agent-files.ts";
 import { type AgentPoolStart, type AgentSnapshot, agentStart } from "../lib/agent-snapshot.ts";
 import { currentPoolStarts, parsePoolState } from "../lib/pool-state.ts";
@@ -53,6 +54,7 @@ import {
   eventsResult,
   freshness,
   jobsResult,
+  machinesResult,
   MAX_WAIT_S,
   poolHealthResult,
   runsResult,
@@ -216,6 +218,11 @@ export class FleetFiles {
       }
     }
     return out;
+  }
+
+  /** The machines document (machines.json), or `null` when Fleet hasn't written one. */
+  machines(): Promise<unknown> {
+    return readJson(join(this.paths.dataDir, MACHINES_FILE));
   }
 
   /** The usage history (fleet-history.json), or `null` when Fleet hasn't written one. */
@@ -444,6 +451,26 @@ export const TOOLS = [
         range: { type: "string", enum: ["1h", "24h", "7d", "30d"], default: "24h" },
       },
       required: ["pool"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "fleet_machines",
+    description:
+      "Hardware telemetry per PHYSICAL machine that hosts runner pools (Fleet's machines " +
+      "integration): for each machine its latest CPU (total, per core, load), memory (used, " +
+      "available, pressure), swap, free disk per volume, network rates, temperatures and GPU " +
+      "where the machine reports them, the VMs / containers running on it, and its pools with " +
+      "every running job's pool, slot, name, CPU and memory. Use it to see which machine is " +
+      "loaded before blaming a slow job, or whether a host is out of memory or disk. `machine` " +
+      "narrows to one machine (id or name); `detail: false` drops the per-core list and the " +
+      "sandboxes. No GitHub API call. " + UNTRUSTED_NOTE,
+    inputSchema: {
+      type: "object",
+      properties: {
+        machine: { type: "string", description: "A machine's id or name (default: all)." },
+        detail: { type: "boolean", default: true },
+      },
       additionalProperties: false,
     },
   },
@@ -777,6 +804,8 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
           now(),
           historyArgs(args),
         );
+      case "fleet_machines":
+        return machinesResult(await files.machines(), now(), args as Record<string, unknown>);
       case "fleet_runner_log": {
         const a = runnerLogArgs(args);
         if (!files.paths.logsDir) {

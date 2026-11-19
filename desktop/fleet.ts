@@ -16,6 +16,7 @@ import {
   postNotification,
   readJournal,
   registerNotifierHelper,
+  saveAgentMachines,
   saveAgentSnapshot,
   saveHistory,
   saveLog,
@@ -42,7 +43,12 @@ import {
 } from "../lib/control-runner.ts";
 import { home, localHealthReader, localPoolPaths, runProgram } from "../lib/deno-pools.ts";
 import { ciLedgerDir, ciLedgerReader } from "../lib/ci-ledger.ts";
-import { ensureConfigToken, localConfigHelper, runProgramJson } from "../lib/deno-config.ts";
+import {
+  ensureConfigToken,
+  localConfigHelper,
+  localRoutingHelper,
+  runProgramJson,
+} from "../lib/deno-config.ts";
 import {
   configCheck,
   type ConfigDeps,
@@ -64,6 +70,15 @@ import {
   tailSpool,
 } from "../lib/deno-hooks.ts";
 import { expandHome, settings } from "../lib/settings.ts";
+import { agentMachines, MACHINES_EVENT, type MachinesView } from "../lib/machines.ts";
+import { type MachinesStream, startMachinesStream } from "../lib/deno-machines.ts";
+import {
+  routingCheck,
+  type RoutingDeps,
+  routingLoad,
+  runRoutingApply,
+  runRoutingRevert,
+} from "../lib/routing-runner.ts";
 import { watchdogNotifies } from "../lib/notifier.ts";
 import type { PoolPaths } from "../lib/controls.ts";
 import { asRange } from "../lib/pool-detail.ts";
@@ -75,6 +90,8 @@ let jobLogs: JobLogs | undefined;
 let extHost: DesktopExtensionHost | undefined;
 /** The window zoom every page shows (lib/zoom.ts), kept in the data folder's `fleet-view.json`. */
 let zoom: ZoomStore | undefined;
+/** The machines integration's live stream (lib/deno-machines.ts); idle until the settings name one. */
+let machines: MachinesStream | undefined;
 /** The pool commands the settings configure here (the runner scheduler integration), or `null`. */
 const pools = (): PoolPaths | null => localPoolPaths(settings().integrations.runnerScheduler);
 /** Test builds: controls show their dialogs and send nothing (set in the environment at launch). */
@@ -162,7 +179,53 @@ function start(host: DesktopExtensionHost): void {
   void service.settingsReady().then(() => startHooks(service!, dir), () => {});
   // The loopback event stream follows the startup settings too.
   void service.settingsReady().then(() => startStream(service!, dir), () => {});
+  // Machines (hardware telemetry per machine): the stream follows the settings as they are now, so
+  // setting the integration up needs no restart. The page is told of each change; agents read
+  // `machines.json`, rewritten at most every 10 s.
+  let machinesSaved = 0;
+  let machinesPending: ReturnType<typeof setTimeout> | undefined;
+  const saveMachines = (view: MachinesView) => {
+    machinesSaved = Date.now();
+    void saveAgentMachines(dir, agentMachines(view, Date.now())).catch(() => {});
+  };
+  machines = startMachinesStream({
+    integration: () => settings().integrations.machines ?? null,
+    home,
+    readFile: async (path) => {
+      try {
+        return await Deno.readTextFile(path);
+      } catch {
+        return null;
+      }
+    },
+    fetch: (input, init) => fetch(input, init),
+    now: () => Date.now(),
+    sleep: (ms, signal) =>
+      new Promise<void>((resolve) => {
+        const done = () => {
+          clearTimeout(t);
+          signal.removeEventListener("abort", done);
+          resolve();
+        };
+        const t = setTimeout(done, ms);
+        signal.addEventListener("abort", done, { once: true });
+      }),
+    onChange: (view) => {
+      try {
+        host.emit(MACHINES_EVENT, null);
+      } catch {
+        // No page subscribed: it reads the view when it opens.
+      }
+      if (!view.configured) return;
+      clearTimeout(machinesPending);
+      const wait = 10_000 - (Date.now() - machinesSaved);
+      if (wait <= 0) saveMachines(view);
+      else machinesPending = setTimeout(() => saveMachines(machines!.view()), wait);
+    },
+  });
   host.onAppQuit(async () => {
+    machines?.stop();
+    clearTimeout(machinesPending);
     stopSpool?.();
     await Promise.all([receiver?.stop(), service?.flushHistory(), streamListener?.stop()]);
   });
@@ -338,6 +401,31 @@ function configDeps(): ConfigDeps | null {
 }
 
 const NO_CONFIG = "Runner settings need the scheduler's configuration helper on this machine.";
+const NO_ROUTING = "Routing rules need the scheduler's routing helper on this machine.";
+
+/** The routing rules' machine access, or `null` when no routing helper exists here. */
+function routingDeps(): RoutingDeps | null {
+  const helper = localRoutingHelper(settings().integrations.runnerScheduler);
+  if (!helper || !extHost) return null;
+  const dir = extHost.appSupportDir;
+  let user = "";
+  try {
+    user = (Deno.env.get("USER") ?? "").replace(/[^A-Za-z0-9._-]/g, "").slice(0, 32);
+  } catch {
+    user = "";
+  }
+  return {
+    run: (args, input) => runProgramJson(helper, args, input),
+    token: () => ensureConfigToken(dir),
+    confirm: async (o) => {
+      if (!extHost) throw new DesktopCapError("unavailable", "no desktop host");
+      return await extHost.confirm(o);
+    },
+    log: (e) => svc().logAction(e),
+    actor: user ? `fleet-${user}` : "fleet",
+    dryRun: DRY_RUN,
+  };
+}
 
 function obj(raw: unknown): Record<string, unknown> {
   return typeof raw === "object" && raw !== null ? raw as Record<string, unknown> : {};
@@ -360,7 +448,7 @@ const optNum = (v: unknown): number | undefined =>
 
 export default defineDesktopExtension({
   name: "fleet",
-  events: [CHANGED_EVENT, ZOOM_EVENT],
+  events: [CHANGED_EVENT, ZOOM_EVENT, MACHINES_EVENT],
   setup: start,
   methods: {
     /** The snapshot; `visible` says whether the calling page is on screen (poll rate). */
@@ -406,6 +494,8 @@ export default defineDesktopExtension({
           restart: !!p?.launchdLabel,
           watchdog: !!p?.watchdog,
           config: localConfigHelper(settings().integrations.runnerScheduler) !== null,
+          routing: localRoutingHelper(settings().integrations.runnerScheduler) !== null,
+          machines: (settings().integrations.machines ?? null) !== null,
         };
       },
     },
@@ -578,6 +668,55 @@ export default defineDesktopExtension({
         const repo = typeof r.repo === "string" ? r.repo : rec?.repo ?? "";
         const title = rec ? `${rec.workflow} · ${rec.name}` : `job ${jobId}`;
         return jobLogs!.get(repo, jobId, title, rec !== undefined);
+      },
+    },
+    /** Machines: the live view (each machine's newest reading, its pools and jobs, the trails). */
+    machines: {
+      handler: () => {
+        if (!machines) throw new DesktopCapError("unavailable", "Fleet's backend is starting");
+        return machines.view();
+      },
+    },
+    /** A machine's history over a range (1h, 24h, 7d), from the machines service. */
+    machineHistory: {
+      timeoutMs: 30_000,
+      handler: (raw: unknown) => {
+        if (!machines) throw new DesktopCapError("unavailable", "Fleet's backend is starting");
+        const r = obj(raw);
+        return machines.history(String(r.host ?? ""), r.range);
+      },
+    },
+    /** Routing rules: the helper's schema, the rules in force, their preview and history. */
+    routingLoad: {
+      timeoutMs: 90_000,
+      handler: async () => {
+        const d = routingDeps();
+        return d ? await routingLoad(d) : { ok: false, message: NO_ROUTING };
+      },
+    },
+    /** A draft checked by the helper, with where each class's next job would go. */
+    routingCheck: {
+      timeoutMs: 60_000,
+      handler: async (raw: unknown) => {
+        const d = routingDeps();
+        if (!d) return { ok: false, errors: [NO_ROUTING], warnings: [], classes: [] };
+        return await routingCheck(d, raw);
+      },
+    },
+    /** Save a draft: the helper's check, the OS dialog, then the helper (audited). */
+    routingApply: {
+      timeoutMs: false,
+      handler: async (raw: unknown) => {
+        const d = routingDeps();
+        return d ? await runRoutingApply(d, raw) : { ok: false, message: NO_ROUTING };
+      },
+    },
+    /** Revert the newest routing change: the OS dialog, then the helper. */
+    routingRevert: {
+      timeoutMs: false,
+      handler: async (raw: unknown) => {
+        const d = routingDeps();
+        return d ? await runRoutingRevert(d, raw) : { ok: false, message: NO_ROUTING };
       },
     },
     /** The window zoom (percent) every page shows. */

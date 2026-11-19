@@ -21,6 +21,7 @@ import {
   JOURNAL_MAX_BYTES,
   JOURNAL_OLD_FILE,
   LOG_FILE,
+  MACHINES_FILE,
 } from "./agent-files.ts";
 
 export { JOURNAL_FILE, JOURNAL_OLD_FILE, LOG_FILE };
@@ -169,6 +170,11 @@ export function saveLog(dir: string, data: unknown): Promise<void> {
 /** The agents' snapshot (lib/agent-snapshot.ts), written atomically like the state file. */
 export function saveAgentSnapshot(dir: string, snap: unknown): Promise<void> {
   return writeJson(dir, AGENT_SNAPSHOT_FILE, snap);
+}
+
+/** The agents' machines document (lib/machines.ts agentMachines), written atomically. */
+export function saveAgentMachines(dir: string, doc: unknown): Promise<void> {
+  return writeJson(dir, MACHINES_FILE, doc);
 }
 
 /** The usage history file, or `null` when there is none (or it doesn't parse). */

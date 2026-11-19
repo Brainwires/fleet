@@ -27,6 +27,19 @@ export function localConfigHelper(sched: RunnerSchedulerIntegration | null): str
   }
 }
 
+/** The routing helper's absolute path when the integration names one and it exists here. */
+export function localRoutingHelper(sched: RunnerSchedulerIntegration | null): string | null {
+  const raw = sched?.controls?.routingHelper ?? "";
+  if (!raw) return null;
+  const p = expandHome(raw, home());
+  if (!p) return null;
+  try {
+    return Deno.statSync(p).isFile ? p : null;
+  } catch {
+    return null;
+  }
+}
+
 /** A fresh token: 32 random bytes, base64url (43 characters). */
 export function newToken(): string {
   const b = crypto.getRandomValues(new Uint8Array(32));

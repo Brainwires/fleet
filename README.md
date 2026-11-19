@@ -80,7 +80,7 @@ and follow the light and dark themes.
 The defaults watch nobody (the wizard asks), protect each repo's default branch with `warn`, group
 pools from the runners, and leave webhooks, start at login and every integration off.
 
-Three more sections are file-only, kept as they are by the UI:
+Four more sections are file-only, kept as they are by the UI:
 
 - `stream`: the [realtime event stream](#realtime-stream),
   `{ enabled, port, heartbeatSeconds,
@@ -94,7 +94,10 @@ Three more sections are file-only, kept as they are by the UI:
   `runnerNamePrefix` (runner names `<prefix><pool>-<slot>-<epoch>`), `labelPrefix`, the watchdog's
   `localHealthFile` and `pausedDir`, `logsDir` (the scheduler's log folder, read-only: the
   [Logs tab](#pool-detail-screens)), and `controls` (`pausePool`, `watchdog`, `launchdLabel`: the
-  [pool controls](#controls)). Inactive unless configured.
+  [pool controls](#controls); `configHelper`: the runner settings; `routingHelper`: the
+  [routing rules](#machines-and-routing)). Inactive unless configured.
+- `integrations.machines`: a machines service ([Machines](#machines-and-routing)),
+  `{ url, tokenFile }`. Inactive unless configured; picked up without a restart.
 
 **A machine's own config.** When there is no settings file yet and `fleet-local-config.json` (a
 complete settings document) sits beside it in the data folder, Fleet starts from it, marked set up,
@@ -313,6 +316,44 @@ series, 16 GitHub images). On its first run Fleet back-fills it from the event j
 (`fleet-events.jsonl`) and the webhook spool (GitHub's own times), so the charts start with what
 Fleet already saw; capacity for that past is today's slot count.
 
+## Machines and routing
+
+With a machines service configured (`integrations.machines`: its address and the file holding its
+read token; [docs/machines.md](docs/machines.md) has the API a service must serve), the header gets
+a **Machines** button. The screen has one card per **physical machine**, with the machine's pools
+nested inside:
+
+- CPU, memory, swap and network, each with the current value and a sparkline of the last 15 minutes
+  (hover any point for its value and time); per-core bars; free disk per volume; temperature and GPU
+  where the machine reports them; whether its readings are live and where they come from.
+- Its pools: state, busy slots, and the pool's share of the machine right now (a VM that is always
+  up counts with no job running). Under each pool its jobs: slot, job and repo, phase and how long,
+  CPU (in cores) and memory. A machine that hosts a pool's VM beside another pool shows both on the
+  one card.
+- Every VM, container and runner process tree on the machine, with CPU and memory (collapsed).
+- **1 h / 24 h / 7 d**: per machine the history as charts (CPU average and peak, memory, swap,
+  network, free disk, CPU per pool), drawn with the pool detail's charts (hover, keyboard, a data
+  table). **Compare machines** puts every machine on one chart: CPU, memory, swap or network.
+
+Fleet reads the service's live stream (reconnecting by itself, asking for what it missed) and writes
+`machines.json` for agents (`fleet_machines`). Nothing is collected by Fleet itself.
+
+**Routing** (a second tab; only with the runner scheduler's routing helper,
+`integrations.runnerScheduler.controls.routingHelper`): which pool takes which job, as a form.
+
+- The form is built from the helper's JSON Schema at run time: job classes in order (a job belongs
+  to the first class that matches it: a runs-on label, a job-name pattern, a repository, a workflow
+  file), each with the pools that serve it as a ranked list (move up / down, add, remove;
+  GitHub-hosted only as the last entry, or not at all), per pool "only while these pools are idle"
+  and "never takes jobs named like", per machine "jobs at once, at most". Every field is a typed
+  widget; there is no raw text box for the document.
+- Every edit is checked by the helper (after 0.4 s) and previewed: **"With these rules, the next
+  Windows job goes to: …"** per class, with why each pool can or cannot take it right now.
+- **Save…** asks in the OS dialog (what changes, where the next jobs go), then hands the helper the
+  draft with Fleet's caller token on stdin. The helper validates, writes the file and its audit
+  entry; the scheduler reads it at its next tick. The newest change can be reverted. Each save and
+  refusal is in the event log, marked "you". No pool, label or class name is built into Fleet.
+
 ## Event log
 
 The bottom pane: one line per event, newest at the bottom, following new lines unless you scrolled
@@ -523,6 +564,7 @@ running for the answers to be fresh. `fleet_status` names the watched owners.
 | `fleet_wait`         | `run_ids?`, `job_ids?`, `until`, `timeout_s?` (≤ 1800, default 600)                 | blocks until `any_failure` / `completed` / `first_event`, then `{ triggered, runs, failed_jobs, jobs, events, next_seq }`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `fleet_pool_health`  | `pool?`                                                                             | WHY a pool is not starting jobs: per pool its start `state` (`healthy` / `degraded` = every slot busy / `blocked` = a free slot, a gate holds the launch / `down` / `paused`), a `code`, the `reason` in plain words with the numbers, `since` / `for_s`, slots / busy / free, each busy slot's phase, and the queued jobs it cannot start with their wait; `status` is the badge Fleet shows (`ok` / `busy` / `blocked` / `paused` / `unhealthy`); `unhealthy` lists the pools to look at, worst first. From a runner scheduler's `pool-state.json` beside `--health-file` (name that file in `--allow-read` too), else the snapshot's `hosts[].start`, else the watchdog's health (`source`) |
 | `fleet_pool_history` | `pool` (a pool, `github`, `github:<image>`), `range?` (`1h` / `24h` / `7d` / `30d`) | the pool's bucketed usage (≤ 168 points: busy, slots, utilization, queue, longest wait, jobs by conclusion, minutes, median / p90), totals, the duration histogram, its 20 latest jobs                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `fleet_machines`     | `machine?` (id or name), `detail?` (default true)                                   | per physical machine (the machines integration): CPU total / per core / load, memory used / available / pressure, swap, free disk per volume, network rates, temperatures, GPU, the VMs and containers on it, and its pools with each running job's pool, slot, name, CPU and memory; `stale` when Fleet is not connected to the service or the file is older than a minute                                                                                                                                                                                                                                                                                                                    |
 | `fleet_runner_log`   | `job_id` or `pool` + `file`, `tail?` (≤ 2000, default 200)                          | a launcher log's last lines (≤ 256 KB), redacted; only when the server runs with `--logs-dir`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
 **Why a pool is not starting jobs.** A runner scheduler that writes `pool-state.json` beside its
@@ -779,6 +821,7 @@ never the GitHub token or any GitHub secret (only the local event stream's own t
 | `fleet-stream-token`                         | the [event stream](#realtime-stream)'s bearer token: random per install, made on the first start (the one secret here; 0600)                                        |
 | `fleet-stream.json`                          | where the event stream listens (`{ port, pid, started_at }`), written when it starts                                                                                |
 | `fleet-view.json`                            | the window zoom (`{ version: 1, zoom }`, percent; [The window](#the-window)), written when it changes                                                               |
+| `machines.json`                              | the machines integration's latest stats per machine and per-job usage, for agents (`fleet_machines`); rewritten at most every 10 s                                  |
 
 `snapshot.json` is
 `{ v: 1, updated_at, written_at, source: "poll" | "hook", auth, poll, rate, hooks, health, summary, pools, hosts, alerts, event_seq, clock_offset_ms, runs, jobs }`.
@@ -805,10 +848,11 @@ store, notifications and start at login need.
 
 **An internal build** (`FLEET_INTERNAL=1`, `denext task desktop:package:internal`) also bakes what
 the build machine's `fleet-local-config.json` (or `$FLEET_LOCAL_CONFIG`) calls for: the runner
-scheduler integration's programs (`pausePool`, `watchdog`, `/bin/launchctl` with a `launchdLabel`)
-and a webhook spool outside the data folder (`lib/build-grants.ts`). It fails without a readable,
-valid local config. A release build bakes none of it: no ops paths, no launchctl, nothing of the
-builder's home. An internal build rewrites `.deno-desktop/config.json` with those grants: restore it
+scheduler integration's programs (`pausePool`, `watchdog`, the configuration and routing helpers,
+`/bin/launchctl` with a `launchdLabel`), a webhook spool outside the data folder, and a connection
+to the machines service's address (`lib/build-grants.ts`). It fails without a readable, valid local
+config. A release build bakes none of it: no ops paths, no launchctl, nothing of the builder's home.
+An internal build rewrites `.deno-desktop/config.json` with those grants: restore it
 (`git checkout .deno-desktop/config.json`) rather than commit it.
 
 ## Development
@@ -868,6 +912,8 @@ this repo.
 | `lib/snapshot.ts`                      | Pool cards, summary, the page's snapshot                                                                 |
 | `lib/history.ts`, `history-sources.ts` | The usage history (tiers, samples, jobs, percentiles, back-fill) and where its data comes from           |
 | `lib/pool-detail.ts`                   | A pool detail screen's data: history over a range, shared machine, recent jobs and events                |
+| `lib/machines.ts`, `deno-machines.ts`  | Machines: the service's documents parsed, the stream's state and trails, history; the stream client      |
+| `lib/routing.ts`, `routing-runner.ts`  | Routing rules: the helper's answers, a draft; load / check / save / revert through the helper            |
 | `lib/redact.ts`, `runner-logs.ts`      | Secrets out of log lines, ANSI; parsing launcher logs, scheduler lines, job log groups                   |
 | `lib/deno-logs.ts`, `logs.ts`          | Bounded, redacted reads of the scheduler's logs; GitHub job logs (budgeted, cached)                      |
 | `lib/notify.ts`                        | Which notifications to post, once each                                                                   |
@@ -890,6 +936,8 @@ this repo.
 | `mcp/fleet-stream.ts`                  | `fleet-stream`: the stream as one line per event, reconnecting with `since_seq` (for monitors)           |
 | `app/`                                 | The page: `fleet-app.tsx` (state), `fleet-view.tsx`, `event-log.tsx`, `controls.tsx`, `token-screen.tsx` |
 | `app/pool-detail.tsx`, `charts.tsx`    | The pool detail screen and its hand-drawn SVG charts                                                     |
+| `app/machines-view.tsx`                | The Machines screen: a card per machine, sparklines, history, the comparison                             |
+| `app/routing-form.tsx`                 | The routing rules' form, built from the helper's JSON Schema                                             |
 | `app/log-viewer.tsx`                   | The virtualized log viewer                                                                               |
 | `app/settings-view.tsx`                | The first-run wizard and the Settings view                                                               |
 | `public/fonts/`                        | IBM Plex Sans / Mono (OFL), bundled                                                                      |

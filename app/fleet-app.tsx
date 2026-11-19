@@ -14,7 +14,10 @@ import { openExternal } from "denext/mobile";
 import { type FleetEvent, LOG_LIMIT, mergeEvents } from "../lib/events.ts";
 import type { Snapshot } from "../lib/model.ts";
 import { linkStatus } from "../lib/link-status.ts";
-import { CHANGED_EVENT, errorText, fleet } from "./fleet-client.ts";
+import { CHANGED_EVENT, errorText, fleet, MACHINES_EVENT } from "./fleet-client.ts";
+import { type MachinesApi, MachinesView } from "./machines-view.tsx";
+import type { RoutingApi } from "./routing-form.tsx";
+import type { MachinesView as MachinesViewData } from "../lib/machines.ts";
 import { FleetView } from "./fleet-view.tsx";
 import { type ControlRequest, DispatchPanel, type PoolRequest } from "./controls.tsx";
 import type { ControlResult } from "../lib/control-runner.ts";
@@ -60,6 +63,18 @@ function openInBrowser(url: string): void {
 
 const isMac = () => typeof navigator !== "undefined" && /Mac/.test(navigator.userAgent);
 
+/** The Machines screen's loaders. */
+const MACHINES_API: MachinesApi = {
+  history: (host, range) => fleet.machineHistory({ host, range }),
+};
+/** The routing form's calls. */
+const ROUTING_API: RoutingApi = {
+  load: () => fleet.routingLoad(),
+  check: (draft) => fleet.routingCheck({ draft }),
+  apply: (generation, draft) => fleet.routingApply({ generation, draft }),
+  revert: (id, generation) => fleet.routingRevert({ id, generation }),
+};
+
 /** The view lost the keyboard: focus the panel when nothing of Fleet's took it, so keys reach us. */
 function takeKeyboardBack(): void {
   if (typeof document === "undefined") return;
@@ -94,14 +109,14 @@ const visibleNow = () =>
  */
 export function panelCovered(
   snap: Pick<Snapshot, "auth" | "setupComplete"> | null,
-  screen: "main" | "settings" | "wizard",
+  screen: "main" | "settings" | "wizard" | "machines",
   detailPool: string | null,
 ): boolean {
   if (!snap || snap.setupComplete === false || screen === "wizard") return true;
   if (snap.auth === "pending" || snap.auth === "needs-token" || snap.auth === "invalid") {
     return true;
   }
-  return screen === "settings" && detailPool === null;
+  return (screen === "settings" || screen === "machines") && detailPool === null;
 }
 
 export function FleetApp() {
@@ -111,16 +126,25 @@ export function FleetApp() {
   const [refreshing, setRefreshing] = useState(false);
   const [events, setEvents] = useState<FleetEvent[]>([]);
   const [pools, setPools] = useState<
-    { pools: boolean; restart?: boolean; watchdog?: boolean; config?: boolean }
+    {
+      pools: boolean;
+      restart?: boolean;
+      watchdog?: boolean;
+      config?: boolean;
+      routing?: boolean;
+      machines?: boolean;
+    }
   >({
     pools: false,
   });
+  /** The Machines screen's live view (read while the screen shows, and on each machines event). */
+  const [machinesView, setMachinesView] = useState<MachinesViewData | null>(null);
   /** The settings and machine facts while a settings screen is open (`null`: not loaded). */
   const [config, setConfig] = useState<{ settings: FleetSettings; machine: MachineInfo } | null>(
     null,
   );
   /** Which settings screen shows over the main view. */
-  const [screen, setScreen] = useState<"main" | "settings" | "wizard">("main");
+  const [screen, setScreen] = useState<"main" | "settings" | "wizard" | "machines">("main");
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
   const [dispatching, setDispatching] = useState(false);
   const [repos, setRepos] = useState<string[]>([]);
@@ -356,6 +380,22 @@ export function FleetApp() {
     };
   }, [read]);
 
+  // The Machines screen: its view on open and on every machines event while it shows.
+  useEffect(() => {
+    if (screen !== "machines") return;
+    let live = true;
+    const read = () =>
+      void fleet.machines().then((v) => {
+        if (live) setMachinesView(v);
+      }).catch(() => {});
+    read();
+    const stop = onDesktopEvent("fleet", MACHINES_EVENT, read);
+    return () => {
+      live = false;
+      stop();
+    };
+  }, [screen]);
+
   if (error && !snap) {
     return (
       <div class="signin">
@@ -456,6 +496,18 @@ export function FleetApp() {
       />,
     );
   }
+  if (screen === "machines") {
+    return (
+      <MachinesView
+        view={machinesView}
+        now={now}
+        api={MACHINES_API}
+        routing={pools.routing ? ROUTING_API : null}
+        initialTab={pools.machines ? "machines" : "routing"}
+        onBack={() => setScreen("main")}
+      />
+    );
+  }
   if (screen === "settings") {
     if (!config) return <div class="loading" aria-busy="true">Loading the settings…</div>;
     return (
@@ -479,6 +531,7 @@ export function FleetApp() {
       refreshing={refreshing}
       events={events}
       onSettings={() => setScreen("settings")}
+      onMachines={pools.machines || pools.routing ? () => setScreen("machines") : undefined}
       onPoolDetail={(pool) => {
         setDetailTab("usage");
         setDetailPool(pool);

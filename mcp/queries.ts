@@ -600,3 +600,59 @@ export function waitResult(
       : {}),
   };
 }
+
+/** The machines file older than this is stale (Fleet rewrites it about every 10 s). */
+export const MACHINES_STALE_MS = 60_000;
+
+/**
+ * `fleet_machines`: the latest hardware stats per PHYSICAL machine and what each running job uses,
+ * from Fleet's `machines.json` (the machines integration). `machine` narrows to one machine (its id
+ * or name); `detail: false` leaves out the per-core list and the sandboxes.
+ */
+export function machinesResult(raw: unknown, now: number, args: Args) {
+  const doc = typeof raw === "object" && raw !== null ? raw as Record<string, unknown> : null;
+  const written = typeof doc?.written_at === "number" ? doc.written_at * 1000 : null;
+  const only = optString(args, "machine");
+  const detail = args.detail !== false;
+  if (!doc || !Array.isArray(doc.machines)) {
+    return {
+      as_of: null,
+      stale: true,
+      warning:
+        "Fleet has written no machines file: the machines integration is not set up, or Fleet is not running.",
+      configured: false,
+      connected: false,
+      machines: [],
+    };
+  }
+  const age = written === null ? null : Math.max(0, now - written);
+  const connected = doc.connected === true;
+  const stale = age === null || age > MACHINES_STALE_MS || !connected;
+  type M = Record<string, unknown>;
+  let machines = (doc.machines as M[]).filter((m) => typeof m === "object" && m !== null);
+  if (only) machines = machines.filter((m) => m.id === only || m.name === only);
+  if (only && machines.length === 0) throw new ArgError(`no machine ${only}`);
+  if (!detail) {
+    machines = machines.map((m) => {
+      const s = m.stats as M | null;
+      if (!s) return m;
+      const { per_core_pct: _c, sandboxes: _s, ...rest } = s;
+      return { ...m, stats: rest };
+    });
+  }
+  return {
+    as_of: written === null ? null : new Date(written).toISOString(),
+    age_seconds: age === null ? null : Math.round(age / 1000),
+    stale,
+    warning: stale
+      ? !connected
+        ? `Fleet is not connected to the machines service${
+          typeof doc.error === "string" ? ` (${doc.error})` : ""
+        }: these are the last readings.`
+        : "The machines file is old: Fleet may not be running."
+      : null,
+    configured: doc.configured === true,
+    connected,
+    machines,
+  };
+}

@@ -479,7 +479,11 @@ Deno.test("token: kind from the prefix; write from the scopes", () => {
 
 Deno.test("build: a release build bakes no internal grants; an internal one bakes its local config's", () => {
   const env = (vars: Record<string, string>) => (k: string) => vars[k];
-  assertEquals(internalGrants(env({ HOME: "/Users/me" }), () => "{}"), { run: [], write: [] });
+  assertEquals(internalGrants(env({ HOME: "/Users/me" }), () => "{}"), {
+    run: [],
+    write: [],
+    net: [],
+  });
   const g = internalGrants(
     env({ FLEET_INTERNAL: "1", HOME: "/Users/me" }),
     (p) => {
@@ -505,7 +509,7 @@ Deno.test("build: a release build bakes no internal grants; an internal one bake
     "can't read the local config",
   );
   assertThrows(() => grantsFromConfig({ v: 1, owners: 1 }, "/h"), Error, "isn't valid");
-  assertEquals(grantsFromConfig(DEFAULT_SETTINGS, "/h"), { run: [], write: [] });
+  assertEquals(grantsFromConfig(DEFAULT_SETTINGS, "/h"), { run: [], write: [], net: [] });
 });
 
 // ---- the standalone receiver ----

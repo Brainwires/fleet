@@ -78,7 +78,8 @@ export default {
       // The GitHub API, outbound only, and the hosts its job-log downloads redirect to (a signed
       // URL fetched without the token; the pool detail's "View log"). The webhook receiver listens
       // on loopback, inside the loopback listen grant every desktop app has.
-      netConnect: ["api.github.com", ...LOG_HOSTS],
+      // An internal build adds the machines service's address (its local config's).
+      netConnect: ["api.github.com", ...LOG_HOSTS, ...INTERNAL.net],
       // `gh auth token`, a webhook secret from the macOS login keychain, and for the embedded Fleet
       // Notifier (lib/notifier.ts) LaunchServices' lsregister and `open` (its permission instance),
       // by absolute path only; an internal build adds the runner scheduler's pool commands.

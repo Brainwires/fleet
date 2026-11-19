@@ -39,6 +39,8 @@ export interface FleetViewProps {
   readonly dispatchPanel?: unknown;
   /** Open the Settings view (the header's Settings button). Absent: no button. */
   readonly onSettings?: () => void;
+  /** Open the Machines screen (the machines integration, or the routing helper). Absent: no button. */
+  readonly onMachines?: () => void;
   /** Open a pool's detail screen (a click on its card, or its name). Absent: cards don't open. */
   readonly onPoolDetail?: (pool: string) => void;
 }
@@ -689,6 +691,13 @@ export function FleetView(props: FleetViewProps) {
           >
             {props.refreshing ? "Refreshing…" : "Refresh"}
           </button>
+          {props.onMachines
+            ? (
+              <button type="button" class="btn" onClick={props.onMachines}>
+                Machines
+              </button>
+            )
+            : null}
           {props.onSettings
             ? (
               <button type="button" class="btn" onClick={props.onSettings}>
