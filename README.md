@@ -582,9 +582,13 @@ it, and the summary (the tray's tooltip) names a pool blocked with a free slot a
 15 minutes (amber); a down host is red at once. The file's schema and states: `lib/pool-state.ts`.
 
 `repo` takes `owner/name` or just `name`; `status` also takes `active` (anything not completed).
-`fleet_wait` watches the data folder and the webhook spool's folder (plus a 2 s re-read), returns at
-once when the state is already there, and `triggered` says why it returned: `failure`, `completed`,
-`event`, `timeout` or `stale`. Example, instead of a watch script:
+`fleet_wait` is event-driven: it watches Fleet's `snapshot.json` and journal and the webhook spool
+(by name, within ~50 ms of a write; a 15 s re-read is only a safety net, 2 s when a folder can't be
+watched), returns at once when the state is already there, and `triggered` says why it returned:
+`failure`, `completed`, `event`, `timeout` or `stale`. Agents use it instead of polling `gh` (a
+`gh run watch`, a loop of `gh run view`): it costs no API budget. `fleet_status` is read at the
+call: Fleet rewrites `snapshot.json` on every delivery and scheduler change, and each pool gets its
+`start` from the scheduler's `pool-state.json` directly. Example, instead of a watch script:
 
 ```text
 fleet_runs({ repo: "denext", branch: "development", status: "active" })   â†’ run 43194560988
@@ -597,13 +601,13 @@ fleet_events({ since_seq: <next_seq>, kinds: ["finished", "run-completed"] })  â
 **Freshness.** Every answer carries `as_of` (Fleet's last poll or webhook update), `age_s`,
 `written_at`, `fleet_running` (written in the last 2 min) and `stale`. It is stale when Fleet hasn't
 written for 5 min (not running), its polls have been failing for over 5 min (`poll.stale`, live
-webhooks or not: nothing reconciles missed deliveries or the pools), or its data is over 5 min old
-without live webhooks (polls slowed); with live webhooks a quiet fleet is current however old
-`as_of` is. A stale answer says so in `warning`, and `fleet_wait` returns at once with
-`triggered: "stale"`: the agent then falls back to `gh`. Runs that finished over 2 h ago are not in
-the snapshot (a waited-for id that isn't is listed under `missing`). With no `snapshot.json` yet
-(Fleet not running, or an older Fleet build), every answer is `stale: true`, and events come from
-`fleet-events.json`.
+webhooks or not: nothing reconciles missed deliveries or the pools), or its data is older than what
+refreshes it: over 5 min when only polling, over the safety poll's interval plus 5 min with webhooks
+on but quiet; with live webhooks a quiet fleet is current however old `as_of` is. A stale answer
+says so in `warning`, and `fleet_wait` returns at once with `triggered: "stale"`: the agent then
+falls back to `gh`. Runs that finished over 2 h ago are not in the snapshot (a waited-for id that
+isn't is listed under `missing`). With no `snapshot.json` yet (Fleet not running, or an older Fleet
+build), every answer is `stale: true`, and events come from `fleet-events.json`.
 
 **CI text is untrusted.** Run, job, step and branch names, titles, failure annotations and event
 text are written by whoever pushed or opened a PR; the server's instructions and the tools'
