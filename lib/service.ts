@@ -1,8 +1,13 @@
 // The backend service: finds a token (the GitHub CLI's, else one pasted earlier from the secure
-// store), polls GitHub every 15 s while a window is visible and every 60 s otherwise (or later, while
-// backing off), posts the native notifications once each, and tells listeners (the pages, the tray)
-// when the snapshot changed. Everything that touches the machine is injected (`ServiceDeps`), so the
-// tests run it with fakes. The token stays inside: no method returns it, nothing logs it.
+// store), and is event-driven where it can be: GitHub's state arrives as webhook deliveries
+// (`applyHook`), the runner scheduler's as file changes (`localStateChanged`, from
+// lib/state-watch.ts), each pushed to the listeners at once. The REST poll is then a safety net:
+// every 15 min, once after deliveries go quiet for 5 min, and on Refresh (lib/budget.ts). Without
+// webhooks it polls every 15 s while a window is visible and every 60 s otherwise (or later, while
+// backing off). It posts the native notifications once each, and tells listeners (the pages, the
+// tray) when the snapshot changed. Everything that touches the machine is injected
+// (`ServiceDeps`), so the tests run it with fakes. The token stays inside: no method returns it,
+// nothing logs it.
 
 import { createGitHubClient, type GitHubClient } from "./github.ts";
 import type { AuthState, Snapshot } from "./model.ts";
@@ -17,9 +22,9 @@ import {
 import { type FleetNotification, pendingNotifications, type SeenKeys } from "./notify.ts";
 import { type PersistedState, Poller } from "./poller.ts";
 
-import { pollPlan } from "./budget.ts";
+import { HOOK_GAP_MS, pollPlan } from "./budget.ts";
 import type { HealthState } from "./health.ts";
-import { type HookDelivery, HOOKS_STALE_MS, hooksState, isStaleDelivery } from "./hooks.ts";
+import { type HookDelivery, hooksState, isStaleDelivery } from "./hooks.ts";
 import { backfillEvents, backfillFrom, dropLogged } from "./backfill.ts";
 import { AGENT_HEARTBEAT_MS, type AgentSnapshot, buildAgentSnapshot } from "./agent-snapshot.ts";
 import {
@@ -165,6 +170,14 @@ export interface FleetService {
   /** Apply a verified workflow_job / workflow_run delivery; resolves once it's in the log. */
   applyHook(d: HookDelivery): Promise<void>;
   /**
+   * The runner scheduler rewrote its state files (lib/state-watch.ts): re-merge them over the last
+   * health read, with no GitHub request, and push the snapshot when the pools changed. Resolves
+   * once applied.
+   */
+  localStateChanged(): Promise<void>;
+  /** Whether the scheduler's state files are being watched (shown as the status line's source). */
+  setWatching(on: boolean): void;
+  /**
    * Back-fill the log from the webhook spool: what happened while Fleet was closed, at its real
    * times, never notified. Idempotent (de-duplicated against the log); resolves to the lines added.
    */
@@ -263,7 +276,10 @@ export function createFleetService(deps: ServiceDeps): FleetService {
   const hooks = () => hooksState(hooksEnabled, lastDelivery, now());
   /** The agents' snapshot: when its data last changed, and from what. */
   let dataAt: number | null = null;
-  let dataSource: "poll" | "hook" = "poll";
+  let dataSource: "poll" | "hook" | "watch" = "poll";
+  /** The scheduler's files: `null` until a watcher is set up, then whether it is watching. */
+  let watching: boolean | null = null;
+  let watchChangeAt: number | null = null;
   let agentWriting: Promise<void> | null = null;
   let agentDirty = false;
   let heartbeat: number | null = null;
@@ -325,7 +341,11 @@ export function createFleetService(deps: ServiceDeps): FleetService {
     eventSeq: log.lastSeq,
     notificationsPaused: paused(),
     hooks: { state: hooks(), lastDeliveryAt: lastDelivery, via: hooksVia },
+    ...watchField(),
   });
+
+  const watchField = (): Pick<Snapshot, "watch"> =>
+    watching === null ? {} : { watch: { on: watching, lastChangeAt: watchChangeAt } };
 
   const snapshot = (): Snapshot => {
     if (!poller) return emptySnapshot();
@@ -342,6 +362,7 @@ export function createFleetService(deps: ServiceDeps): FleetService {
       eventSeq: log.lastSeq,
       notificationsPaused: paused(),
       hooks: { state: hooks(), lastDeliveryAt: lastDelivery, via: hooksVia },
+      ...watchField(),
     };
   };
 
@@ -501,6 +522,17 @@ export function createFleetService(deps: ServiceDeps): FleetService {
     lastPoll = -Infinity;
   };
 
+  /**
+   * The gap poll: once deliveries have been quiet for {@linkcode HOOK_GAP_MS}, one poll reconciles
+   * (a missed delivery, or a receiver that stopped). `null` when none is due: webhooks off, no
+   * delivery yet, or a poll already ran after the gap began.
+   */
+  const gapPollAt = (): number | null => {
+    if (!hooksEnabled || lastDelivery === null) return null;
+    const at = lastDelivery + HOOK_GAP_MS;
+    return lastPoll < at ? at : null;
+  };
+
   const schedule = () => {
     if (stopped) return;
     if (timer !== null) clearT(timer);
@@ -508,11 +540,11 @@ export function createFleetService(deps: ServiceDeps): FleetService {
     if (!poller) return;
     const backoff = client?.backoffUntil() ?? null;
     const pl = plan();
-    let due = Math.max(lastPoll + pl.intervalMs, backoff ?? 0, pl.notBefore ?? 0);
-    // Missed-delivery guard: with runs active, poll as soon as the hooks go quiet for 10 min.
-    if (hooks() === "live" && (poller?.activeRuns ?? 0) > 0 && lastDelivery !== null) {
-      due = Math.max(Math.min(due, lastDelivery + HOOKS_STALE_MS), backoff ?? 0, pl.notBefore ?? 0);
-    }
+    const due = Math.max(
+      Math.min(lastPoll + pl.intervalMs, gapPollAt() ?? Infinity),
+      backoff ?? 0,
+      pl.notBefore ?? 0,
+    );
     timer = setT(() => {
       timer = null;
       void pollNow();
@@ -830,9 +862,33 @@ export function createFleetService(deps: ServiceDeps): FleetService {
         await notifyAndPersist();
         await writeAgent();
         emit();
+      }).catch(() => {}).finally(() => {
+        // The safety poll's gap timer follows the newest delivery, applied or not.
         schedule();
+      });
+      return hookChain;
+    },
+    localStateChanged() {
+      // On the hooks' chain: the poller's state is changed by one thing at a time.
+      hookChain = hookChain.then(async () => {
+        const p = poller;
+        if (!p || stopped) return;
+        if (!(await p.refreshLocal())) return;
+        if (p !== poller) return; // the token changed meanwhile
+        await recordEvents(p);
+        dataAt = now();
+        dataSource = "watch";
+        watchChangeAt = dataAt;
+        await notifyAndPersist();
+        await writeAgent();
+        emit();
       }).catch(() => {});
       return hookChain;
+    },
+    setWatching(on) {
+      if (watching === on) return;
+      watching = on;
+      emit();
     },
     backfill,
     events: (seq) => ({ events: log.after(seq), lastSeq: log.lastSeq }),

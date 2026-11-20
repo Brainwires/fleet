@@ -14,10 +14,15 @@
 // fleet_pool_health, fleet_pool_history, fleet_machines, fleet_runner_log (with --logs-dir). Every answer
 // carries its freshness (`as_of`, `stale`, `warning`); fleet_status names the watched owners.
 //
+// Event-driven: fleet_wait and the realtime subscriptions wake on file events (`Deno.watchFs` on
+// the folders, filtered by name: Fleet's snapshot.json and journal, the webhook spool's
+// events.jsonl), within about 50 ms of a write; a slow re-read (15 s while watching, 2 s when a
+// folder can't be watched) is only a safety net. Fleet itself rewrites snapshot.json as webhook
+// deliveries and the runner scheduler's file changes arrive, so an answer is current to the second.
 // Realtime: the resources `fleet://events` and `fleet://status` take `resources/subscribe`, and
 // the server sends `notifications/resources/updated` when the journal grows / the pools' state
-// changes (it watches the data folder, plus a 2 s re-read: still no network). After
-// `logging/setLevel`, every problem event (warn / bad) also arrives as `notifications/message`.
+// changes (still no network). After `logging/setLevel`, every problem event (warn / bad) also
+// arrives as `notifications/message`.
 
 import {
   INVALID_REQUEST,
@@ -38,6 +43,7 @@ import {
 } from "../lib/agent-files.ts";
 import { type AgentPoolStart, type AgentSnapshot, agentStart } from "../lib/agent-snapshot.ts";
 import { currentPoolStarts, parsePoolState } from "../lib/pool-state.ts";
+import { watchState, type WatchTarget } from "../lib/state-watch.ts";
 import { type FleetEvent, isProblem } from "../lib/events.ts";
 import { HistoryStore } from "../lib/history.ts";
 import { launcherForJob, launcherPath, readTail } from "../lib/deno-logs.ts";
@@ -69,8 +75,10 @@ import {
 
 /** The server's version (the app's). */
 export const SERVER_VERSION = "0.1.0";
-/** fleet_wait re-reads the files at least this often, whatever the watcher says. */
+/** fleet_wait re-reads the files this often when its folders can't be watched. */
 export const WAIT_POLL_MS = 2_000;
+/** …and this often while they are (a safety net: the watch wakes it on every write). */
+export const WATCH_SAFETY_MS = 15_000;
 /** fleet_wait sends a progress notification this often (when the client asked for progress). */
 const PROGRESS_MS = 25_000;
 
@@ -322,7 +330,10 @@ export const TOOLS = [
       "watches (`owners`), every self-hosted runner pool and host (health, slots, busy, paused), " +
       "running and queued job counts with the oldest queue wait, the GitHub rate budget left, " +
       "webhook state, a runner watchdog's local health when configured, and whether Fleet is " +
-      "running. Check `stale` / `warning` first: when stale, fall back to gh.",
+      "running. Current to the second: Fleet rewrites its cache on every webhook delivery and " +
+      "runner-scheduler change, and the scheduler's pool-state file is read at the call (each " +
+      "pool's `start`). Check `stale` / `warning` first: when stale, fall back to gh. To wait " +
+      "for a change, call fleet_wait rather than calling this (or gh) in a loop.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -496,13 +507,17 @@ export const TOOLS = [
   {
     name: "fleet_wait",
     description:
-      "Block until CI reaches a state, instead of a watch script: `any_failure` returns at the " +
-      "first failed job of the given runs / jobs (or when they all complete), `completed` when they " +
-      "all complete, `first_event` at the next logged event about them (any event without ids). " +
-      "Returns at once when already satisfied, and when Fleet's data is stale (fall back to gh " +
-      `then). timeout_s defaults to ${DEFAULT_WAIT_S}, at most ${MAX_WAIT_S}. The answer says ` +
-      "what triggered (failure / completed / event / timeout / stale) with the targets' state. " +
-      UNTRUSTED_NOTE,
+      "Block until CI reaches a state. Use this INSTEAD OF POLLING gh (`gh run watch`, " +
+      "`gh run view` / `gh api` in a loop, sleep loops, watch scripts): it is event-driven, " +
+      "waking within about a second of a webhook delivery or a runner-scheduler change (Fleet's " +
+      "files are watched), and costs no GitHub API budget, which the runner scheduler shares. " +
+      "`any_failure` returns at the first failed job of the given runs / jobs (or when they all " +
+      "complete), `completed` when they all complete, `first_event` at the next logged event " +
+      "about them (any event without ids). Returns at once when already satisfied, and when " +
+      "Fleet's data is stale (fall back to gh only then). Call it again with a new timeout to " +
+      `keep waiting. timeout_s defaults to ${DEFAULT_WAIT_S}, at most ${MAX_WAIT_S}. The answer ` +
+      "says what triggered (failure / completed / event / timeout / stale) with the targets' " +
+      "state. " + UNTRUSTED_NOTE,
     inputSchema: {
       type: "object",
       properties: {
@@ -556,34 +571,34 @@ export const LOG_LEVELS = [
   "emergency",
 ] as const;
 
-/** Watch `dirs` for changes, calling every waker on each; returns the closer. */
-function watchDirs(dirs: readonly (string | null)[], wakers: Set<() => void>): () => void {
-  const watchers: Deno.FsWatcher[] = [];
-  for (const dir of dirs) {
-    if (!dir) continue;
-    try {
-      const watcher = Deno.watchFs(dir, { recursive: false });
-      watchers.push(watcher);
-      (async () => {
-        try {
-          for await (const _ of watcher) for (const fn of [...wakers]) fn();
-        } catch {
-          // Closed.
-        }
-      })();
-    } catch {
-      // Not there (yet): the periodic re-read covers it.
-    }
-  }
-  return () => {
-    for (const w of watchers) {
-      try {
-        w.close();
-      } catch {
-        // Already closed.
-      }
-    }
-  };
+/** The files whose writes wake a waiter: Fleet's snapshot and journal, and the webhook spool. */
+export function wakeTargets(paths: FleetPaths, spool: boolean): WatchTarget[] {
+  const out: WatchTarget[] = [{
+    dir: paths.dataDir,
+    names: [AGENT_SNAPSHOT_FILE, JOURNAL_FILE, JOURNAL_OLD_FILE, LOG_FILE],
+  }];
+  if (spool && paths.hooksDir) out.push({ dir: paths.hooksDir, names: ["events.jsonl"] });
+  return out;
+}
+
+/**
+ * Watch the targets' folders, calling every waker on each write to a named file (bursts coalesced
+ * over 20 ms). Returns the closer and whether Fleet's data folder is being watched (then the
+ * re-read can be slow).
+ */
+function watchDirs(
+  targets: readonly WatchTarget[],
+  wakers: Set<() => void>,
+): { close: () => void; watching: boolean } {
+  const w = watchState({
+    targets,
+    onChange: () => {
+      for (const fn of [...wakers]) fn();
+    },
+    debounceMs: 20,
+    maxWaitMs: 100,
+  });
+  return { close: () => w.stop(), watching: w.watching > 0 };
 }
 
 /** What a status subscriber is told about: counts, pool state and slots, webhooks, staleness. */
@@ -620,6 +635,10 @@ function eventsUriArgs(uri: URL): Record<string, unknown> {
 /** The server's options (tests shorten the clock). */
 export interface ServerOptions {
   readonly now?: () => number;
+  /**
+   * The re-read interval, watching or not (tests shorten it). Default: {@linkcode WATCH_SAFETY_MS}
+   * while the data folder is watched, {@linkcode WAIT_POLL_MS} when it can't be.
+   */
   readonly pollMs?: number;
   /** Watch the folders for changes (on by default). */
   readonly watch?: boolean;
@@ -646,7 +665,9 @@ function wakeAfter(ms: number, signal: AbortSignal, wakers: Set<() => void>): Pr
 /** The MCP server over `files`: `handle` takes one JSON-RPC message and answers it (or not). */
 export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
   const now = options.now ?? Date.now;
-  const pollMs = options.pollMs ?? WAIT_POLL_MS;
+  /** The re-read interval: the option, else slow while the files are watched. */
+  const rereadMs = (watching: boolean) =>
+    options.pollMs ?? (watching ? WATCH_SAFETY_MS : WAIT_POLL_MS);
   const inflight = new Map<string | number, AbortController>();
 
   async function wait(w: WaitArgs, signal: AbortSignal, progress: (s: number) => void) {
@@ -654,9 +675,10 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
     const deadline = start + w.timeoutS * 1000;
     const baseline = (await files.events()).at(-1)?.seq ?? 0;
     const wakers = new Set<() => void>();
-    const unwatch = options.watch !== false
-      ? watchDirs([files.paths.dataDir, files.paths.hooksDir], wakers)
-      : () => {};
+    const watch = options.watch !== false
+      ? watchDirs(wakeTargets(files.paths, true), wakers)
+      : { close: () => {}, watching: false };
+    const pollMs = rereadMs(watch.watching);
     let lastProgress = start;
     try {
       while (true) {
@@ -678,7 +700,7 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
         await wakeAfter(Math.min(pollMs, deadline - t), signal, wakers);
       }
     } finally {
-      unwatch();
+      watch.close();
     }
   }
 
@@ -704,7 +726,10 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
 
   async function realtime(signal: AbortSignal): Promise<void> {
     const wakers = new Set<() => void>();
-    const unwatch = options.watch !== false ? watchDirs([files.paths.dataDir], wakers) : () => {};
+    const watch = options.watch !== false
+      ? watchDirs(wakeTargets(files.paths, false), wakers)
+      : { close: () => {}, watching: false };
+    const pollMs = rereadMs(watch.watching);
     try {
       let seen = (await files.events()).at(-1)?.seq ?? 0;
       let status = statusSignature(await files.snapshot(), now());
@@ -751,7 +776,7 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
         }
       }
     } finally {
-      unwatch();
+      watch.close();
     }
   }
 
@@ -770,6 +795,7 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
       return statusResult(await files.snapshot(), now(), {
         watchdog: await files.watchdog(),
         hooksSpoolAt: await files.hooksSpoolAt(),
+        starts: await files.poolStarts(now()),
       });
     }
     return null;
@@ -783,9 +809,12 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
   ) {
     switch (name) {
       case "fleet_status":
+        // Read at the call: snapshot.json (Fleet rewrites it on every delivery and scheduler
+        // change), the watchdog's file and the scheduler's pool-state.json directly.
         return statusResult(await files.snapshot(), now(), {
           watchdog: await files.watchdog(),
           hooksSpoolAt: await files.hooksSpoolAt(),
+          starts: await files.poolStarts(now()),
         });
       case "fleet_runs":
         return runsResult(await files.snapshot(), now(), args);
@@ -847,7 +876,8 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
           instructions:
             "Read GitHub Actions state (runs, jobs, runner pools, events) for the owners the Fleet " +
             "app watches (fleet_status lists them) from its cache instead of polling the GitHub " +
-            "API, whose rate budget other tools share. Use fleet_wait instead of watch loops. " +
+            "API, whose rate budget other tools share. Use fleet_wait instead of polling gh or " +
+            "watch loops: it wakes on webhook deliveries and runner-scheduler changes. " +
             "Subscribe to fleet://events / fleet://status for update notifications, and set a " +
             "log level to receive problem events as log messages. " +
             "Every answer has `as_of` and `stale`; when stale, fall back to gh. " + UNTRUSTED_NOTE,

@@ -95,3 +95,11 @@ settings' `integrations.runnerScheduler.localHealthFile` names it (`~/` allowed)
 
 A pool is paused while a file `paused-<pool>` exists in `integrations.runnerScheduler.pausedDir`.
 Slots in use stay the variable's.
+
+Fleet watches these files rather than waiting for its next poll (`lib/state-watch.ts`): the health
+file's folder (the health file, `pool-state.json` and `health-published` beside it) and the paused
+folder. The scheduler replaces its files by rename, so the folders are watched and events matched by
+name; a burst of writes is coalesced (300 ms quiet, 1 s at most), then the files are re-merged over
+the variable's last read, with no GitHub request, and the cards, the tray and `snapshot.json` follow
+within about a second. The status line says `watch` among its sources while it runs; a folder that
+can't be watched is retried every 30 s, and the poll still reads the files.

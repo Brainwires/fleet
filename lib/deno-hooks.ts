@@ -15,6 +15,7 @@ import {
   spoolLine,
 } from "./hooks.ts";
 import { expandHome, type WebhookSettings } from "./settings.ts";
+import { type WatchFn, watchState } from "./state-watch.ts";
 
 /** The keychain tool, by absolute path (baked as Fleet's only extra --allow-run besides gh). */
 export const SECURITY_BIN = "/usr/bin/security";
@@ -290,17 +291,24 @@ async function lastLineAt(path: string): Promise<number | null> {
   }
 }
 
+/** While the spool's folder is watched, it is still re-read this often (a missed event). */
+export const SPOOL_SAFETY_MS = 15_000;
+
 /**
  * Tail the receiver's spool (another process holds the port: `denext task hooks`, or a launchd
- * receiver): from its current end, every 2 s, rotation-aware. Returns the stop function and the
- * newest delivery's time already in the spool (the "last delivery" to start from), or `null` when
- * there is no spool.
+ * receiver): from its current end, rotation-aware. Event-driven: the spool's folder is watched
+ * and each append is read at once (within ~50 ms; a rotation, which renames the file, is seen
+ * too), with a re-read every {@linkcode SPOOL_SAFETY_MS} as a safety net; without a watch
+ * (`watch: false`, or the folder can't be watched) it re-reads every `everyMs`. Returns the stop
+ * function and the newest delivery's time already in the spool (the "last delivery" to start
+ * from), or `null` when there is no spool.
  */
 export async function tailSpool(
   onDelivery: (d: HookDelivery) => void,
   dir: string | null,
   everyMs = 2000,
   seen: Iterable<string> = [],
+  opts: { watch?: boolean | WatchFn } = {},
 ): Promise<{ stop: () => void; lastDeliveryAt: number | null } | null> {
   if (!dir) return null;
   const path = `${dir}/${HOOKS_LOG}`;
@@ -312,9 +320,15 @@ export async function tailSpool(
   }
   const cursor: SpoolCursor = { offset: size, partial: "", seen: new Set(seen) };
   let busy = false;
-  const tick = async () => {
-    if (busy) return;
+  /** A change arrived while a read ran: read again when it ends (no append is left unread). */
+  let again = false;
+  const tick = async (): Promise<void> => {
+    if (busy) {
+      again = true;
+      return;
+    }
     busy = true;
+    again = false;
     try {
       const st = await Deno.stat(path);
       const f = await Deno.open(path, { read: true });
@@ -340,10 +354,28 @@ export async function tailSpool(
     } finally {
       busy = false;
     }
+    if (again) return tick();
   };
   const lastDeliveryAt = await lastSpoolDeliveryAt(dir);
-  const id = setInterval(() => void tick(), everyMs);
-  return { stop: () => clearInterval(id), lastDeliveryAt };
+  const watcher = opts.watch === false ? null : watchState({
+    targets: [{ dir, names: [HOOKS_LOG] }],
+    onChange: () => void tick(),
+    debounceMs: 50,
+    maxWaitMs: 250,
+    ...(typeof opts.watch === "function" ? { watch: opts.watch } : {}),
+  });
+  // Watched: the interval is only a safety net. Not watched (yet): the old 2 s re-read.
+  const id = setInterval(
+    () => void tick(),
+    watcher && watcher.watching > 0 ? Math.max(everyMs, SPOOL_SAFETY_MS) : everyMs,
+  );
+  return {
+    stop: () => {
+      clearInterval(id);
+      watcher?.stop();
+    },
+    lastDeliveryAt,
+  };
 }
 
 /** A running receiver. */

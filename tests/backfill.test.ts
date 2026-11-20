@@ -106,6 +106,44 @@ Deno.test("spool: the newest delivery is the 'last delivery' a tail starts with 
   }
 });
 
+Deno.test("spool tail: an append is read at once (the folder is watched), not at the next tick", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "fleet-spool-" });
+  await Deno.writeTextFile(`${dir}/events.jsonl`, "");
+  const got: string[] = [];
+  let arrived: () => void = () => {};
+  const first = new Promise<void>((r) => (arrived = () => r()));
+  // A 60 s re-read: only the folder watch can deliver within the test's 5 s.
+  const tail = await tailSpool(
+    (d) => {
+      got.push(d.id);
+      arrived();
+    },
+    dir,
+    60_000,
+  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    assert(tail);
+    await new Promise((r) => setTimeout(r, 200));
+    const line = JSON.stringify({
+      received_at: new Date().toISOString(),
+      delivery: "live-1",
+      event: "workflow_job",
+      payload: { repository: { full_name: "Brainwires/denext" } },
+    });
+    await Deno.writeTextFile(`${dir}/events.jsonl`, line + "\n", { append: true });
+    const timeout = new Promise<"timeout">((r) => {
+      timer = setTimeout(() => r("timeout"), 5_000);
+    });
+    assertEquals(await Promise.race([first.then(() => "read" as const), timeout]), "read");
+    assertEquals(got, ["live-1"]);
+  } finally {
+    clearTimeout(timer);
+    tail?.stop();
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
 Deno.test("backfill: the gap is filled at real times, marked, oldest first", async () => {
   const dir = await spoolDir();
   try {

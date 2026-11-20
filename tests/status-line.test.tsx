@@ -8,7 +8,7 @@ import { FleetView } from "../app/fleet-view.tsx";
 import { createGitHubClient } from "../lib/github.ts";
 import type { Snapshot } from "../lib/model.ts";
 import { Poller } from "../lib/poller.ts";
-import { POLL_GRACE_MS, statusFreshness } from "../lib/status-line.ts";
+import { intervalText, POLL_GRACE_MS, sourceLine, statusFreshness } from "../lib/status-line.ts";
 import { RECONCILE_MS } from "../lib/budget.ts";
 import { fakeFetch, NOW, standardRoutes } from "./helpers.ts";
 
@@ -54,13 +54,57 @@ Deno.test("freshness: hooks quiet with nothing active is current, not behind", (
   const f = statusFreshness(parts({ hooks: "stale", lastDeliveryAt: NOW - 40 * MIN }), NOW);
   assertEquals(f.state, "current");
   assert(f.hooksQuiet);
-  // …but quiet hooks while jobs run are behind (deliveries were due).
+  // …quiet hooks while jobs run are behind until the gap poll reconciles after the last delivery
+  // (a queue that isn't moving sends nothing)…
   const g = statusFreshness(
-    parts({ hooks: "stale", lastDeliveryAt: NOW - 40 * MIN, active: 2 }),
+    parts({
+      hooks: "stale",
+      lastDeliveryAt: NOW - 14 * MIN,
+      lastSuccessAt: NOW - 12 * MIN,
+      active: 2,
+    }),
     NOW,
   );
   assertEquals(g.state, "behind");
   assertFalse(g.hooksQuiet);
+  // …and current once it has (the poll ran after the gap began).
+  const h = statusFreshness(
+    parts({
+      hooks: "stale",
+      lastDeliveryAt: NOW - 40 * MIN,
+      lastSuccessAt: NOW - 4 * MIN,
+      active: 2,
+    }),
+    NOW,
+  );
+  assertEquals(h.state, "current");
+});
+
+Deno.test("source: live from the watch and webhooks, the safety poll secondary; else the poll rate", () => {
+  const p = (o: { hooks?: Snapshot["hooks"]["state"]; watch?: boolean; intervalMs?: number }) => ({
+    ...parts({ hooks: o.hooks ?? "live", intervalMs: o.intervalMs }),
+    ...(o.watch === undefined ? {} : { watch: { on: o.watch, lastChangeAt: null } }),
+  });
+  const both = sourceLine(p({ watch: true }));
+  assertEquals([both.live, both.text, both.sources, both.poll], [
+    true,
+    "live · watch + webhooks",
+    "watch + webhooks",
+    "safety poll 15 min",
+  ]);
+  assertStringIncludes(both.title, "runner scheduler's state files");
+  assertStringIncludes(both.title, "every 15 min as a safety net");
+  assertStringIncludes(both.title, "quiet for 5 min");
+  // Quiet webhooks are still the source (they are on).
+  assertEquals(sourceLine(p({ hooks: "stale" })).text, "live · webhooks");
+  // The watch alone: GitHub is still polled at the normal rate, and says so.
+  const watch = sourceLine(p({ hooks: "off", watch: true, intervalMs: 15_000 }));
+  assertEquals([watch.text, watch.poll], ["live · watch", "GitHub poll 15 s"]);
+  // Polling only: the rate, as before ("every 300s" read as the only source).
+  const poll = sourceLine(p({ hooks: "off", watch: false, intervalMs: 60_000 }));
+  assertEquals([poll.live, poll.text, poll.poll], [false, "every 60 s", ""]);
+  assertEquals(intervalText(300_000), "5 min");
+  assertEquals(intervalText(15_000), "15 s");
 });
 
 Deno.test("freshness: an overdue or failing poll is behind; no poll yet is pending", () => {
@@ -123,6 +167,9 @@ Deno.test("view: an idle org with live webhooks reads live, not 'updated 4m ago'
   const screen = await render(view(await idle(parts({ lastDeliveryAt: NOW - 2 * MIN }))));
   const text = screen.container.textContent ?? "";
   assertStringIncludes(text, "live · last event 2m ago");
+  // The source beside it: the webhooks, the safety poll's interval secondary (not "every 900s").
+  assertStringIncludes(text, "via webhooks · safety poll 15 min");
+  assertFalse(/every \d+s/.test(text), text);
   assertFalse(text.includes("updated 4m ago"));
   const empties = byClass(screen.container, "empty-live").map((e) => e.textContent);
   assert(empties.includes("Nothing running."), `live empties: ${empties.join(" | ")}`);
@@ -150,7 +197,7 @@ Deno.test("view: via the standalone receiver, the live label's tooltip says so",
 Deno.test("view: the webhook badge shows whenever the live label doesn't", async () => {
   // Hooks live but the reconcile poll overdue: behind, so the badge stays.
   const behind = await render(
-    view(await idle(parts({ lastDeliveryAt: NOW - MIN, lastSuccessAt: NOW - 20 * MIN }))),
+    view(await idle(parts({ lastDeliveryAt: NOW - MIN, lastSuccessAt: NOW - 40 * MIN }))),
   );
   assertStringIncludes(behind.container.textContent ?? "", "hooks: live");
   assertEquals(byClass(behind.container, "status-live").length, 0);

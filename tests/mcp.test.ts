@@ -4,13 +4,13 @@
 // reaches for no network, environment or subprocess API.
 
 import { assert, assertEquals, assertFalse, assertStringIncludes } from "@std/assert";
-import type { AgentJob, AgentRun, AgentSnapshot } from "../lib/agent-snapshot.ts";
+import type { AgentJob, AgentPoolStart, AgentRun, AgentSnapshot } from "../lib/agent-snapshot.ts";
 import { AGENT_SNAPSHOT_FILE, JOURNAL_FILE, JOURNAL_OLD_FILE } from "../lib/agent-files.ts";
 import { appendJournal, journalLastSeq } from "../lib/deno-host.ts";
 import type { FleetEvent } from "../lib/events.ts";
 import type { GhJobList, GhRunList } from "../lib/github-types.ts";
 import { createFleetService } from "../lib/service.ts";
-import { createFleetMcp, FleetFiles, TOOLS } from "../mcp/fleet-mcp.ts";
+import { createFleetMcp, FleetFiles, TOOLS, wakeTargets } from "../mcp/fleet-mcp.ts";
 import {
   eventsResult,
   freshness,
@@ -736,5 +736,103 @@ Deno.test("server: its source uses no network, environment, subprocess or write 
     ) {
       assertFalse(api.test(src), `${f} uses ${api}`);
     }
+  }
+});
+
+// ---- event-driven ----
+
+Deno.test("freshness: quiet webhooks stay fresh until the safety poll is overdue", () => {
+  const quiet = (ageMin: number) =>
+    snap({
+      updated_at: ISO(NOW - ageMin * 60_000),
+      written_at: ISO(NOW - 5_000),
+      hooks: { state: "stale", last_delivery_at: ISO(NOW - 40 * 60_000) },
+      poll: { ...snap().poll, interval_ms: 15 * 60_000 },
+    });
+  // Webhooks on but quiet: the 15-minute safety poll refreshes the data; 10 min old is fine…
+  assertFalse(freshness(quiet(10), NOW).stale);
+  // …past the interval plus 5 min it is not.
+  assert(freshness(quiet(21), NOW).stale);
+  // Polling only: 5 min, as before.
+  assert(
+    freshness(snap({ updated_at: ISO(NOW - 6 * 60_000), written_at: ISO(NOW - 5_000) }), NOW).stale,
+  );
+});
+
+Deno.test("fleet_status: each pool's start state, read from the scheduler's file at the call", () => {
+  const start: AgentPoolStart = {
+    state: "blocked",
+    code: "ram",
+    reason: "waiting for RAM: 12 of 16 GB in use, needs 8",
+    detail: null,
+    state_since: ISO(NOW - 120_000),
+    reason_since: ISO(NOW - 120_000),
+    slots: 3,
+    busy: 2,
+    free: 1,
+    queued: 1,
+    blocked_jobs: [],
+    slot_states: [],
+  };
+  const s = statusResult(snap(), NOW, {
+    watchdog: null,
+    hooksSpoolAt: null,
+    starts: { "linux-x64": start },
+  }) as Any;
+  assertEquals(s.scheduler_state, "current");
+  const pool = s.pools.find((p: Any) => p.id === "linux-x64");
+  assertEquals(pool.start, {
+    state: "blocked",
+    code: "ram",
+    reason: start.reason,
+    since: start.state_since,
+    for_s: 120,
+  });
+  assertEquals(s.pools.find((p: Any) => p.id === "github").start, undefined);
+  // Without the file: as before.
+  const none = statusResult(snap(), NOW, { watchdog: null, hooksSpoolAt: null }) as Any;
+  assertEquals(none.scheduler_state, undefined);
+  assertEquals(none.pools[0].start, undefined);
+});
+
+Deno.test("server: the wake targets are Fleet's snapshot and journal, and the spool", () => {
+  const paths = { dataDir: "/d", hooksDir: "/h", healthFile: "/r/health.json" };
+  const t = wakeTargets(paths, true);
+  assertEquals(t.map((x) => x.dir), ["/d", "/h"]);
+  assert(t[0].names!.includes(AGENT_SNAPSHOT_FILE));
+  assert(t[0].names!.includes(JOURNAL_FILE));
+  assertFalse(t[0].names!.includes("machines.json"), "Fleet's other files wake nothing");
+  assertEquals(t[1].names, ["events.jsonl"]);
+  assertEquals(wakeTargets(paths, false).length, 1);
+  assertEquals(wakeTargets({ ...paths, hooksDir: null }, true).length, 1);
+});
+
+Deno.test("server: fleet_wait wakes on the file write, not the 15 s safety re-read", async () => {
+  const { root, paths } = await tempFleet();
+  try {
+    await writeSnap(paths.dataDir, snap());
+    // No pollMs: the default, a 15 s re-read while the folders are watched.
+    const server = createFleetMcp(new FleetFiles(paths), { now: () => NOW });
+    const started = Date.now();
+    const pending = call(server, 1, "fleet_wait", {
+      run_ids: [100],
+      until: "any_failure",
+      timeout_s: 60,
+    });
+    await new Promise((r) => setTimeout(r, 200));
+    await writeSnap(
+      paths.dataDir,
+      snap({
+        jobs: snap().jobs.map((j) =>
+          j.job_id === 1 ? { ...j, status: "completed", conclusion: "failure" } : j
+        ),
+      }),
+    );
+    const got = body(await pending);
+    const took = Date.now() - started;
+    assertEquals(got.triggered, "failure");
+    assert(took < 5_000, `woke after ${took} ms: by the safety re-read, not the watch`);
+  } finally {
+    await Deno.remove(root, { recursive: true });
   }
 });

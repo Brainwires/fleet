@@ -19,7 +19,7 @@ import {
 import { EventLog } from "./event-log.tsx";
 import { type ControlHandlers, PoolControls, RunControls } from "./controls.tsx";
 import type { FinishedJob, JobRow, PoolCard, RepoGroup, RunGroup, Snapshot } from "../lib/model.ts";
-import { type FreshState, statusFreshness } from "../lib/status-line.ts";
+import { type FreshState, sourceLine, statusFreshness } from "../lib/status-line.ts";
 import { startLine } from "../lib/pool-state.ts";
 import { POOL_STATE_TEXT } from "../lib/pool-status.ts";
 
@@ -595,6 +595,20 @@ function Freshness({ snapshot, now }: { snapshot: Snapshot; now: number }) {
   return <span title={polled}>updated {formatAgo(f.updatedAt, now)}</span>;
 }
 
+/**
+ * Where the data comes from: "live · watch + webhooks · safety poll 15 min", or "every 15 s" when
+ * only polling. Beside the "live · last event …" label it says "via watch + webhooks" instead.
+ */
+function SourceBadge({ snapshot, liveShown }: { snapshot: Snapshot; liveShown: boolean }) {
+  const src = sourceLine(snapshot);
+  return (
+    <span class={src.live ? "source source-live" : "source muted"} title={src.title}>
+      {src.live && liveShown ? `via ${src.sources}` : src.text}
+      {src.poll ? <span class="muted">{` · ${src.poll}`}</span> : null}
+    </span>
+  );
+}
+
 /** The status line: last poll, back-off, rate limit. */
 function StatusLine({ snapshot, now }: { snapshot: Snapshot; now: number }) {
   const p = snapshot.poll;
@@ -619,7 +633,7 @@ function StatusLine({ snapshot, now }: { snapshot: Snapshot; now: number }) {
         : !p.ok
         ? <span class="status-bad">poll failed: {p.message}</span>
         : <Freshness snapshot={snapshot} now={now} />}
-      <span class="muted">every {Math.round(p.intervalMs / 1000)}s</span>
+      <SourceBadge snapshot={snapshot} liveShown={fresh.state === "live" && p.ok} />
       {fresh.state === "live"
         ? null
         : <HooksBadge hooks={snapshot.hooks} now={now} quiet={fresh.hooksQuiet} />}

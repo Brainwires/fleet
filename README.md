@@ -152,8 +152,10 @@ with `~/`.
 - **Header**: a 3 px severity stripe (grey, amber, red), the watched owners, running and queued
   counts, why it isn't green, how current the data is (`live · last event 2m ago` while webhooks are
   live, else `updated N ago` from the later of the last poll and the last delivery, muted when a
-  poll is overdue or webhooks went quiet with jobs active), the poll interval, API requests left
-  (amber below 1,500, red below 800), the webhook state (`hooks: live`, `live (via receiver)`,
+  poll is overdue or webhooks went quiet with jobs active and no poll has reconciled since), where
+  the data comes from (`live · watch + webhooks` with the safety poll's interval secondary, the same
+  as `via …` beside the live label, or `every 15 s` when only polling), API requests left (amber
+  below 1,500, red below 800), the webhook state (`hooks: live`, `live (via receiver)`,
   `stale (last delivery N min ago)` while jobs are active, `quiet (…)` with nothing running, or
   `off`; hidden while the live label shows, whose tooltip then carries the delivery details),
   Refresh and Settings. With webhooks live, empty Running and Queued lanes carry a green live dot.
@@ -161,14 +163,15 @@ with `~/`.
   rebuilt on every poll: without a pool-health variable, the organizations' self-hosted runners
   grouped by their custom labels (ok while one runner is online); with one
   ([docs/pool-health.md](docs/pool-health.md)), its per-host `hosts` map (the runner scheduler
-  integration's local health file merged in when fresher), else its labels plus the registered
-  runners. The scheduler integration's declared pools are only the first render's, before any data
-  arrives; a pool that leaves the data leaves the cards. Each card: slots as pips (filled = busy), a
-  state chip with its reason: ok, busy (blue: every slot busy, jobs queued), blocked (amber: a free
-  slot, a gate holds the launch), Paused (amber: paused by hand), unhealthy (red: a real failure,
-  the host unreachable, registration failing, not clean) or no health (`lib/pool-status.ts`), and
-  the oldest queued wait, red past 15 min (amber when every slot is busy: the jobs are waiting for
-  capacity, not faulting). Hosts that share a runs-on label (`win-x64` and `win-x64-pc` on
+  integration's local health file merged in when fresher; its folder is watched, so a scheduler tick
+  reaches the cards within a second, with no poll), else its labels plus the registered runners. The
+  scheduler integration's declared pools are only the first render's, before any data arrives; a
+  pool that leaves the data leaves the cards. Each card: slots as pips (filled = busy), a state chip
+  with its reason: ok, busy (blue: every slot busy, jobs queued), blocked (amber: a free slot, a
+  gate holds the launch), Paused (amber: paused by hand), unhealthy (red: a real failure, the host
+  unreachable, registration failing, not clean) or no health (`lib/pool-status.ts`), and the oldest
+  queued wait, red past 15 min (amber when every slot is busy: the jobs are waiting for capacity,
+  not faulting). Hosts that share a runs-on label (`win-x64` and `win-x64-pc` on
   `denext-windows-x64`) each show their own numbers; a running job is placed by its runner's name,
   and a queued job of a shared label sits on that label's first card (its label can't say which host
   will take it). A long pool name truncates with "…" (full name on hover); the state chip stays on
@@ -444,7 +447,8 @@ a scheduler would stop launching runners. So (`lib/budget.ts`):
   polling resumes: the budget has refilled);
 - past 1,200 counted (non-304) requests in Fleet's own last hour, every 5 min.
 
-What it polls, per round (every 15 s visible, 60 s hidden, unless the budget or webhooks slow it):
+What it polls, per round (every 15 s visible, 60 s hidden, unless the budget slows it; with webhooks
+on, only the safety net's rounds: see [Webhooks](#webhooks)):
 
 | What                    | Endpoint                                                           | When                                |
 | ----------------------- | ------------------------------------------------------------------ | ----------------------------------- |
@@ -471,10 +475,11 @@ good one is over 5 min old, the pool cards and lanes are dimmed and marked stale
 
 ## Webhooks
 
-Optional. With GitHub's `workflow_job` / `workflow_run` webhook delivered to this machine, most
-changes arrive in seconds and polling only reconciles every 5 min; with no delivery for 10 min while
-runs are active, polling goes back to its normal rate, so a missed delivery or a dead tunnel costs
-freshness, not correctness. Without webhooks Fleet polls (`hooks: off`).
+Optional. With GitHub's `workflow_job` / `workflow_run` webhook delivered to this machine, changes
+arrive in seconds and the REST poll is only a safety net: every 15 min, once when deliveries have
+been quiet for 5 min (a missed delivery or a dead tunnel shows then), and on Refresh; so a missed
+delivery costs a few minutes of freshness, not correctness. Without webhooks Fleet polls (the header
+says `hooks: off`).
 
 - **The receiver** listens on `127.0.0.1` (loopback only, port `webhooks.port`, 8789 by default) and
   accepts only `POST /github/hooks`: `application/json` (else 415), at most 1 MiB (else 413), and a
@@ -484,7 +489,8 @@ freshness, not correctness. Without webhooks Fleet polls (`hooks: off`).
   newest timestamp is over 10 min old. Payloads are data only.
 - **Fleet or `hooks-only.ts`.** Fleet listens itself (`hooks: live`), unless the standalone receiver
   (`denext task hooks`, or the same as a background service) already holds the port; then Fleet
-  tails its spool every 2 s (`hooks: live (via receiver)`). Port taken and no spool: polling only.
+  tails its spool (`hooks: live (via receiver)`): the spool's folder is watched, so each delivery is
+  read within ~50 ms, with a 15 s re-read as a safety net. Port taken and no spool: polling only.
 - **The spool**, `events.jsonl` in `webhooks.spoolDir` (default `hooks/` in the data folder; 0600 in
   a 0700 folder, rotated to `.1` at 20 MB), records every verified delivery; Fleet back-fills its
   event log from it at start.
@@ -578,9 +584,13 @@ it, and the summary (the tray's tooltip) names a pool blocked with a free slot a
 15 minutes (amber); a down host is red at once. The file's schema and states: `lib/pool-state.ts`.
 
 `repo` takes `owner/name` or just `name`; `status` also takes `active` (anything not completed).
-`fleet_wait` watches the data folder and the webhook spool's folder (plus a 2 s re-read), returns at
-once when the state is already there, and `triggered` says why it returned: `failure`, `completed`,
-`event`, `timeout` or `stale`. Example, instead of a watch script:
+`fleet_wait` is event-driven: it watches Fleet's `snapshot.json` and journal and the webhook spool
+(by name, within ~50 ms of a write; a 15 s re-read is only a safety net, 2 s when a folder can't be
+watched), returns at once when the state is already there, and `triggered` says why it returned:
+`failure`, `completed`, `event`, `timeout` or `stale`. Agents use it instead of polling `gh` (a
+`gh run watch`, a loop of `gh run view`): it costs no API budget. `fleet_status` is read at the
+call: Fleet rewrites `snapshot.json` on every delivery and scheduler change, and each pool gets its
+`start` from the scheduler's `pool-state.json` directly. Example, instead of a watch script:
 
 ```text
 fleet_runs({ repo: "denext", branch: "development", status: "active" })   → run 43194560988
@@ -593,13 +603,13 @@ fleet_events({ since_seq: <next_seq>, kinds: ["finished", "run-completed"] })  �
 **Freshness.** Every answer carries `as_of` (Fleet's last poll or webhook update), `age_s`,
 `written_at`, `fleet_running` (written in the last 2 min) and `stale`. It is stale when Fleet hasn't
 written for 5 min (not running), its polls have been failing for over 5 min (`poll.stale`, live
-webhooks or not: nothing reconciles missed deliveries or the pools), or its data is over 5 min old
-without live webhooks (polls slowed); with live webhooks a quiet fleet is current however old
-`as_of` is. A stale answer says so in `warning`, and `fleet_wait` returns at once with
-`triggered: "stale"`: the agent then falls back to `gh`. Runs that finished over 2 h ago are not in
-the snapshot (a waited-for id that isn't is listed under `missing`). With no `snapshot.json` yet
-(Fleet not running, or an older Fleet build), every answer is `stale: true`, and events come from
-`fleet-events.json`.
+webhooks or not: nothing reconciles missed deliveries or the pools), or its data is older than what
+refreshes it: over 5 min when only polling, over the safety poll's interval plus 5 min with webhooks
+on but quiet; with live webhooks a quiet fleet is current however old `as_of` is. A stale answer
+says so in `warning`, and `fleet_wait` returns at once with `triggered: "stale"`: the agent then
+falls back to `gh`. Runs that finished over 2 h ago are not in the snapshot (a waited-for id that
+isn't is listed under `missing`). With no `snapshot.json` yet (Fleet not running, or an older Fleet
+build), every answer is `stale: true`, and events come from `fleet-events.json`.
 
 **CI text is untrusted.** Run, job, step and branch names, titles, failure annotations and event
 text are written by whoever pushed or opened a PR; the server's instructions and the tools'

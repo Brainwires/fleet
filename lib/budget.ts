@@ -47,21 +47,30 @@ export interface PlanInput {
   /** Fleet's counted (non-304) requests in the last hour. */
   readonly spentLastHour: number;
   readonly now: number;
-  /** Webhooks: live → polling only reconciles every 5 min; stale with runs active → normal. */
+  /** Webhooks: on (live, or quiet: `stale`) → polling is only the safety net; off → normal. */
   readonly hooks?: "live" | "stale" | "off";
   readonly activeRuns?: number;
 }
 
-/** With webhooks live, polling only reconciles this often. */
-export const RECONCILE_MS = 5 * 60_000;
+/**
+ * With webhooks on, the REST poll is only a safety net this often: GitHub's state arrives as
+ * deliveries, the runner scheduler's as file changes (lib/state-watch.ts).
+ */
+export const RECONCILE_MS = 15 * 60_000;
+/**
+ * …and once deliveries have gone quiet this long, one poll reconciles (a missed delivery, or a
+ * receiver that stopped, shows then); service.ts schedules it from the last delivery.
+ */
+export const HOOK_GAP_MS = 5 * 60_000;
 
 /**
- * The poll plan. With webhooks on, polling becomes a reconciliation: every 5 min while deliveries
- * arrive, and at the normal rate when they've gone quiet with runs active (a missed delivery).
+ * The poll plan. With webhooks on (live, or quiet: a queue that isn't moving sends nothing),
+ * polling is a slow safety net ({@linkcode RECONCILE_MS}); the gap poll ({@linkcode HOOK_GAP_MS})
+ * and the Refresh button come on top. Without webhooks it polls at the budget's normal rate.
  */
 export function pollPlan(i: PlanInput): PollPlan {
   const p = basePlan(i);
-  const reconcile = i.hooks === "live" || (i.hooks === "stale" && (i.activeRuns ?? 0) === 0);
+  const reconcile = i.hooks === "live" || i.hooks === "stale";
   return reconcile && p.intervalMs < RECONCILE_MS ? { ...p, intervalMs: RECONCILE_MS } : p;
 }
 

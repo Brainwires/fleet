@@ -43,8 +43,9 @@ const FALLBACK = "Fall back to gh / the GitHub API for anything that matters.";
 /**
  * How fresh the snapshot is. Stale when Fleet hasn't written it for 5 min (not running), when its
  * polls have been failing for over 5 min (`poll.stale`, live webhooks or not), or when its data is
- * over 5 min old and webhooks aren't live (with live webhooks a quiet fleet changes nothing, and the
- * heartbeat says Fleet is still listening).
+ * too old for what refreshes it: with webhooks live a quiet fleet changes nothing (the heartbeat
+ * says Fleet is still listening); with webhooks on but quiet, the safety poll (`poll.interval_ms`)
+ * still refreshes it, so it is stale only past that interval plus 5 min; polling only, past 5 min.
  */
 export function freshness(snap: AgentSnapshot | null, now: number): Freshness {
   if (!snap) {
@@ -66,8 +67,14 @@ export function freshness(snap: AgentSnapshot | null, now: number): Freshness {
   // Failing polls make the data stale even with live webhooks: deliveries update jobs, but the
   // pools, runners and any missed delivery (a job left queued) are reconciled only by polling.
   const pollStale = snap.poll?.stale === true;
-  const stale = writtenAge > STALE_AFTER_MS || pollStale ||
-    (snap.hooks?.state !== "live" && age > STALE_AFTER_MS);
+  const hooksState = snap.hooks?.state ?? "off";
+  const interval = typeof snap.poll?.interval_ms === "number" ? snap.poll.interval_ms : 0;
+  const maxAge = hooksState === "live"
+    ? Infinity
+    : hooksState === "stale"
+    ? Math.max(STALE_AFTER_MS, interval + STALE_AFTER_MS)
+    : STALE_AFTER_MS;
+  const stale = writtenAge > STALE_AFTER_MS || pollStale || age > maxAge;
   const min = (ms: number) => Number.isFinite(ms) ? `${Math.round(ms / 60_000)} min` : "unknown";
   const out: Freshness = {
     as_of: snap.updated_at,
@@ -189,7 +196,15 @@ export interface WatchdogFile {
 export function statusResult(
   snap: AgentSnapshot | null,
   now: number,
-  extra: { watchdog: WatchdogFile | null; hooksSpoolAt: number | null },
+  extra: {
+    watchdog: WatchdogFile | null;
+    hooksSpoolAt: number | null;
+    /**
+     * The runner scheduler's `pool-state.json`, read directly at the call (current to its last
+     * tick, whatever Fleet's snapshot says): each pool gets its `start`. `null` / absent: none.
+     */
+    starts?: Readonly<Record<string, AgentPoolStart>> | null;
+  },
 ) {
   const fresh = freshness(snap, now);
   const wd = extra.watchdog;
@@ -218,7 +233,12 @@ export function statusResult(
   const ghNow = now + (typeof snap.clock_offset_ms === "number" ? snap.clock_offset_ms : 0);
   const waitS = (iso: string | null) =>
     iso === null ? null : Math.max(0, Math.round((ghNow - Date.parse(iso)) / 1000));
-  const pools = snap.pools.map((p) => ({ ...p, oldest_wait_s: waitS(p.oldest_queued_since) }));
+  const starts = extra.starts ?? null;
+  const pools = snap.pools.map((p) => ({
+    ...p,
+    oldest_wait_s: waitS(p.oldest_queued_since),
+    ...(starts?.[p.id] ? { start: startBrief(starts[p.id], now) } : {}),
+  }));
   let oldest: { pool: string; wait_s: number } | null = null;
   for (const p of pools) {
     if (p.oldest_wait_s !== null && (!oldest || p.oldest_wait_s > oldest.wait_s)) {
@@ -248,6 +268,19 @@ export function statusResult(
     alerts: snap.alerts.slice(0, 5),
     watchdog,
     hooks_spool: hooksSpool,
+    ...(starts ? { scheduler_state: "current" } : {}),
+  };
+}
+
+/** A pool's start state in brief, for fleet_status (fleet_pool_health has the whole of it). */
+function startBrief(s: AgentPoolStart, now: number) {
+  const since = s.state_since;
+  return {
+    state: s.state,
+    code: s.code,
+    reason: s.reason,
+    since,
+    for_s: since === null ? null : Math.max(0, Math.round((now - Date.parse(since)) / 1000)),
   };
 }
 

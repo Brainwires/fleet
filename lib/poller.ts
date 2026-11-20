@@ -149,6 +149,8 @@ export class Poller {
   #jobs = new Map<number, GhJob[]>();
   #runners: GhRunner[] | null = null;
   #health: HealthState = { state: "unavailable", message: "pool health not read yet" };
+  /** The variable's health as last read (before the local file is merged over it). */
+  #variable: HealthState = { state: "unavailable", message: "pool health not read yet" };
   #finished = new Map<number, FinishedJob>();
   #durations = new Map<string, number[]>();
   #counted = new Set<number>();
@@ -378,25 +380,26 @@ export class Poller {
     }
   }
 
+  /** The variable's health into `#variable` (the round merges the local file over it). */
   async #readHealth(): Promise<void> {
     const hv = settings().pools.healthVariable;
     if (!hv) {
       // No pool-health variable configured: pools and their state come from the runners.
-      this.#health = { state: "unavailable", message: "" };
+      this.#variable = { state: "unavailable", message: "" };
       return;
     }
     if (this.#publicOnly) {
-      this.#health = { state: "unavailable", message: "pool health needs a token" };
+      this.#variable = { state: "unavailable", message: "pool health needs a token" };
       return;
     }
     try {
       const r = await this.#get<GhVariable>(`/orgs/${hv.org}/actions/variables/${hv.name}`);
-      this.#health = r
+      this.#variable = r
         ? parsePoolHealth(typeof r.body.value === "string" ? r.body.value : "", this.#now())
         : { state: "unavailable", message: "pool health unavailable (no access)" };
     } catch (err) {
       if (err instanceof GitHubError && err.kind === "not-found") {
-        this.#health = parsePoolHealth(null, this.#now());
+        this.#variable = parsePoolHealth(null, this.#now());
       } else throw err;
     }
   }
@@ -470,17 +473,11 @@ export class Poller {
         this.#recordCompleted(a.repo, a.run, jobs);
       });
       await Promise.all([this.#readRunners(), this.#readHealth(), this.#readAnnotations()]);
+      this.#health = this.#variable;
       if (this.#localHealth) {
-        this.#health = await this.#localHealth(this.#health).catch(() => this.#health);
+        this.#health = await this.#localHealth(this.#variable).catch(() => this.#health);
       }
-      // The pool list follows the data: a pool the watchdog stops reporting (or whose runners all
-      // leave) leaves the cards.
-      const h = this.#health;
-      const pools = settings().pools.healthVariable
-        ? derivePools(h.state === "ok" || h.state === "stale" ? h.doc : null, this.#runners)
-        : groupRunners(this.#runners);
-      if (pools) setPools(pools);
-      indexRunners(this.#runners, currentPools());
+      this.#applyPools();
       this.#prune();
       this.#ok = true;
       this.#lastError = "";
@@ -492,6 +489,33 @@ export class Poller {
       this.#prune();
       return { ok: false, authFailed: err instanceof GitHubError && err.kind === "auth" };
     }
+  }
+
+  /**
+   * The pool list follows the data: a pool the watchdog stops reporting (or whose runners all
+   * leave) leaves the cards.
+   */
+  #applyPools(): void {
+    const h = this.#health;
+    const pools = settings().pools.healthVariable
+      ? derivePools(h.state === "ok" || h.state === "stale" ? h.doc : null, this.#runners)
+      : groupRunners(this.#runners);
+    if (pools) setPools(pools);
+    indexRunners(this.#runners, currentPools());
+  }
+
+  /**
+   * Re-merge the runner scheduler's local files over the variable's health as last read: no GitHub
+   * request. Called when the scheduler rewrites its state (lib/state-watch.ts), so the pool cards
+   * follow it within a second instead of at the next poll. Returns whether the health changed.
+   */
+  async refreshLocal(): Promise<boolean> {
+    if (!this.#localHealth) return false;
+    const before = JSON.stringify(this.#health);
+    this.#health = await this.#localHealth(this.#variable).catch(() => this.#health);
+    if (JSON.stringify(this.#health) === before) return false;
+    this.#applyPools();
+    return true;
   }
 
   /** The first failure annotation of each newly failed job (one request per failure, once). */
