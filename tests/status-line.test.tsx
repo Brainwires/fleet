@@ -150,7 +150,7 @@ Deno.test("view: via the standalone receiver, the live label's tooltip says so",
 Deno.test("view: the webhook badge shows whenever the live label doesn't", async () => {
   // Hooks live but the reconcile poll overdue: behind, so the badge stays.
   const behind = await render(
-    view(await idle(parts({ lastDeliveryAt: NOW - MIN, lastSuccessAt: NOW - 20 * MIN }))),
+    view(await idle(parts({ lastDeliveryAt: NOW - MIN, lastSuccessAt: NOW - 40 * MIN }))),
   );
   assertStringIncludes(behind.container.textContent ?? "", "hooks: live");
   assertEquals(byClass(behind.container, "status-live").length, 0);

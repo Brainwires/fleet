@@ -6,7 +6,7 @@
 // rest keeps polling, and the polled data is marked stale while polls fail.
 
 import { assert, assertEquals, assertFalse, assertStringIncludes } from "@std/assert";
-import { HIDDEN_MS, pollPlan, RATE_FLOOR, SLOW_MS } from "../lib/budget.ts";
+import { HIDDEN_MS, pollPlan, RATE_FLOOR, RECONCILE_MS, SLOW_MS } from "../lib/budget.ts";
 import { createGitHubClient, GitHubError, retryAfterMs } from "../lib/github.ts";
 import { POLL_STALE_MS, Poller } from "../lib/poller.ts";
 import { createFleetService } from "../lib/service.ts";
@@ -20,12 +20,13 @@ const RESET_AFTER_MS = 9 * 60_000;
 Deno.test("budget: a floor rate whose reset has passed no longer pauses polling", () => {
   const base = { visible: false, publicOnly: false, spentLastHour: 0, hooks: "live" as const };
   const drained = { remaining: 0, limit: 5000, resetAt: NOW + RESET_AFTER_MS };
-  // Before the reset: paused until it.
+  // Before the reset: paused until it (with webhooks live, at the safety net's interval after).
   assertEquals(pollPlan({ ...base, rate: drained, now: NOW }), {
-    intervalMs: SLOW_MS,
+    intervalMs: RECONCILE_MS,
     notBefore: NOW + RESET_AFTER_MS,
     slow: "floor",
   });
+  assertEquals(pollPlan({ ...base, hooks: "off", rate: drained, now: NOW }).intervalMs, SLOW_MS);
   // After it (16 h later, the reported stuck state): the old figure says nothing; no pause.
   const later = NOW + 16 * 3600_000;
   const p = pollPlan({ ...base, rate: drained, now: later });

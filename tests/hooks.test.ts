@@ -3,7 +3,7 @@
 // event log as polling; the reconciliation timer.
 
 import { assert, assertEquals, assertFalse } from "@std/assert";
-import { pollPlan, RECONCILE_MS, VISIBLE_MS } from "../lib/budget.ts";
+import { HOOK_GAP_MS, pollPlan, RECONCILE_MS, VISIBLE_MS } from "../lib/budget.ts";
 import {
   createHookHandler,
   type HookDelivery,
@@ -180,10 +180,11 @@ Deno.test("hooks: constant-time compare and the state badge", () => {
   assertEquals(hooksState(true, NOW - HOOKS_STALE_MS - 1, NOW), "stale");
 });
 
-Deno.test("hooks: reconciliation — 5 min while live; normal when quiet with runs active", () => {
+Deno.test("hooks: reconciliation — the safety net while on (live or quiet); normal when off", () => {
   const base = { rate: null, visible: true, publicOnly: false, spentLastHour: 0, now: NOW };
   assertEquals(pollPlan({ ...base, hooks: "live", activeRuns: 3 }).intervalMs, RECONCILE_MS);
-  assertEquals(pollPlan({ ...base, hooks: "stale", activeRuns: 3 }).intervalMs, VISIBLE_MS);
+  // Quiet with runs active: the gap poll (service.ts) reconciles, not a return to 15 s polling.
+  assertEquals(pollPlan({ ...base, hooks: "stale", activeRuns: 3 }).intervalMs, RECONCILE_MS);
   assertEquals(pollPlan({ ...base, hooks: "stale", activeRuns: 0 }).intervalMs, RECONCILE_MS);
   assertEquals(pollPlan({ ...base, hooks: "off", activeRuns: 0 }).intervalMs, VISIBLE_MS);
 });
@@ -222,8 +223,8 @@ Deno.test("hooks: deliveries feed the state and the event log; the timer follows
   await svc.applyHook(d("a", {}));
   assertEquals(svc.snapshot().summary.queued, queued + 1);
   assertEquals(svc.snapshot().hooks.state, "live");
-  // Live with runs active: next poll at the 10-minute missed-delivery guard at the latest.
-  assert(pending.at(-1)! <= HOOKS_STALE_MS && pending.at(-1)! > VISIBLE_MS);
+  // Live: the next poll is the gap poll, 5 min after this delivery (unless another comes first).
+  assertEquals(pending.at(-1), HOOK_GAP_MS);
   t += 1000;
   await svc.applyHook(
     d("b", {

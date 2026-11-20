@@ -1,15 +1,19 @@
 // Fleet is signalled, not polling: the runner scheduler's file changes reach the pool cards at once
 // with no GitHub request (the reported bug: the Windows cards stayed "unhealthy" for minutes after
-// the scheduler said healthy, until the 300 s reconcile poll). Fakes only: no GUI, no network, no
-// timers of the real clock.
+// the scheduler said healthy, until the 300 s reconcile poll), webhook deliveries drive the jobs,
+// and the REST poll is only a safety net: every 15 min, once 5 min after deliveries go quiet, and on
+// Refresh. Fakes only: no GUI, no network, no timers of the real clock.
 
 import { assert, assertEquals } from "@std/assert";
+import { HIDDEN_MS, HOOK_GAP_MS, pollPlan, RECONCILE_MS, VISIBLE_MS } from "../lib/budget.ts";
 import type { AgentSnapshot } from "../lib/agent-snapshot.ts";
+import type { HookDelivery } from "../lib/hooks.ts";
 import { mergeLocalHealth } from "../lib/local-health.ts";
 import { createFleetService } from "../lib/service.ts";
 import { fakeFetch, NOW, standardRoutes } from "./helpers.ts";
 
 const TOKEN = "gho_" + "e".repeat(36);
+const MIN = 60_000;
 
 /** setTimeout on a hand-moved clock (as in rate-recovery.test.ts). */
 function fakeClock(start: number) {
@@ -49,6 +53,28 @@ const secrets = {
   set: () => Promise.resolve(),
   delete: () => Promise.resolve(),
 };
+
+/** A delivery for a watched repo (its job payload is not needed for the timer). */
+const delivery = (id: string, at: number): HookDelivery => ({
+  id,
+  event: "workflow_job",
+  receivedAt: at,
+  payload: { repository: { full_name: "Brainwires/denext" } },
+});
+
+Deno.test("plan: with webhooks on, polling is the 15-minute safety net, quiet or not", () => {
+  const base = { rate: null, visible: true, publicOnly: false, spentLastHour: 0, now: NOW };
+  assertEquals(RECONCILE_MS, 15 * MIN);
+  assertEquals(HOOK_GAP_MS, 5 * MIN);
+  assertEquals(pollPlan({ ...base, hooks: "live", activeRuns: 3 }).intervalMs, RECONCILE_MS);
+  // Quiet webhooks with jobs queued (a queue that isn't moving sends nothing): still the safety
+  // net, not a fall back to 15 s polling.
+  assertEquals(pollPlan({ ...base, hooks: "stale", activeRuns: 3 }).intervalMs, RECONCILE_MS);
+  assertEquals(pollPlan({ ...base, hooks: "stale", activeRuns: 0 }).intervalMs, RECONCILE_MS);
+  // No webhooks: the budget's normal rate.
+  assertEquals(pollPlan({ ...base, hooks: "off" }).intervalMs, VISIBLE_MS);
+  assertEquals(pollPlan({ ...base, visible: false, hooks: "off" }).intervalMs, HIDDEN_MS);
+});
 
 Deno.test("scheduler files: a change reaches the pool cards at once, with no GitHub request", async () => {
   const clock = fakeClock(NOW);
@@ -130,5 +156,87 @@ Deno.test("scheduler files: the watch shows in the snapshot only once set up", a
   assertEquals(svc.snapshot().watch, { on: true, lastChangeAt: null });
   svc.setWatching(false);
   assertEquals(svc.snapshot().watch?.on, false);
+  svc.stop();
+});
+
+Deno.test("safety poll: once 5 min after deliveries go quiet, then every 15 min; Refresh at once", async () => {
+  const clock = fakeClock(NOW);
+  const { fetch, seen } = fakeFetch(standardRoutes());
+  const svc = createFleetService({
+    ghToken: () => Promise.resolve(TOKEN),
+    secrets,
+    fetch,
+    now: clock.now,
+    notify: () => {},
+    load: () => Promise.resolve(null),
+    save: () => Promise.resolve(),
+    setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout,
+    warn: () => {},
+  });
+  await svc.start(); // the first poll, at NOW
+  await clock.settle();
+  svc.setHooksEnabled(true);
+  const polledAt: number[] = [];
+  let count = seen.length;
+  /** Move to `target` and note whether a poll (any request) went out on the way. */
+  const step = async (target: number) => {
+    await clock.advanceTo(target);
+    if (seen.length > count) polledAt.push(target);
+    count = seen.length;
+  };
+
+  // Deliveries every minute for 4 min: no poll meanwhile (they are the source).
+  for (let i = 1; i <= 4; i++) {
+    await clock.advanceTo(NOW + i * MIN);
+    await svc.applyHook(delivery(`d${i}`, NOW + i * MIN));
+  }
+  count = seen.length;
+  const last = NOW + 4 * MIN;
+  await step(last + HOOK_GAP_MS - 1_000);
+  assertEquals(polledAt, [], "nothing polls while deliveries keep coming, or before the gap");
+  // The gap: deliveries quiet for 5 min → one reconciling poll.
+  await step(last + HOOK_GAP_MS + 1_000);
+  assertEquals(polledAt, [last + HOOK_GAP_MS + 1_000], "the gap poll");
+  // …and then only the 15-minute safety net, not a poll every 5 min of the quiet.
+  await step(last + HOOK_GAP_MS + RECONCILE_MS - 1_000);
+  assertEquals(polledAt.length, 1, "no poll inside the safety interval");
+  await step(last + HOOK_GAP_MS + RECONCILE_MS + 1_000);
+  assertEquals(polledAt.length, 2, "the safety poll");
+  // Refresh polls at once, whatever the timer says.
+  const before = seen.length;
+  await svc.refresh();
+  assert(seen.length > before, "Refresh polls");
+  svc.stop();
+});
+
+Deno.test("safety poll: a new delivery moves the gap poll on", async () => {
+  const clock = fakeClock(NOW);
+  const { fetch, seen } = fakeFetch(standardRoutes());
+  const svc = createFleetService({
+    ghToken: () => Promise.resolve(TOKEN),
+    secrets,
+    fetch,
+    now: clock.now,
+    notify: () => {},
+    load: () => Promise.resolve(null),
+    save: () => Promise.resolve(),
+    setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout,
+    warn: () => {},
+  });
+  await svc.start();
+  await clock.settle();
+  svc.setHooksEnabled(true);
+  await clock.advanceTo(NOW + MIN);
+  await svc.applyHook(delivery("a", NOW + MIN));
+  // Another delivery 4 min later, just before the first gap would end.
+  await clock.advanceTo(NOW + 5 * MIN);
+  await svc.applyHook(delivery("b", NOW + 5 * MIN));
+  const count = seen.length;
+  await clock.advanceTo(NOW + 9 * MIN);
+  assertEquals(seen.length, count, "the first gap was cut short by the second delivery");
+  await clock.advanceTo(NOW + 10 * MIN + 1_000);
+  assert(seen.length > count, "the gap after the second delivery polls");
   svc.stop();
 });

@@ -31,16 +31,16 @@ platforms: macOS on Apple Silicon (arm64), Linux x64 and Windows x64.
 - **Instant updates.** A job queued, started or finished shows up in Fleet within a second or two
   instead of on the next poll (every 15 s with the window visible, 60 s hidden, slower when the rate
   budget is low).
-- **Fewer API calls.** While deliveries arrive, polling drops to one reconciliation every 5 minutes.
-  The REST budget (5,000 requests an hour per token) is often shared with other tools; webhooks
-  leave most of it to them.
+- **Fewer API calls.** With webhooks on, the REST poll is only a safety net: every 15 minutes. The
+  REST budget (5,000 requests an hour per token) is often shared with other tools; webhooks leave
+  most of it to them.
 - **A back-fill.** Every verified delivery is appended to a local spool file. When Fleet starts, it
   fills its event log with what happened while it was closed (the last 24 h, at most 500 lines,
   marked ↺).
 
-Polling stays on as the safety net: if no delivery arrives for 10 minutes while runs are active,
-Fleet goes back to its normal poll rate. A missed delivery or a dead tunnel costs freshness, never
-correctness.
+Polling stays on as the safety net: every 15 minutes, once when deliveries have been quiet for 5
+minutes (whatever is running), and on Refresh. A missed delivery or a dead tunnel costs a few
+minutes of freshness, never correctness.
 
 **What is sent where.** GitHub sends `workflow_job` and `workflow_run` events (JSON describing a job
 or run: repository, workflow and job names, status, timestamps, runner name) to the public URL you
@@ -56,7 +56,7 @@ flowchart LR
   EDGE -- "only the path /github/hooks;<br/>everything else 404" --> RX["Receiver<br/>127.0.0.1:8789<br/>(Fleet itself, or hooks-only.ts)"]
   RX -- "verified deliveries" --> SPOOL["Spool<br/><spool>/events.jsonl"]
   RX -- "in-process (Fleet is the receiver)" --> FLEET["Fleet"]
-  SPOOL -- "tailed every 2 s<br/>(a separate receiver holds the port)" --> FLEET
+  SPOOL -- "tailed as it is written<br/>(a separate receiver holds the port)" --> FLEET
 ```
 
 The same in text:
@@ -84,8 +84,9 @@ The receiver is the same code in two places:
   spool. The header shows `hooks: live`.
 - **Standalone, `hooks-only.ts`.** A small process with no window, run as a background service. It
   holds the port and writes the spool. When Fleet starts and finds the port taken, it tails the
-  spool every 2 s instead and shows `hooks: live (via receiver)`. If the port is taken and there is
-  no spool, Fleet stays on polling (`hooks: off`).
+  spool instead (its folder is watched: each delivery is read within ~50 ms, with a 15 s re-read as
+  a safety net) and shows `hooks: live (via receiver)`. If the port is taken and there is no spool,
+  Fleet stays on polling (`hooks: off`).
 
 Run the standalone receiver if you want deliveries recorded while Fleet is closed (the back-fill
 needs them) or if other tools read the spool. Running only Fleet is fine too; deliveries that arrive

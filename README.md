@@ -445,7 +445,8 @@ a scheduler would stop launching runners. So (`lib/budget.ts`):
   polling resumes: the budget has refilled);
 - past 1,200 counted (non-304) requests in Fleet's own last hour, every 5 min.
 
-What it polls, per round (every 15 s visible, 60 s hidden, unless the budget or webhooks slow it):
+What it polls, per round (every 15 s visible, 60 s hidden, unless the budget slows it; with webhooks
+on, only the safety net's rounds: see [Webhooks](#webhooks)):
 
 | What                    | Endpoint                                                           | When                                |
 | ----------------------- | ------------------------------------------------------------------ | ----------------------------------- |
@@ -472,10 +473,11 @@ good one is over 5 min old, the pool cards and lanes are dimmed and marked stale
 
 ## Webhooks
 
-Optional. With GitHub's `workflow_job` / `workflow_run` webhook delivered to this machine, most
-changes arrive in seconds and polling only reconciles every 5 min; with no delivery for 10 min while
-runs are active, polling goes back to its normal rate, so a missed delivery or a dead tunnel costs
-freshness, not correctness. Without webhooks Fleet polls (`hooks: off`).
+Optional. With GitHub's `workflow_job` / `workflow_run` webhook delivered to this machine, changes
+arrive in seconds and the REST poll is only a safety net: every 15 min, once when deliveries have
+been quiet for 5 min (a missed delivery or a dead tunnel shows then), and on Refresh; so a missed
+delivery costs a few minutes of freshness, not correctness. Without webhooks Fleet polls (the header
+says `hooks: off`).
 
 - **The receiver** listens on `127.0.0.1` (loopback only, port `webhooks.port`, 8789 by default) and
   accepts only `POST /github/hooks`: `application/json` (else 415), at most 1 MiB (else 413), and a
@@ -485,7 +487,8 @@ freshness, not correctness. Without webhooks Fleet polls (`hooks: off`).
   newest timestamp is over 10 min old. Payloads are data only.
 - **Fleet or `hooks-only.ts`.** Fleet listens itself (`hooks: live`), unless the standalone receiver
   (`denext task hooks`, or the same as a background service) already holds the port; then Fleet
-  tails its spool every 2 s (`hooks: live (via receiver)`). Port taken and no spool: polling only.
+  tails its spool (`hooks: live (via receiver)`): the spool's folder is watched, so each delivery is
+  read within ~50 ms, with a 15 s re-read as a safety net. Port taken and no spool: polling only.
 - **The spool**, `events.jsonl` in `webhooks.spoolDir` (default `hooks/` in the data folder; 0600 in
   a 0700 folder, rotated to `.1` at 20 MB), records every verified delivery; Fleet back-fills its
   event log from it at start.
