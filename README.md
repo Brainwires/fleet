@@ -161,14 +161,15 @@ with `~/`.
   rebuilt on every poll: without a pool-health variable, the organizations' self-hosted runners
   grouped by their custom labels (ok while one runner is online); with one
   ([docs/pool-health.md](docs/pool-health.md)), its per-host `hosts` map (the runner scheduler
-  integration's local health file merged in when fresher), else its labels plus the registered
-  runners. The scheduler integration's declared pools are only the first render's, before any data
-  arrives; a pool that leaves the data leaves the cards. Each card: slots as pips (filled = busy), a
-  state chip with its reason: ok, busy (blue: every slot busy, jobs queued), blocked (amber: a free
-  slot, a gate holds the launch), Paused (amber: paused by hand), unhealthy (red: a real failure,
-  the host unreachable, registration failing, not clean) or no health (`lib/pool-status.ts`), and
-  the oldest queued wait, red past 15 min (amber when every slot is busy: the jobs are waiting for
-  capacity, not faulting). Hosts that share a runs-on label (`win-x64` and `win-x64-pc` on
+  integration's local health file merged in when fresher; its folder is watched, so a scheduler tick
+  reaches the cards within a second, with no poll), else its labels plus the registered runners. The
+  scheduler integration's declared pools are only the first render's, before any data arrives; a
+  pool that leaves the data leaves the cards. Each card: slots as pips (filled = busy), a state chip
+  with its reason: ok, busy (blue: every slot busy, jobs queued), blocked (amber: a free slot, a
+  gate holds the launch), Paused (amber: paused by hand), unhealthy (red: a real failure, the host
+  unreachable, registration failing, not clean) or no health (`lib/pool-status.ts`), and the oldest
+  queued wait, red past 15 min (amber when every slot is busy: the jobs are waiting for capacity,
+  not faulting). Hosts that share a runs-on label (`win-x64` and `win-x64-pc` on
   `denext-windows-x64`) each show their own numbers; a running job is placed by its runner's name,
   and a queued job of a shared label sits on that label's first card (its label can't say which host
   will take it). A long pool name truncates with "…" (full name on hover); the state chip stays on

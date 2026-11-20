@@ -165,6 +165,14 @@ export interface FleetService {
   /** Apply a verified workflow_job / workflow_run delivery; resolves once it's in the log. */
   applyHook(d: HookDelivery): Promise<void>;
   /**
+   * The runner scheduler rewrote its state files (lib/state-watch.ts): re-merge them over the last
+   * health read, with no GitHub request, and push the snapshot when the pools changed. Resolves
+   * once applied.
+   */
+  localStateChanged(): Promise<void>;
+  /** Whether the scheduler's state files are being watched (shown as the status line's source). */
+  setWatching(on: boolean): void;
+  /**
    * Back-fill the log from the webhook spool: what happened while Fleet was closed, at its real
    * times, never notified. Idempotent (de-duplicated against the log); resolves to the lines added.
    */
@@ -263,7 +271,10 @@ export function createFleetService(deps: ServiceDeps): FleetService {
   const hooks = () => hooksState(hooksEnabled, lastDelivery, now());
   /** The agents' snapshot: when its data last changed, and from what. */
   let dataAt: number | null = null;
-  let dataSource: "poll" | "hook" = "poll";
+  let dataSource: "poll" | "hook" | "watch" = "poll";
+  /** The scheduler's files: `null` until a watcher is set up, then whether it is watching. */
+  let watching: boolean | null = null;
+  let watchChangeAt: number | null = null;
   let agentWriting: Promise<void> | null = null;
   let agentDirty = false;
   let heartbeat: number | null = null;
@@ -325,7 +336,11 @@ export function createFleetService(deps: ServiceDeps): FleetService {
     eventSeq: log.lastSeq,
     notificationsPaused: paused(),
     hooks: { state: hooks(), lastDeliveryAt: lastDelivery, via: hooksVia },
+    ...watchField(),
   });
+
+  const watchField = (): Pick<Snapshot, "watch"> =>
+    watching === null ? {} : { watch: { on: watching, lastChangeAt: watchChangeAt } };
 
   const snapshot = (): Snapshot => {
     if (!poller) return emptySnapshot();
@@ -342,6 +357,7 @@ export function createFleetService(deps: ServiceDeps): FleetService {
       eventSeq: log.lastSeq,
       notificationsPaused: paused(),
       hooks: { state: hooks(), lastDeliveryAt: lastDelivery, via: hooksVia },
+      ...watchField(),
     };
   };
 
@@ -833,6 +849,28 @@ export function createFleetService(deps: ServiceDeps): FleetService {
         schedule();
       }).catch(() => {});
       return hookChain;
+    },
+    localStateChanged() {
+      // On the hooks' chain: the poller's state is changed by one thing at a time.
+      hookChain = hookChain.then(async () => {
+        const p = poller;
+        if (!p || stopped) return;
+        if (!(await p.refreshLocal())) return;
+        if (p !== poller) return; // the token changed meanwhile
+        await recordEvents(p);
+        dataAt = now();
+        dataSource = "watch";
+        watchChangeAt = dataAt;
+        await notifyAndPersist();
+        await writeAgent();
+        emit();
+      }).catch(() => {});
+      return hookChain;
+    },
+    setWatching(on) {
+      if (watching === on) return;
+      watching = on;
+      emit();
     },
     backfill,
     events: (seq) => ({ events: log.after(seq), lastSeq: log.lastSeq }),

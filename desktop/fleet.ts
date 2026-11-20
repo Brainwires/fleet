@@ -80,6 +80,7 @@ import {
   runRoutingRevert,
 } from "../lib/routing-runner.ts";
 import { watchdogNotifies } from "../lib/notifier.ts";
+import { schedulerTargets, type StateWatch, watchState } from "../lib/state-watch.ts";
 import type { PoolPaths } from "../lib/controls.ts";
 import { asRange } from "../lib/pool-detail.ts";
 import { createJobLogs, type JobLogs } from "../lib/logs.ts";
@@ -179,6 +180,12 @@ function start(host: DesktopExtensionHost): void {
   void service.settingsReady().then(() => startHooks(service!, dir), () => {});
   // The loopback event stream follows the startup settings too.
   void service.settingsReady().then(() => startStream(service!, dir), () => {});
+  // The runner scheduler's state files, watched: the pool cards follow each of its ticks within a
+  // second (no poll, no GitHub request). Re-armed when the settings change its paths.
+  void service.settingsReady().then(() => {
+    startStateWatch(service!);
+    service!.onSettings(() => startStateWatch(service!));
+  }, () => {});
   // Machines (hardware telemetry per machine): the stream follows the settings as they are now, so
   // setting the integration up needs no restart. The page is told of each change; agents read
   // `machines.json`, rewritten at most every 10 s.
@@ -227,8 +234,39 @@ function start(host: DesktopExtensionHost): void {
     machines?.stop();
     clearTimeout(machinesPending);
     stopSpool?.();
+    stateWatch?.stop();
     await Promise.all([receiver?.stop(), service?.flushHistory(), streamListener?.stop()]);
   });
+}
+
+let stateWatch: StateWatch | null = null;
+/** The folders the state watch was armed for (a settings change that keeps them keeps it). */
+let stateWatchKey = "";
+
+/**
+ * Watch the runner scheduler's files (its health file's folder: the health file, pool-state.json,
+ * health-published; its paused folder: paused-<pool>), as the settings name them now. Each burst
+ * of writes re-merges them into the pools at once (lib/state-watch.ts debounces the bursts).
+ */
+function startStateWatch(s: FleetService): void {
+  const sched = settings().integrations.runnerScheduler;
+  const targets = schedulerTargets({
+    healthFile: sched?.localHealthFile ? expandHome(sched.localHealthFile, home()) : null,
+    pausedDir: sched?.pausedDir ? expandHome(sched.pausedDir, home()) : null,
+  });
+  const key = JSON.stringify(targets);
+  if (key === stateWatchKey && stateWatch) return;
+  // Stopping reports "not watching" (the status line drops the watch from its sources).
+  stateWatch?.stop();
+  stateWatch = null;
+  stateWatchKey = key;
+  if (targets.length === 0) return;
+  stateWatch = watchState({
+    targets,
+    onChange: () => void s.localStateChanged(),
+    onWatching: (n) => s.setWatching(n > 0),
+  });
+  s.setWatching(stateWatch.watching > 0);
 }
 
 let receiver: Receiver | null = null;

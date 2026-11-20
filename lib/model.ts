@@ -224,6 +224,11 @@ export interface Snapshot {
     /** Received here, or read from the standalone receiver's spool. */
     readonly via?: "listener" | "spool";
   };
+  /**
+   * The runner scheduler's state files are watched (lib/state-watch.ts): the pool cards follow them
+   * within a second. `lastChangeAt`: when a change last reached the snapshot. Absent: not set up.
+   */
+  readonly watch?: { readonly on: boolean; readonly lastChangeAt: number | null };
 }
 
 /** The `fleet` extension's event: the snapshot changed. */

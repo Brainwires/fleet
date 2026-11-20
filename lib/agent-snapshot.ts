@@ -188,11 +188,12 @@ export interface AgentPoolStart {
 /** The whole file. */
 export interface AgentSnapshot {
   readonly v: 1;
-  /** When the data last changed hands: the last poll or webhook update. */
+  /** When the data last changed hands: the last poll, webhook update or scheduler file change. */
   readonly updated_at: string;
   /** When the backend last wrote the file (every update, and a heartbeat while it runs). */
   readonly written_at: string;
-  readonly source: "poll" | "hook";
+  /** What changed it last: a poll, a webhook, or the runner scheduler's state files (`watch`). */
+  readonly source: "poll" | "hook" | "watch";
   /** The owners Fleet watches (absent in a file from an older build). */
   readonly owners?: readonly string[];
   readonly auth: string;
@@ -211,6 +212,11 @@ export interface AgentSnapshot {
     | { readonly remaining: number; readonly limit: number; readonly reset: string }
     | null;
   readonly hooks: { readonly state: string; readonly last_delivery_at: string | null };
+  /**
+   * The runner scheduler's state files are watched: pools follow them within a second, between
+   * polls. Absent when no scheduler integration is set up here.
+   */
+  readonly watch?: { readonly on: boolean; readonly last_change_at: string | null };
   readonly health: {
     readonly state: string;
     readonly checked_at: string | null;
@@ -243,9 +249,9 @@ export interface KnownRun {
 /** What the builder reads. */
 export interface AgentSnapshotInput {
   readonly now: number;
-  /** When the data last changed (the last poll or hook). */
+  /** When the data last changed (the last poll, hook or scheduler file change). */
   readonly updatedAt: number;
-  readonly source: "poll" | "hook";
+  readonly source: "poll" | "hook" | "watch";
   readonly snapshot: Snapshot;
   readonly hosts: Readonly<Record<string, HostHealth>>;
   readonly runs: readonly KnownRun[];
@@ -390,6 +396,7 @@ export function buildAgentSnapshot(input: AgentSnapshotInput): AgentSnapshot {
       ? { remaining: s.rate.remaining, limit: s.rate.limit, reset: iso(s.rate.resetAt) ?? "" }
       : null,
     hooks: { state: s.hooks.state, last_delivery_at: iso(s.hooks.lastDeliveryAt) },
+    ...(s.watch ? { watch: { on: s.watch.on, last_change_at: iso(s.watch.lastChangeAt) } } : {}),
     health: {
       state: s.health.state,
       checked_at: iso(s.health.checkedAt),
