@@ -10,8 +10,9 @@
 //     [--logs-dir <runner scheduler log folder>]
 //
 // (`deno task mcp` does, for macOS's data folder; the Settings view shows the command for this
-// machine.) Tools: fleet_status, fleet_runs, fleet_jobs, fleet_events, fleet_wait,
-// fleet_pool_health, fleet_pool_history, fleet_machines, fleet_runner_log (with --logs-dir). Every answer
+// machine.) Tools: fleet_status, fleet_runs, fleet_jobs, fleet_events, fleet_wait (also
+// `until: "idle"`), fleet_watch_idle, fleet_pool_health, fleet_pool_history, fleet_machines,
+// fleet_runner_log (with --logs-dir). Every answer
 // carries its freshness (`as_of`, `stale`, `warning`); fleet_status names the watched owners.
 //
 // Event-driven: fleet_wait and the realtime subscriptions wake on file events (`Deno.watchFs` on
@@ -22,7 +23,11 @@
 // Realtime: the resources `fleet://events` and `fleet://status` take `resources/subscribe`, and
 // the server sends `notifications/resources/updated` when the journal grows / the pools' state
 // changes (still no network). After `logging/setLevel`, every problem event (warn / bad) also
-// arrives as `notifications/message`.
+// arrives as `notifications/message`, and so does an `idle` event when every self-hosted pool has
+// been idle for 2 min (and an info one when runners take work again). Idle runners (mcp/idle.ts):
+// fleet_wait's `until: "idle"` blocks until the pools have had nothing to do for idle_for_s, and
+// fleet_watch_idle sends one `notifications/message` (logger `fleet`) per idle episode. This server
+// writes nothing, so those idle notices are not lines in Fleet's own event log.
 
 import {
   INVALID_REQUEST,
@@ -45,6 +50,17 @@ import { type AgentPoolStart, type AgentSnapshot, agentStart } from "../lib/agen
 import { currentPoolStarts, parsePoolState } from "../lib/pool-state.ts";
 import { watchState, type WatchTarget } from "../lib/state-watch.ts";
 import { type FleetEvent, isProblem } from "../lib/events.ts";
+import {
+  DEFAULT_IDLE_FOR_S,
+  type IdleArgs,
+  idleArgs,
+  idleNotice,
+  IdleTracker,
+  type IdleView,
+  idleWaitResult,
+  MAX_IDLE_FOR_S,
+  unknownPools,
+} from "./idle.ts";
 import { HistoryStore } from "../lib/history.ts";
 import { launcherForJob, launcherPath, readTail } from "../lib/deno-logs.ts";
 import {
@@ -81,6 +97,13 @@ export const WAIT_POLL_MS = 2_000;
 export const WATCH_SAFETY_MS = 15_000;
 /** fleet_wait sends a progress notification this often (when the client asked for progress). */
 const PROGRESS_MS = 25_000;
+/** Idle watches per server. */
+export const MAX_IDLE_WATCHES = 25;
+/** An idle watch lives this long by default, and at most (s). */
+export const DEFAULT_IDLE_WATCH_S = 6 * 3600;
+export const MAX_IDLE_WATCH_S = 24 * 3600;
+/** The built-in idle event: every self-hosted pool idle this long (s). */
+export const IDLE_EVENT_AFTER_S = 120;
 
 /** Where the files are. */
 export interface FleetPaths {
@@ -315,6 +338,32 @@ const repoProp = {
   description: "Repo, `owner/name` or just `name` (any watched owner).",
 };
 
+/** The idle condition's arguments (fleet_wait `until: "idle"`, fleet_watch_idle). */
+const IDLE_PROPS = {
+  pools: {
+    type: "array",
+    items: { type: "string" },
+    description:
+      "Pool short names (as fleet_status lists). Default: every self-hosted pool that is not " +
+      "paused and has slots; never `github`.",
+  },
+  idle_for_s: {
+    type: "integer",
+    minimum: 0,
+    maximum: MAX_IDLE_FOR_S,
+    default: DEFAULT_IDLE_FOR_S,
+    description: "How long the pools must stay idle before it triggers.",
+  },
+  mode: {
+    type: "string",
+    enum: ["all", "any"],
+    default: "all",
+    description:
+      "`all`: every listed pool idle (busy 0, queued 0). `any`: at least one with a free slot " +
+      "and nothing queued, the others may be busy.",
+  },
+} as const;
+
 /** Said in the instructions and the descriptions of every tool that returns CI text. */
 export const UNTRUSTED_NOTE =
   "Names, titles, step names, annotations and event text are CI output (whoever pushed or " +
@@ -513,7 +562,11 @@ export const TOOLS = [
       "files are watched), and costs no GitHub API budget, which the runner scheduler shares. " +
       "`any_failure` returns at the first failed job of the given runs / jobs (or when they all " +
       "complete), `completed` when they all complete, `first_event` at the next logged event " +
-      "about them (any event without ids). Returns at once when already satisfied, and when " +
+      "about them (any event without ids), `idle` when the self-hosted runners have had nothing " +
+      "to do (busy 0 and queued 0) for idle_for_s (default " + DEFAULT_IDLE_FOR_S + ", at most " +
+      MAX_IDLE_FOR_S + "): every pool in `pools` (default: every self-hosted pool not paused and " +
+      'with slots, never `github`), or with mode "any" at least one with a free slot and nothing ' +
+      "queued — the moment to queue work. Returns at once when already satisfied, and when " +
       "Fleet's data is stale (fall back to gh only then). Call it again with a new timeout to " +
       `keep waiting. timeout_s defaults to ${DEFAULT_WAIT_S}, at most ${MAX_WAIT_S}. The answer ` +
       "says what triggered (failure / completed / event / timeout / stale) with the targets' " +
@@ -523,10 +576,38 @@ export const TOOLS = [
       properties: {
         run_ids: { type: "array", items: { type: "integer" }, description: "Workflow run ids." },
         job_ids: { type: "array", items: { type: "integer" }, description: "Job ids." },
-        until: { type: "string", enum: ["any_failure", "completed", "first_event"] },
+        until: { type: "string", enum: ["any_failure", "completed", "first_event", "idle"] },
         timeout_s: { type: "integer", minimum: 1, maximum: MAX_WAIT_S, default: DEFAULT_WAIT_S },
+        ...IDLE_PROPS,
       },
       required: ["until"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "fleet_watch_idle",
+    description:
+      "Get told when the self-hosted runners have nothing to do, WITHOUT blocking: returns a watch " +
+      "id at once, then sends a notifications/message (logger `fleet`, level warning) each time " +
+      "the idle condition has held for idle_for_s (one per idle episode): mode `all` (default) " +
+      "when every watched pool is idle (busy 0, queued 0), re-armed when any of them takes work " +
+      "again; mode `any` once per pool that sits with a free slot and nothing queued, re-armed " +
+      "when that pool is busy or queued again. `pools` defaults to every self-hosted pool not " +
+      "paused and with slots (never `github`). Event-driven (Fleet's files are watched), no " +
+      `GitHub API call. Watches live in this server process, at most ${MAX_IDLE_WATCHES}, for ` +
+      "expires_in_s (default 6 h, at most 24 h).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ...IDLE_PROPS,
+        expires_in_s: {
+          type: "integer",
+          minimum: 60,
+          maximum: MAX_IDLE_WATCH_S,
+          default: DEFAULT_IDLE_WATCH_S,
+        },
+        notify: { type: "boolean", default: true, description: "Send the MCP notification." },
+      },
       additionalProperties: false,
     },
   },
@@ -642,6 +723,21 @@ export interface ServerOptions {
   readonly pollMs?: number;
   /** Watch the folders for changes (on by default). */
   readonly watch?: boolean;
+  /** A new idle watch's id (tests). */
+  readonly newId?: () => string;
+}
+
+/** One fleet_watch_idle subscription. */
+interface IdleWatch {
+  readonly id: string;
+  readonly tracker: IdleTracker;
+  readonly notify: boolean;
+  readonly expiresAt: number;
+  readonly send: Send;
+  /** Mode `all`: the next idle episode may notify (false from a notice until a pool is busy). */
+  armed: boolean;
+  /** Mode `any`: the pools notified in their current idle episode. */
+  readonly notified: Set<string>;
 }
 
 type Json = Record<string, unknown>;
@@ -669,6 +765,50 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
   const rereadMs = (watching: boolean) =>
     options.pollMs ?? (watching ? WATCH_SAFETY_MS : WAIT_POLL_MS);
   const inflight = new Map<string | number, AbortController>();
+
+  /** fleet_wait `until: "idle"`: an IdleTracker over the snapshot stream. */
+  async function waitIdle(
+    w: WaitArgs,
+    a: IdleArgs,
+    signal: AbortSignal,
+    progress: (s: number) => void,
+  ) {
+    const start = now();
+    const deadline = start + w.timeoutS * 1000;
+    const unknown = unknownPools(await files.snapshot(), a);
+    if (unknown.length) {
+      throw new ArgError(`no such pool: ${unknown.join(", ")} (fleet_status lists the pools)`);
+    }
+    const tracker = new IdleTracker(a);
+    const wakers = new Set<() => void>();
+    const watch = options.watch !== false
+      ? watchDirs(wakeTargets(files.paths, false), wakers)
+      : { close: () => {}, watching: false };
+    const pollMs = rereadMs(watch.watching);
+    let lastProgress = start;
+    let view: IdleView | null = null;
+    try {
+      while (true) {
+        const snap = await files.snapshot();
+        const t = now();
+        if (freshness(snap, t).stale) return idleWaitResult(snap, view, a, "stale", t, t - start);
+        view = tracker.step(snap, await files.events(), t);
+        if (view.triggered) return idleWaitResult(snap, view, a, "idle", t, t - start);
+        if (t >= deadline || signal.aborted) {
+          return idleWaitResult(snap, view, a, "timeout", t, t - start);
+        }
+        if (t - lastProgress >= PROGRESS_MS) {
+          lastProgress = t;
+          progress(Math.round((t - start) / 1000));
+        }
+        // Wake on a write, at the re-read, or when the condition would have held long enough.
+        const due = view.dueAt === null ? Infinity : view.dueAt - t;
+        await wakeAfter(Math.min(pollMs, deadline - t, due), signal, wakers);
+      }
+    } finally {
+      watch.close();
+    }
+  }
 
   async function wait(w: WaitArgs, signal: AbortSignal, progress: (s: number) => void) {
     const start = now();
@@ -711,10 +851,168 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
   let logLevel: number | null = null;
   let notify: Send = () => {};
   let watching: AbortController | null = null;
+  const idleWatches = new Map<string, IdleWatch>();
+  const newId = options.newId ?? (() => crypto.randomUUID().slice(0, 8));
+  /** The built-in idle event: every self-hosted pool idle for IDLE_EVENT_AFTER_S (with logging). */
+  let idleEvent: { tracker: IdleTracker; idle: boolean } | null = null;
+
+  /** Whether a message at `level` reaches the client (it opted out of nothing below its level). */
+  const levelOk = (level: typeof LOG_LEVELS[number]) =>
+    logLevel === null || LOG_LEVELS.indexOf(level) >= logLevel;
+
+  /**
+   * One pass over the idle watches and the built-in idle event. Returns the ms until the next
+   * thing falls due (a condition held long enough, a watch expiring), or `null`.
+   */
+  async function idlePass(): Promise<number | null> {
+    if (idleWatches.size === 0 && logLevel === null) return null;
+    const snap = await files.snapshot();
+    const t = now();
+    let next = Infinity;
+    for (const w of [...idleWatches.values()]) {
+      if (t < w.expiresAt) continue;
+      idleWatches.delete(w.id);
+      if (w.notify && levelOk("notice")) {
+        w.send({
+          jsonrpc: "2.0",
+          method: "notifications/message",
+          params: {
+            level: "notice",
+            logger: "fleet",
+            data: { watch_id: w.id, outcome: "expired" },
+          },
+        });
+      }
+    }
+    // Stale data says nothing about the runners: wait for a fresh snapshot.
+    if (!freshness(snap, t).stale) {
+      const events = await files.events();
+      for (const w of idleWatches.values()) {
+        next = Math.min(next, w.expiresAt - t);
+        const v = w.tracker.step(snap, events, t);
+        if (v.dueAt !== null) next = Math.min(next, v.dueAt - t);
+        let pools: readonly string[] = [];
+        if (w.tracker.args.mode === "all") {
+          if (!v.holding) w.armed = true;
+          else if (v.triggered && w.armed) {
+            w.armed = false;
+            pools = v.idlePools;
+          }
+        } else {
+          for (const id of [...w.notified]) if (!v.idleNow.includes(id)) w.notified.delete(id);
+          pools = v.idlePools.filter((id) => !w.notified.has(id));
+          for (const id of pools) w.notified.add(id);
+        }
+        if (pools.length && w.notify && levelOk("warning")) {
+          w.send({
+            jsonrpc: "2.0",
+            method: "notifications/message",
+            params: {
+              level: "warning",
+              logger: "fleet",
+              data: {
+                watch_id: w.id,
+                outcome: "idle",
+                mode: w.tracker.args.mode,
+                ...idleNotice(v, t),
+                idle_pools: pools,
+              },
+            },
+          });
+        }
+      }
+      if (logLevel !== null) {
+        idleEvent ??= {
+          tracker: new IdleTracker({ pools: null, idleForS: IDLE_EVENT_AFTER_S, mode: "all" }),
+          idle: false,
+        };
+        const v = idleEvent.tracker.step(snap, events, t);
+        if (v.dueAt !== null) next = Math.min(next, v.dueAt - t);
+        let sev: "warn" | "info" | null = null;
+        let text = "";
+        if (!idleEvent.idle && v.triggered) {
+          idleEvent.idle = true;
+          sev = "warn";
+          text = `IDLE: every self-hosted pool has had nothing to do for ${
+            Math.round((t - v.idleSince!) / 60_000)
+          } min (${v.idlePools.join(", ")})`;
+        } else if (idleEvent.idle && !v.holding) {
+          idleEvent.idle = false;
+          sev = "info";
+          const took = v.pools.filter((p) => !v.idleNow.includes(p.id)).map((p) => p.id);
+          text = `runners busy again (${took.join(", ") || "pools changed"})`;
+        }
+        const level = sev === "warn" ? "warning" : "info";
+        if (sev && levelOk(level)) {
+          notify({
+            jsonrpc: "2.0",
+            method: "notifications/message",
+            params: {
+              level,
+              logger: "fleet",
+              data: {
+                kind: "idle",
+                sev,
+                at: new Date(t).toISOString(),
+                repo: "",
+                text,
+                ...idleNotice(v, t),
+              },
+            },
+          });
+        }
+      }
+    }
+    if (idleWatches.size === 0) updateWatch();
+    return Number.isFinite(next) ? Math.max(0, next) : null;
+  }
+
+  /** fleet_watch_idle: register a watch; the realtime loop drives it. */
+  async function watchIdle(args: Json, send: Send) {
+    const a = idleArgs(args);
+    const unknown = unknownPools(await files.snapshot(), a);
+    if (unknown.length) {
+      throw new ArgError(`no such pool: ${unknown.join(", ")} (fleet_status lists the pools)`);
+    }
+    const ttl = args.expires_in_s ?? DEFAULT_IDLE_WATCH_S;
+    if (
+      typeof ttl !== "number" || !Number.isInteger(ttl) || ttl < 60 || ttl > MAX_IDLE_WATCH_S
+    ) {
+      throw new ArgError(`expires_in_s must be an integer from 60 to ${MAX_IDLE_WATCH_S}`);
+    }
+    if (idleWatches.size >= MAX_IDLE_WATCHES) {
+      throw new ArgError(`at most ${MAX_IDLE_WATCHES} idle watches per server`);
+    }
+    const w: IdleWatch = {
+      id: `idle-${newId()}`,
+      tracker: new IdleTracker(a),
+      notify: args.notify !== false,
+      expiresAt: now() + ttl * 1000,
+      send,
+      armed: true,
+      notified: new Set(),
+    };
+    idleWatches.set(w.id, w);
+    notify = send;
+    if (watching) watchKick?.();
+    else updateWatch();
+    return {
+      watch_id: w.id,
+      mode: a.mode,
+      idle_for_s: a.idleForS,
+      pools: a.pools ?? "every self-hosted pool not paused and with slots",
+      expires_at: new Date(w.expiresAt).toISOString(),
+      delivery: "notifications/message (logger fleet, level warning), one per idle episode, data " +
+        '{ watch_id, outcome: "idle", idle_pools, idle_since, as_of, pools }',
+    };
+  }
+
+  /** Wakes the running realtime loop now (a new watch wants its first look). */
+  let watchKick: (() => void) | null = null;
 
   /** Watch the files while anything is subscribed (or logging is on); stop when nothing is. */
   function updateWatch(): void {
-    const wanted = subscribed.size > 0 || logLevel !== null;
+    const wanted = subscribed.size > 0 || logLevel !== null || idleWatches.size > 0;
     if (wanted && !watching) {
       watching = new AbortController();
       void realtime(watching.signal);
@@ -730,11 +1028,23 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
       ? watchDirs(wakeTargets(files.paths, false), wakers)
       : { close: () => {}, watching: false };
     const pollMs = rereadMs(watch.watching);
+    const kick = () => {
+      for (const fn of [...wakers]) fn();
+    };
+    watchKick = kick;
+    const idleDue = async () => {
+      try {
+        return await idlePass();
+      } catch {
+        return null; // A torn read: the next pass sees it.
+      }
+    };
     try {
       let seen = (await files.events()).at(-1)?.seq ?? 0;
       let status = statusSignature(await files.snapshot(), now());
+      let due = await idleDue();
       while (!signal.aborted) {
-        await wakeAfter(pollMs, signal, wakers);
+        await wakeAfter(due === null ? pollMs : Math.min(pollMs, due), signal, wakers);
         if (signal.aborted) break;
         try {
           const fresh = (await files.events()).filter((e) => e.seq > seen);
@@ -774,8 +1084,10 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
         } catch {
           // A torn read: the next pass sees it.
         }
+        due = await idleDue();
       }
     } finally {
+      if (watchKick === kick) watchKick = null;
       watch.close();
     }
   }
@@ -806,6 +1118,7 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
     args: Json,
     signal: AbortSignal,
     progress: (s: number) => void,
+    send: Send,
   ) {
     switch (name) {
       case "fleet_status":
@@ -822,8 +1135,13 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
         return jobsResult(await files.snapshot(), now(), args);
       case "fleet_events":
         return eventsResult(await files.snapshot(), await files.events(), now(), args);
-      case "fleet_wait":
-        return await wait(waitArgs(args), signal, progress);
+      case "fleet_wait": {
+        const w = waitArgs(args);
+        if (w.until === "idle") return await waitIdle(w, idleArgs(args), signal, progress);
+        return await wait(w, signal, progress);
+      }
+      case "fleet_watch_idle":
+        return await watchIdle(args, send);
       case "fleet_pool_health":
         return poolHealthResult(await files.snapshot(), now(), args, await files.poolStarts(now()));
       case "fleet_pool_history":
@@ -917,6 +1235,7 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
         if (i < 0) return fail(-32602, `level must be one of ${LOG_LEVELS.join(", ")}`);
         notify = send;
         logLevel = i;
+        idleEvent = null;
         updateWatch();
         return reply({});
       }
@@ -934,7 +1253,7 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
         const ac = new AbortController();
         inflight.set(id, ac);
         try {
-          const result = await callTool(name, args, ac.signal, progress);
+          const result = await callTool(name, args, ac.signal, progress, send);
           return reply({ content: [{ type: "text", text: JSON.stringify(result, null, 1) }] });
         } catch (err) {
           const message = err instanceof ArgError ? err.message : "Fleet's files couldn't be read";
@@ -950,10 +1269,13 @@ export function createFleetMcp(files: FleetFiles, options: ServerOptions = {}) {
 
   return {
     handle,
+    /** The active idle watches' ids (tests). */
+    idleWatches: () => [...idleWatches.keys()],
     /** Abort every call in flight and stop the realtime watch (stdin closed). */
     abortAll: () => {
       inflight.forEach((ac) => ac.abort());
       subscribed.clear();
+      idleWatches.clear();
       logLevel = null;
       updateWatch();
     },

@@ -721,7 +721,14 @@ Deno.test("server: runs with only --allow-read of its three paths (no net, env, 
 });
 
 Deno.test("server: its source uses no network, environment, subprocess or write API", async () => {
-  for (const f of ["../mcp/fleet-mcp.ts", "../mcp/queries.ts", "../lib/agent-files.ts"]) {
+  for (
+    const f of [
+      "../mcp/fleet-mcp.ts",
+      "../mcp/queries.ts",
+      "../mcp/idle.ts",
+      "../lib/agent-files.ts",
+    ]
+  ) {
     const src = await Deno.readTextFile(new URL(f, import.meta.url));
     for (
       const api of [
