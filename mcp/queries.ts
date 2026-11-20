@@ -508,7 +508,7 @@ export function eventsResult(
 // ---- fleet_wait ----
 
 /** What fleet_wait waits for. */
-export type WaitUntil = "any_failure" | "completed" | "first_event";
+export type WaitUntil = "any_failure" | "completed" | "first_event" | "idle";
 
 /** fleet_wait's checked arguments. */
 export interface WaitArgs {
@@ -523,10 +523,18 @@ export function waitArgs(args: Args): WaitArgs {
   const runIds = optIds(args, "run_ids") ?? [];
   const jobIds = optIds(args, "job_ids") ?? [];
   const until = args.until;
-  if (until !== "any_failure" && until !== "completed" && until !== "first_event") {
-    throw new ArgError(`until must be "any_failure", "completed" or "first_event"`);
+  if (
+    until !== "any_failure" && until !== "completed" && until !== "first_event" &&
+    until !== "idle"
+  ) {
+    throw new ArgError(`until must be "any_failure", "completed", "first_event" or "idle"`);
   }
-  if (until !== "first_event" && runIds.length === 0 && jobIds.length === 0) {
+  if (until === "idle" && (runIds.length > 0 || jobIds.length > 0)) {
+    throw new ArgError(`until "idle" watches runner pools (pools), not run_ids / job_ids`);
+  }
+  if (
+    until !== "first_event" && until !== "idle" && runIds.length === 0 && jobIds.length === 0
+  ) {
     throw new ArgError(`until "${until}" needs run_ids or job_ids`);
   }
   const timeoutS = optInt(args, "timeout_s", 1, MAX_WAIT_S) ?? DEFAULT_WAIT_S;
@@ -534,7 +542,7 @@ export function waitArgs(args: Args): WaitArgs {
 }
 
 /** Why fleet_wait returned. */
-export type WaitTrigger = "failure" | "completed" | "event" | "timeout" | "stale";
+export type WaitTrigger = "failure" | "completed" | "event" | "idle" | "timeout" | "stale";
 
 /** The targeted runs and jobs now. */
 function targets(snap: AgentSnapshot | null, w: WaitArgs) {
@@ -561,6 +569,8 @@ export function waitTrigger(
   events: readonly FleetEvent[],
   w: WaitArgs,
 ): WaitTrigger | null {
+  // The idle condition needs time: mcp/fleet-mcp.ts waits on it with an IdleTracker (mcp/idle.ts).
+  if (w.until === "idle") return null;
   if (w.until === "first_event") {
     return events.some((e) => eventMatches(e, w)) ? "event" : null;
   }
