@@ -121,7 +121,7 @@ Deno.test("spool tail: an append is read at once (the folder is watched), not at
     dir,
     60_000,
   );
-  let timer: number | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     assert(tail);
     await new Promise((r) => setTimeout(r, 200));
