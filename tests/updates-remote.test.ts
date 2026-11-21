@@ -15,6 +15,12 @@ import {
   validSshConfigPath,
 } from "../lib/updates/remote.ts";
 import type { RemoteVerb, RunRecord, UpdatesMachine } from "../lib/updates/model.ts";
+import { parseStatusFile } from "../lib/updates/files.ts";
+import {
+  CONFIG as UPD_CONFIG,
+  NOW as UPD_NOW,
+  statuses as fixtureStatuses,
+} from "./updates-fixtures.ts";
 
 const posix = Deno.build.os !== "windows";
 const CONFIG = "/data/fleet/updates/ssh_config";
@@ -86,6 +92,7 @@ const machine = (via: UpdatesMachine["via"]): UpdatesMachine => ({
   via,
   self: false,
   install: "security",
+  autoInstall: true,
   pools: [],
   busy: ["remote"],
   verify: { mounts: [], reach: [] },
@@ -219,17 +226,52 @@ Deno.test({
     assertEquals((Deno.statSync(dir).mode ?? 0) & 0o777, 0o700);
     assertEquals([...Deno.readDirSync(dir)].filter((e) => e.name.endsWith(".tmp")), []);
 
-    const entry = { v: 1, id: "a-1", machine: "linux-1", outcome: "succeeded", steps: [] };
-    await files.appendAudit(entry as never);
-    await files.appendAudit({ ...entry, id: "a-2" } as never);
+    // The audit: AuditEntry lines, read back through lib/updates/files.ts's parser.
+    const t = Date.parse("2026-11-20T10:00:00Z");
+    const entry = {
+      v: 1,
+      id: "a-1",
+      machine: "linux-1",
+      origin: { kind: "auto" },
+      action: "install",
+      mode: "security",
+      reboot: "never",
+      startedAt: t,
+      endedAt: t + 60_000,
+      outcome: "succeeded",
+      steps: [],
+      keptHolds: [],
+    } as const;
+    await files.appendAudit(entry);
+    await files.appendAudit({ ...entry, id: "a-2", outcome: "verify-failed", keptHolds: ["lx-a"] });
     Deno.writeTextFileSync(`${dir}/update-runs.jsonl`, "{torn\n", { append: true });
-    assertEquals((await files.readAudit(10)).map((e) => (e as { id: string }).id), ["a-1", "a-2"]);
-    assertEquals((await files.readAudit(1)).length, 1);
+    const audit = await files.audit();
+    assertEquals(audit.map((e) => e.id), ["a-1", "a-2"]);
+    assertEquals(audit[1].keptHolds, ["lx-a"]);
+    assertEquals(audit[0].origin, { kind: "auto" });
     assertEquals((Deno.statSync(`${dir}/update-runs.jsonl`).mode ?? 0) & 0o777, 0o600);
+  },
+});
 
-    await files.writeJson("updates.json", { machines: {} });
-    assertEquals(await files.readJson("updates.json"), { machines: {} });
-    assertEquals(await files.readJson("update-schedules.json"), null);
+Deno.test({
+  name: "update files: updates.json is { v: 1, machines } and reads back as written",
+  ignore: !posix,
+  async fn() {
+    const dir = `${await Deno.makeTempDir()}/data`;
+    const files = createUpdateFiles(dir);
+    assertEquals(await files.statuses(), {});
+    const st = fixtureStatuses();
+    await files.saveStatuses(st);
+    const raw = JSON.parse(Deno.readTextFileSync(`${dir}/updates.json`));
+    assertEquals(raw.v, 1);
+    assertEquals(Object.keys(raw.machines).sort(), Object.keys(st).sort());
+    assertEquals(await files.statuses(), parseStatusFile(raw));
+    assertEquals((await files.statuses())["files-1"].host?.pending.security, 3);
+    assertEquals((Deno.statSync(`${dir}/updates.json`).mode ?? 0) & 0o777, 0o600);
+    // The run file as the panel reads it (parsed) and as the orchestrator does (whole).
+    assertEquals(await files.run(), null);
+    assertEquals(await files.schedules(UPD_CONFIG), []);
+    assertEquals([...Deno.readDirSync(dir)].filter((e) => e.name.endsWith(".tmp")), []);
   },
 });
 
@@ -240,18 +282,34 @@ Deno.test({
     const dir = await Deno.makeTempDir();
     const spool = `${dir}/update-requests`;
     Deno.mkdirSync(spool);
-    Deno.writeTextFileSync(`${spool}/r1.json`, '{"machine":"linux-1"}');
-    Deno.writeTextFileSync(`${spool}/r2.json`, "not json");
-    Deno.writeTextFileSync(`${spool}/big.json`, `"${"x".repeat(REQUEST_FILE_MAX)}"`);
+    const req = (id: string, extra: Record<string, unknown> = {}) =>
+      JSON.stringify({
+        v: 1,
+        id,
+        machine: "runner-1",
+        mode: "security",
+        reboot: "never",
+        reason: "security fixes",
+        at: UPD_NOW - 60_000,
+        by: "agent",
+        ...extra,
+      });
+    Deno.writeTextFileSync(`${spool}/req-aaaaaa01.json`, req("req-aaaaaa01"));
+    Deno.writeTextFileSync(`${spool}/req-aaaaaa02.json`, "not json");
+    Deno.writeTextFileSync(
+      `${spool}/req-aaaaaa03.json`,
+      req("req-aaaaaa03", { reason: "x".repeat(REQUEST_FILE_MAX) }),
+    );
     Deno.writeTextFileSync(`${spool}/bad name.json`, "{}");
-    Deno.writeTextFileSync(`${dir}/secret.json`, '{"secret":true}');
-    Deno.symlinkSync(`${dir}/secret.json`, `${spool}/link.json`);
+    Deno.writeTextFileSync(`${dir}/secret.json`, req("req-aaaaaa04"));
+    Deno.symlinkSync(`${dir}/secret.json`, `${spool}/req-aaaaaa04.json`);
     const files = createUpdateFiles(dir);
-    assertEquals(await files.readRequests(), [{ id: "r1", doc: { machine: "linux-1" } }]);
+    assertEquals((await files.requests(UPD_CONFIG, UPD_NOW)).map((r) => r.id), ["req-aaaaaa01"]);
+    assert(Deno.statSync(`${dir}/secret.json`).isFile, "a symlinked request is never followed");
     await files.removeRequest("../secret");
     assert(Deno.statSync(`${dir}/secret.json`).isFile, "a path never escapes the spool");
-    await files.removeRequest("r1");
-    assertEquals(await files.readRequests(), []);
+    await files.removeRequest("req-aaaaaa01");
+    assertEquals(await files.requests(UPD_CONFIG, UPD_NOW), []);
   },
 });
 

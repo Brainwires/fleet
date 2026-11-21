@@ -5,6 +5,11 @@
 // /var/run/reboot-required, epoch s>|null,"rebootPkgs":"<reboot-required.pkgs>","indexStamp":
 // <mtime of /var/lib/apt/periodic/update-success-stamp, epoch s>|null}`.
 //
+// `apt` writes "WARNING: apt does not have a stable CLI interface. Use with caution in scripts." on
+// stderr, which the gate captures with stdout, and a "Listing..." header: both are skipped, as is any
+// other line that isn't a package line. Phased updates (Ubuntu's staged rollout) are listed like any
+// other upgrade, so they count as pending: Fleet's `install-all` installs them too.
+//
 // Security = an archive the package comes from ends in `-security` (the main pocket and the ESM
 // `-infra-security` / `-apps-security` pockets): the origins unattended-upgrades allows by default.
 
@@ -20,11 +25,16 @@ import {
 /** One `apt list --upgradable` line: `name/archive[,archive…] version arch [upgradable from: …]`. */
 const LINE = /^([a-z0-9][a-z0-9+.-]*)\/(\S+)\s+\S+\s+\S+\s+\[upgradable from:/;
 
+/** apt's own notices in the captured output (its script warning, the listing header). */
+const NOTICE = /^(WARNING|W|N|E):|^Listing\b/;
+
 /** The pending updates in `apt list --upgradable` output. */
 export function parseAptList(text: unknown): PendingItem[] {
   const out: PendingItem[] = [];
-  for (const line of outputLines(text)) {
-    const m = line.trim().match(LINE);
+  for (const raw of outputLines(text)) {
+    const line = raw.trim();
+    if (NOTICE.test(line)) continue;
+    const m = line.match(LINE);
     if (!m) continue;
     const archives = m[2].split(",");
     out.push({ name: m[1], security: archives.some((a) => a.endsWith("-security")) });

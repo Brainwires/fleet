@@ -26,6 +26,9 @@ export const MACHINE_ID = /^[A-Za-z0-9][\w.-]{0,63}$/;
 export const SSH_ALIAS = /^[A-Za-z0-9][\w.-]{0,63}$/;
 /** A pool id, as the runner scheduler names it. */
 const POOL_ID = /^[\w.-]{1,200}$/;
+/** A machine's description ("mail server") is at most this long. */
+export const DESCRIPTION_MAX = 80;
+const DESCRIPTION = new RegExp(`^[^\\p{Cc}\\p{Cf}\\u2028\\u2029]{1,${DESCRIPTION_MAX}}$`, "u");
 /** A schedule id. */
 export const SCHEDULE_ID = /^[A-Za-z0-9][\w-]{0,63}$/;
 /** A mount point on a host. */
@@ -106,6 +109,12 @@ function readMachine(r: Reader, x: unknown, p: string): UpdatesMachine | null {
   const os = r.oneOf(x.os, `${p}.os`, UPDATE_OSES, "ubuntu");
   if (x.os === undefined) r.err(`${p}.os`, `required: one of ${UPDATE_OSES.join(", ")}`);
   const kind = r.oneOf(x.kind, `${p}.kind`, MACHINE_KINDS, "runner");
+  const description = x.description === undefined ? null : r.str(
+    x.description,
+    `${p}.description`,
+    (s) => DESCRIPTION.test(s) && s.trim().length > 0,
+    `plain text, at most ${DESCRIPTION_MAX} characters`,
+  );
   let via: MachineVia | null = null;
   if (x.via === "local") via = "local";
   else if (isObj(x.via)) {
@@ -179,6 +188,7 @@ function readMachine(r: Reader, x: unknown, p: string): UpdatesMachine | null {
     id,
     os,
     kind,
+    ...(description ? { description: description.trim() } : {}),
     via,
     self,
     install,

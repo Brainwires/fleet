@@ -1,6 +1,6 @@
 // The machine-update files in the data folder, parsed: `updates.json` (status per machine),
 // `update-run.json` (the run in flight) and `update-runs.jsonl` (the audit). Pure: shared by the
-// backend (lib/deno-update-files.ts reads the bytes) and the MCP server (mcp/fleet-mcp.ts). Fleet
+// backend (lib/deno-updates.ts reads the bytes and is the one writer) and the MCP server (mcp/fleet-mcp.ts). Fleet
 // writes these files itself, but each holds text a host printed, so every field is re-checked and
 // clamped here: a garbled or planted file yields nothing, never a throw.
 //

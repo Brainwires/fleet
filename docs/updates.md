@@ -6,9 +6,36 @@ machine at a time. It reaches each machine over ssh with a fixed command line an
 command for it; anything else exits 64 having run nothing. Fleet never sends a host anything else:
 no package names, no shell text, nothing from GitHub, nothing a host printed earlier.
 
-This page is the one-time setup on each host and on the machine Fleet runs on. Nothing here runs by
-itself: every step is yours to run, as an administrator, after reading it. The scripts are in
-[`host/`](../host).
+This page is how Fleet runs updates and the one-time setup on each host and on the machine Fleet
+runs on. Nothing in the setup runs by itself: every step is yours to run, as an administrator, after
+reading it. The scripts are in [`host/`](../host).
+
+Your own administrator access (passwordless `sudo` or otherwise) is for this setup only. Once a host
+is set up, Fleet works purely through the `fleetupd` account, its two keys and the narrow sudoers
+file below: it never uses your account, your keys or your `sudo`.
+
+## How Fleet runs updates
+
+- **Installs happen on their own.** Every machine with `autoInstall` (on by default; never the
+  machine Fleet runs on, which is notify-only) gets an install run as soon as it is out of date and
+  no other run is in flight: its pools are held, drained (a running job is never stopped), the
+  updates install, the host is verified and the pools resume. "Out of date" follows the machine's
+  `install`: security updates pending for `"security"`, any pending update for `"all"`, phased
+  updates included (see below). Set `"autoInstall": false` on a machine to update it only when you
+  press Update now or approve an agent's request.
+- **Restarts happen only when needed, and only when you say.** A run started on its own never
+  restarts the machine. When an install leaves a restart required, the machine shows "Restart
+  pending" and the restart waits for a **restart window** you set in the Updates panel (days, start
+  time, length) or for **Restart now**. A restart run installs nothing; it holds and drains the
+  pools, restarts, waits for the host, verifies and resumes. Nothing restarts a machine that doesn't
+  need it.
+- **Phased updates.** Ubuntu rolls some updates out in phases, and a plain `apt-get upgrade` holds
+  them back ("deferred due to phasing"). Fleet counts them as pending (`apt list --upgradable` lists
+  them) and its `install-all` installs them (`-o APT::Get::Always-Include-Phased-Updates=true`), so
+  a machine is never left "out of date" on packages it would not install.
+- **A server** (`"kind": "server"`, no pools) has no hold or drain; an optional
+  `"description": "mail server"` names what it runs in the outage warning Update now and Restart now
+  show.
 
 ## The verbs
 
@@ -17,11 +44,13 @@ itself: every step is yours to run, as an administrator, after reading it. The s
 | `status`           | `apt list --upgradable`, the reboot flag, the index age  | `dnf check-update` and co.  | `softwareupdate -l`           | the Windows Update searcher, reboot keys        |
 | `busy`             | `/etc/fleet-update/busy.d/*` (exit 10 = busy)            | same                        | same                          | `busy.d\*.ps1`                                  |
 | `install-security` | `unattended-upgrade -v`                                  | `dnf -y upgrade --security` | `softwareupdate -i -r`        | task `FleetUpdate-Install-Security`             |
-| `install-all`      | `apt-get update`, `apt-get -y upgrade --with-new-pkgs`   | `dnf -y upgrade`            | `softwareupdate -i -a`        | task `FleetUpdate-Install-All`                  |
+| `install-all`      | `apt-get update`, `apt-get -y upgrade --with-new-pkgs`¹  | `dnf -y upgrade`            | `softwareupdate -i -a`        | task `FleetUpdate-Install-All`                  |
 | `result`           | the last install's state, exit code and output tail      | same                        | same                          | `result.json`                                   |
 | `verify`           | system state, failed units, docker, mounts, `verify.d/*` | same                        | iOS platform list, `verify.d` | docker, free disk, `verify.d\*.ps1`             |
 | `reboot`           | `shutdown -r +1`                                         | same                        | `shutdown -r +1`              | task `FleetUpdate-Reboot` (`shutdown /r /t 60`) |
 | `boot-id`          | `/proc/sys/kernel/random/boot_id`                        | same                        | `kern.bootsessionuuid`        | last boot time                                  |
+
+¹ With `-o APT::Get::Always-Include-Phased-Updates=true`: phased updates install too.
 
 `status` and `boot-id` need no root. `status` never refreshes a package index. Installs run detached
 (a transient systemd unit, a background process on macOS, a scheduled task on Windows), so they
@@ -29,7 +58,10 @@ survive the ssh session ending, and `result` reports them. apt runs with
 `DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l` (needrestart lists, never restarts a service),
 `--force-confdef --force-confold` (a changed config file keeps the local one) and a 600 s dpkg lock
 wait; `install-security` installs what unattended-upgrades' own origins allow (by default the
-security pockets). Nothing ever removes a package.
+security pockets). `install-all` removes no package. `install-security` runs `unattended-upgrade`,
+which follows the host's own unattended-upgrades configuration and so may remove unused kernels and
+the dependencies they no longer need (`Remove-Unused-Kernel-Packages`, on by default on Ubuntu, and
+`Remove-Unused-Dependencies` when set).
 
 ## Fleet's machine
 
@@ -80,6 +112,20 @@ key.
 
 ## Ubuntu, Debian and Fedora hosts
 
+Checklist (each step is below):
+
+- [ ] the `fleetupd` account, the gate and the helper in `/usr/local/sbin`, the hook folders;
+- [ ] `/etc/sudoers.d/fleet-update` (checked with `visudo -cf`);
+- [ ] `/etc/ssh/sshd_config.d/60-fleet-update.conf`, sshd reloaded;
+- [ ] `/etc/ssh/authorized_keys.d/fleetupd` with both keys and `from=` the Fleet machine's VPN
+      (Tailscale) address;
+- [ ] apt hosts: `Unattended-Upgrade::Automatic-Reboot "false"` in
+      `52unattended-upgrades-reboot.conf` (and nowhere `"true"`);
+- [ ] runner hosts: `apt-daily-upgrade.timer` disabled;
+- [ ] the busy and verify hooks the host needs;
+- [ ] on Fleet's machine: the host key in `updates/known_hosts`, both `Host` entries in
+      `updates/ssh_config`, `ssh -F … <alias>-status status` answers.
+
 ```sh
 sudo useradd --system --create-home --shell /bin/sh fleetupd
 sudo install -o root -g root -m 0755 host/linux/fleet-update-gate host/linux/fleet-update-apply /usr/local/sbin/
@@ -110,11 +156,32 @@ Match User fleetupd
 `restrict` means no terminal and no forwarding):
 
 ```
-command="/usr/local/sbin/fleet-update-gate status",restrict,from="<Fleet machine's address>" ssh-ed25519 AAAA… fleet-status
-command="/usr/local/sbin/fleet-update-gate",restrict,from="<Fleet machine's address>" ssh-ed25519 AAAA… fleet-update
+command="/usr/local/sbin/fleet-update-gate status",restrict,from="<Fleet machine's VPN address>" ssh-ed25519 AAAA… fleet-status
+command="/usr/local/sbin/fleet-update-gate",restrict,from="<Fleet machine's VPN address>" ssh-ed25519 AAAA… fleet-update
 ```
 
 The first line pins the status key to `status`; the second accepts any verb in the table.
+
+**`from=`: use the Fleet machine's VPN address.** When the machines reach each other over a VPN such
+as Tailscale, put the Fleet machine's VPN address in `from=` (on the Fleet machine,
+`tailscale ip -4`; a `100.64.0.0/10` address) and use the host's VPN address or name as `HostName`
+in `updates/ssh_config`. A LAN or public address changes with the network the Fleet machine is on,
+and a host behind NAT sees the router's address instead; the VPN address is stable and is the one
+sshd sees. A list (`from="100.101.102.103,fd7a:115c:a1e0::1"`) covers both the IPv4 and IPv6 VPN
+addresses.
+
+**Every Fleet-managed apt host: no reboot behind Fleet's back.** Ubuntu's
+`/etc/apt/apt.conf.d/52unattended-upgrades-reboot.conf` (written by some installs and images)
+contains `Unattended-Upgrade::Automatic-Reboot "true";`. Set it to `"false"` on every host Fleet
+manages, or unattended-upgrades (the timer's runs, and Fleet's own `install-security`) restarts the
+machine with no drain and outside your restart window:
+
+```sh
+grep -rn 'Automatic-Reboot' /etc/apt/apt.conf.d/
+sudo sed -i 's/Automatic-Reboot "true"/Automatic-Reboot "false"/' /etc/apt/apt.conf.d/52unattended-upgrades-reboot.conf
+```
+
+Check that no other file under `/etc/apt/apt.conf.d/` sets it to `"true"` (a later file wins).
 
 **Runner hosts:** stop the host installing on its own between windows, keeping the daily index
 refresh: `sudo systemctl disable --now apt-daily-upgrade.timer`. A docker package upgrade restarts
@@ -158,8 +225,10 @@ Install a hook from `host/linux/` with
 
   Clients reconnect by themselves after a reboot; mounts on other machines drop while it lasts.
 
-A service host (no runners) gets the same user, gate, sudoers and keys; it has no pools to hold, and
-Fleet updates it only when you ask or in a window you set, never on its own.
+A service host (no runners) gets the same user, gate, sudoers and keys; it has no pools to hold.
+Like every machine it installs on its own when out of date unless its config says
+`"autoInstall": false` (a docker upgrade on a mailcow host pauses mail for a few minutes), and it
+restarts only in a restart window you set or on Restart now.
 
 ## macOS hosts
 

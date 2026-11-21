@@ -14,7 +14,13 @@
 // Settings view. Start at login is opt-in: set only when the settings change it.
 import config from "./.deno-desktop/config.json" with { type: "json" };
 import { resolveDesktopCapabilities, runDesktop } from "denext/desktop";
-import { cancelUpdateRun, fleetService, onUpdatesTray, showUpdatesPanel } from "./desktop/fleet.ts";
+import {
+  cancelUpdateRun,
+  confirmQuitDuringUpdate,
+  fleetService,
+  onUpdatesTray,
+  showUpdatesPanel,
+} from "./desktop/fleet.ts";
 import { trayIcons } from "./lib/icons.ts";
 import type { Snapshot } from "./lib/model.ts";
 import { onNotificationClick } from "./lib/deno-host.ts";
@@ -52,6 +58,8 @@ const quitGuard = createQuitGuard({
   closeWindows: () => late.windows?.close(),
   hasTray: () => late.hasTray === true,
   later: (fn) => void setTimeout(fn, 0),
+  // A quit while a machine update runs asks first.
+  confirmQuit: confirmQuitDuringUpdate,
 });
 // Each quit's reason (`"session-end"` for logout / restart / shut down), for the guard. Added before
 // runDesktop, so it runs before denext's own `beforequit` listener asks the guards.

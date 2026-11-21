@@ -8,8 +8,10 @@
 #                       apt: unattended-upgrade -v  (the origins unattended-upgrades allows, by
 #                            default the security pockets)
 #                       dnf: dnf -y upgrade --security
-#   install-all         apt: apt-get update, then apt-get -y upgrade --with-new-pkgs (never removes
-#                            a package)
+#   install-all         apt: apt-get update, then apt-get -y upgrade --with-new-pkgs, phased
+#                            updates included (APT::Get::Always-Include-Phased-Updates); this
+#                            verb removes no package (install-security's unattended-upgrade may
+#                            remove unused kernels and dependencies, as the host configures it)
 #                       dnf: dnf -y upgrade
 #   result            the last install's result document (state, exit code, output tail)
 #   verify            system state, failed units, docker, mounts, /etc/fleet-update/verify.d/*; JSON
@@ -204,8 +206,9 @@ run_job() {
       ;;
     apt:install-all)
       apt-get -q -o DPkg::Lock::Timeout=600 update >>"$log" 2>&1 &&
-        apt-get -q -y -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef \
-          -o Dpkg::Options::=--force-confold upgrade --with-new-pkgs >>"$log" 2>&1
+        apt-get -q -y -o DPkg::Lock::Timeout=600 -o APT::Get::Always-Include-Phased-Updates=true \
+          -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
+          upgrade --with-new-pkgs >>"$log" 2>&1
       ;;
     dnf:install-security)
       dnf -y upgrade --security >>"$log" 2>&1

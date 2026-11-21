@@ -74,3 +74,29 @@ Deno.test("quit guard: without a tray every quit goes through", async () => {
   assertEquals(await g.guard(), true);
   assertEquals(queued.length, 0);
 });
+
+Deno.test("quit guard: a quit that would go through asks confirmQuit; a no keeps Fleet", async () => {
+  let answer = false;
+  let asked = 0;
+  const g = createQuitGuard({
+    closeWindows: () => {},
+    hasTray: () => true,
+    later: () => {},
+    confirmQuit: () => (asked++, Promise.resolve(answer)),
+  });
+  g.beginIntendedQuit();
+  assertEquals(await g.guard(), false, "a run in flight: the user said Don't quit");
+  assertEquals([asked, g.last], [1, "kept"]);
+  answer = true;
+  assertEquals(await g.guard(), true);
+  assertEquals(asked, 2);
+  g.endIntendedQuit();
+  // An external quit closes to the tray: nothing to ask.
+  assertEquals(await g.guard(), false);
+  assertEquals([asked, g.last], [2, "close-to-tray"]);
+  // The session end is never asked.
+  answer = false;
+  g.noteQuitEvent("session-end");
+  assertEquals(await g.guard(), true);
+  assertEquals(asked, 2);
+});

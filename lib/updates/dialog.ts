@@ -9,7 +9,13 @@
 
 import type { ConfirmFn } from "../control-runner.ts";
 import { localParts } from "./schedule.ts";
-import type { RebootPolicy, UpdateMode, UpdateSchedule, UpdatesMachine } from "./model.ts";
+import {
+  clampText,
+  type RebootPolicy,
+  type UpdateMode,
+  type UpdateSchedule,
+  type UpdatesMachine,
+} from "./model.ts";
 
 /** The dialog's options (the shape `host.confirm` takes). */
 export type ConfirmOptions = Parameters<ConfirmFn>[0];
@@ -37,7 +43,11 @@ export interface UpdateDialogInput {
 
 /** The outage warning for a server, one sentence. */
 export function outageText(m: UpdatesMachine): string {
-  return `${m.id} is a server: its services (mail, file shares or whatever it runs) will be ` +
+  const what = m.description ? clampText(m.description, 80) : "";
+  const services = what
+    ? `its services (${what})`
+    : "its services (mail, file shares or whatever it runs)";
+  return `${m.id} is a server: ${services} will be ` +
     "unavailable for a few minutes while it installs and restarts; clients reconnect afterwards.";
 }
 

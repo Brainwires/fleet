@@ -198,7 +198,8 @@ Deno.test({
     assertEquals(effects(t), [
       "apt-get [-q] [-o] [DPkg::Lock::Timeout=600] [update]",
       env,
-      "apt-get [-q] [-y] [-o] [DPkg::Lock::Timeout=600] [-o] [Dpkg::Options::=--force-confdef] " +
+      "apt-get [-q] [-y] [-o] [DPkg::Lock::Timeout=600] " +
+      "[-o] [APT::Get::Always-Include-Phased-Updates=true] [-o] [Dpkg::Options::=--force-confdef] " +
       "[-o] [Dpkg::Options::=--force-confold] [upgrade] [--with-new-pkgs]",
       env,
     ]);

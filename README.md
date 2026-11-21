@@ -869,6 +869,10 @@ never the GitHub token or any GitHub secret (only the local event stream's own t
 | `fleet-stream.json`                          | where the event stream listens (`{ port, pid, started_at }`), written when it starts                                                                                |
 | `fleet-view.json`                            | the window zoom (`{ version: 1, zoom }`, percent; [The window](#the-window)), written when it changes                                                               |
 | `machines.json`                              | the machines integration's latest stats per machine and per-job usage, for agents (`fleet_machines`); rewritten at most every 10 s                                  |
+| `updates.json`                               | machine updates' status per machine (`{ v: 1, machines: { <id>: … } }`): pending updates, restart required, last check and its error; rewritten after each check    |
+| `update-run.json`                            | the one update run in flight (step, holds taken, boot id); its presence is the one-run-at-a-time lock                                                               |
+| `update-runs.jsonl`                          | the update runs' append-only audit: who asked, every step with times, exit codes and a capped, redacted output tail                                                 |
+| `updates/`                                   | written by you at setup (0700): the ssh config, `known_hosts` and the update keys; Fleet passes the config's path to ssh and never reads a key                      |
 | `update-schedules.json`                      | machine updates' restart windows, written only after their dialog                                                                                                   |
 | `update-scheduler.json`                      | the update scheduler's memory: windows handled, notices sent, recent outcomes, each machine's last automatic install                                                |
 | `update-notified.json`                       | machine-update notification keys already posted                                                                                                                     |
@@ -900,10 +904,12 @@ store, notifications and start at login need.
 **An internal build** (`FLEET_INTERNAL=1`, `denext task desktop:package:internal`) also bakes what
 the build machine's `fleet-local-config.json` (or `$FLEET_LOCAL_CONFIG`) calls for: the runner
 scheduler integration's programs (`pausePool`, `watchdog`, the configuration and routing helpers,
-`/bin/launchctl` with a `launchdLabel`), a webhook spool outside the data folder, and a connection
-to the machines service's address (`lib/build-grants.ts`). It fails without a readable, valid local
-config. A release build bakes none of it: no ops paths, no launchctl, nothing of the builder's home.
-An internal build rewrites `.deno-desktop/config.json` with those grants: restore it
+`/bin/launchctl` with a `launchdLabel`), a webhook spool outside the data folder, a connection to
+the machines service's address, and with `integrations.updates` the ssh client `/usr/bin/ssh`
+(`lib/build-grants.ts`; machine updates act on hosts only in such a build, see
+[docs/updates.md](docs/updates.md)). It fails without a readable, valid local config. A release
+build bakes none of it: no ops paths, no launchctl, nothing of the builder's home. An internal build
+rewrites `.deno-desktop/config.json` with those grants: restore it
 (`git checkout .deno-desktop/config.json`) rather than commit it.
 
 ## Development

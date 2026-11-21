@@ -1,7 +1,7 @@
 // Agents' update requests: the MCP server's only write is one file in the data folder's
 // `update-requests/` spool; Fleet shows each as "asked by an agent" and runs one only after the
 // user approves it through Update now's dialog. Pure: the MCP server (mcp/update-requests.ts
-// writes the file) and the backend (lib/deno-update-files.ts lists them) share these rules.
+// writes the file) and the backend (lib/deno-updates.ts lists them) share these rules.
 //
 // A request is untrusted input on both sides: a configured machine that may install, the enum
 // fields, a reason stripped of control characters and at most 200 characters, at most 20 pending,

@@ -347,6 +347,8 @@ export interface UpdatesMachine {
    * only when asked (Update now, an approved request) or in a user-set window, never on its own.
    */
   readonly kind: MachineKind;
+  /** What it is, in a few words ("mail server"), for the outage text; plain text, at most 80. */
+  readonly description?: string;
   readonly via: MachineVia;
   /** Fleet's own machine: notify only (no schedule, no install, no reboot). */
   readonly self: boolean;

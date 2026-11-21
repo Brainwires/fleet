@@ -59,6 +59,20 @@ Deno.test("apt: counts, the -security pockets (ESM included), reboot-required an
   assertEquals(parseAptList("Listing... Done\nWARNING: apt does not have a stable CLI\n"), []);
 });
 
+Deno.test("apt: the script warning on stderr is skipped; phased updates count as pending", () => {
+  // What the gate captures on a real host (stderr first, then the buffered stdout).
+  const apt =
+    "\nWARNING: apt does not have a stable CLI interface. Use with caution in scripts.\n\n" +
+    "Listing...\n" +
+    // A phased update (apt-get upgrade defers it; Fleet's install-all includes it).
+    "ubuntu-drivers-common/noble-updates 1:0.9.7.6ubuntu3.2 amd64 [upgradable from: 1:0.9.7.6ubuntu3.1]\n" +
+    "libssl3t64/noble-updates,noble-security 3.0.13-0ubuntu3.5 amd64 [upgradable from: 3.0.13-0ubuntu3.4]\n";
+  const items = parseAptList(apt);
+  assertEquals(items.map((i) => i.name), ["ubuntu-drivers-common", "libssl3t64"]);
+  const s = ok(parseStatusDocument("ubuntu", JSON.stringify({ os: "ubuntu", apt })));
+  assertEquals([s.pending.total, s.pending.security], [2, 1]);
+});
+
 Deno.test("dnf: check-update names, the security advisories' packages, needs-restarting", () => {
   const doc = JSON.stringify({
     os: "fedora",

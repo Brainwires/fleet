@@ -9,11 +9,14 @@ import type { ConfirmFn } from "../control-runner.ts";
 import { canInstall, MACHINE_ID, SCHEDULE_ID, validateSchedules } from "./config.ts";
 import { restartDialog, scheduleDialog, updateDialog } from "./dialog.ts";
 import { checkExclusive } from "./exclusive.ts";
+import { heldPoolsFromAudit } from "./files.ts";
+import { heldByRun } from "./pools.ts";
 import {
   type AuditEntry,
   clampText,
   type MachineStatus,
   type PeersPort,
+  type PoolPause,
   REBOOT_POLICIES,
   type RebootPolicy,
   type RunOrigin,
@@ -74,6 +77,11 @@ export interface UpdatesBackendDeps {
   onChange?(): void;
   /** Test builds: dialogs show, nothing runs or is saved. */
   readonly dryRun?: boolean;
+  /**
+   * The pause in force on each of these pools (`null`: not paused), so a run's kept hold that the
+   * user resumed (or that expired) stops counting as held. Absent: the audit alone decides.
+   */
+  holds?(pools: readonly string[]): Promise<ReadonlyMap<string, PoolPause | null>>;
 }
 
 /** A panel action's outcome. */
@@ -87,7 +95,8 @@ export type UpdatesResult =
   };
 
 const NOT_SET_UP = "Machine updates aren't set up (the settings' integrations.updates).";
-const NO_ENGINE = "This build can't reach the machines (the update helpers aren't wired here).";
+const NO_ENGINE =
+  "This build can't reach the machines (an internal build whose local config has integrations.updates runs ssh).";
 const DRY = "Dry run: nothing was done.";
 
 const obj = (v: unknown): Record<string, unknown> =>
@@ -127,7 +136,15 @@ export function createUpdatesBackend(d: UpdatesBackendDeps) {
       d.files.schedules(cfg),
       d.files.requests(cfg, now),
     ]);
+    const kept = [...new Set(Object.values(heldPoolsFromAudit(audit)).flat())];
+    const pauses = kept.length && d.holds ? await d.holds(kept).catch(() => null) : null;
     return buildUpdatesView({
+      ...(pauses
+        ? {
+          stillHeld: (pool: string, runId: string) =>
+            !pauses.has(pool) || heldByRun(pauses.get(pool) ?? null, runId, now),
+        }
+        : {}),
       config: cfg,
       statuses,
       run: engine?.orchestrator.current() ?? fileRun,

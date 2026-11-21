@@ -4,6 +4,10 @@
 // through: the tray's "Quit Fleet", and closing the window when there is no tray to come back to.
 // The OS's session end (logout, restart, shut down) always goes through.
 //
+// While a machine update runs, a quit that would go through asks first (`confirmQuit`): the run
+// survives a restart of Fleet (its pool holds expire by themselves, an install is re-attached), but
+// a drain or a boot wait stops being watched until Fleet is back. The session end is never asked.
+//
 // It is a `DesktopRuntime.onBeforeQuit` guard (denext asks it before any page, for every quit, the
 // session end included: a `false` there would ask the OS to stop the logout). The guard itself is
 // given no reason, so desktop.ts also listens to the runtime's `beforequit` (added before
@@ -25,10 +29,15 @@ export interface QuitGuardDeps {
    * `beforequit` would count as closed by the quit.
    */
   later(fn: () => void): void;
+  /**
+   * Asked before a quit that would go through (never the session end): `false` keeps Fleet
+   * running. desktop.ts asks only while a machine update runs. Absent: never asked.
+   */
+  confirmQuit?(): Promise<boolean>;
 }
 
 /** What one quit request turned into. */
-export type QuitDecision = "quit" | "close-to-tray";
+export type QuitDecision = "quit" | "close-to-tray" | "kept";
 
 /** The quit guard. */
 export interface QuitGuard {
@@ -66,10 +75,16 @@ export function createQuitGuard(deps: QuitGuardDeps): QuitGuard {
     async guard() {
       // The `beforequit` listener may run after denext's in the same dispatch: its reason first.
       await Promise.resolve();
+      const sessionEnd = reason === "session-end";
       const d = decide();
       reason = undefined;
       last = d;
-      if (d === "quit") return true;
+      if (d === "quit") {
+        if (sessionEnd || !deps.confirmQuit) return true;
+        const go = await deps.confirmQuit().catch(() => true);
+        if (!go) last = "kept";
+        return go;
+      }
       deps.later(() => deps.closeWindows());
       return false;
     },

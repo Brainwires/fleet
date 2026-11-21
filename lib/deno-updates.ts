@@ -1,22 +1,59 @@
 // The machine updates on the real machine (lib/updates/ has the pure model): running the one ssh
-// argv (lib/updates/remote.ts), the data files (0600 in the data folder: status, schedules, the run
-// in flight, the append-only audit log) and reading the MCP server's request spool. Everything a
-// host prints is capped here and stays untrusted text: it is never put into argv or a later command.
+// argv (lib/updates/remote.ts), the one module for the data files (0600 in the data folder: status,
+// schedules, the run in flight, the append-only audit log, the scheduler's and the notices' memory,
+// the MCP server's request spool; lib/updates/files.ts parses what is read back), and the runner
+// scheduler's pools as the orchestrator sees them. Everything a host prints is capped here and stays
+// untrusted text: it is never put into argv or a later command.
 //
 // ssh runs with a cleared environment (no agent socket, no inherited options), its config file named
 // with -F (so neither ~/.ssh/config nor /etc/ssh/ssh_config is read), no stdin and a time cap. Fleet
 // passes the config's path and never reads a key.
 
+import {
+  UPDATE_NOTIFIED_FILE,
+  UPDATE_REQUESTS_DIR,
+  UPDATE_RUN_FILE,
+  UPDATE_RUNS_FILE,
+  UPDATE_SCHEDULER_FILE,
+  UPDATE_SCHEDULES_FILE,
+  UPDATES_FILE,
+} from "./agent-files.ts";
+import type { PoolCommand, PoolPaths } from "./controls.ts";
+import type { UpdatesFilesPort } from "./updates/backend.ts";
+import { validateSchedules } from "./updates/config.ts";
+import { parseAudit, parseRunFile, parseStatusFile, statusFile } from "./updates/files.ts";
 import type {
   AuditEntry,
+  CommandResult,
+  MachineStatus,
+  PoolPause,
+  PoolsPort,
+  PoolState,
   RemotePort,
   RemoteResult,
   RemoteVerb,
   RunRecord,
+  UpdateSchedule,
+  UpdatesConfig,
   UpdatesMachine,
   UpdatesStore,
 } from "./updates/model.ts";
+import { parsePauseStatus } from "./updates/pools.ts";
 import { SSH_BIN, SSH_FAILED_EXIT, sshArgv } from "./updates/remote.ts";
+import {
+  MAX_REQUEST_BYTES,
+  parseRequest,
+  REQUEST_ID,
+  requestExpired,
+  requestFile,
+  requestIdOf,
+  type UpdateRequest,
+} from "./updates/requests.ts";
+import {
+  EMPTY_SCHEDULER_STATE,
+  parseSchedulerState,
+  type SchedulerState,
+} from "./updates/scheduler.ts";
 
 /** A verb's time cap when the caller gives none (the collectors' 120 s); never more than an hour. */
 export const REMOTE_TIMEOUT_MS = 120_000;
@@ -24,13 +61,15 @@ const REMOTE_TIMEOUT_MAX = 60 * 60_000;
 /** At most this much of a verb's stdout is kept (a status document is far smaller). */
 export const REMOTE_STDOUT_MAX = 1_000_000;
 
-/** The data files' names, in the data folder. */
+/** The data files' names, in the data folder (lib/agent-files.ts names each). */
 export const UPDATE_FILES = {
-  status: "updates.json",
-  schedules: "update-schedules.json",
-  run: "update-run.json",
-  runs: "update-runs.jsonl",
-  requests: "update-requests",
+  status: UPDATES_FILE,
+  schedules: UPDATE_SCHEDULES_FILE,
+  run: UPDATE_RUN_FILE,
+  runs: UPDATE_RUNS_FILE,
+  scheduler: UPDATE_SCHEDULER_FILE,
+  notified: UPDATE_NOTIFIED_FILE,
+  requests: UPDATE_REQUESTS_DIR,
   sshDir: "updates",
 } as const;
 
@@ -41,11 +80,13 @@ const DIR_MODE = 0o700;
 /** One audit line is at most this long (the orchestrator redacts and caps output tails first). */
 const AUDIT_LINE_MAX = 256 * 1024;
 /** A request file is at most this large; a bigger one is skipped unread. */
-export const REQUEST_FILE_MAX = 4 * 1024;
+export const REQUEST_FILE_MAX = MAX_REQUEST_BYTES;
 /** At most this many request files are read per pass (Fleet keeps at most 20 pending). */
 export const REQUEST_SCAN_MAX = 64;
-/** A request file's name: what the MCP server writes (`<id>.json`). */
-const REQUEST_NAME = /^[A-Za-z0-9_-]{1,64}\.json$/;
+/** A JSON data file larger than this reads as nothing. */
+const JSON_FILE_MAX = 2 * 1024 * 1024;
+/** The audit's tail read for the panel and the agents (bytes). */
+const AUDIT_TAIL_BYTES = 512 * 1024;
 
 /** Read up to `max` bytes of a stream, then drain and drop the rest. */
 async function readCapped(stream: ReadableStream<Uint8Array>, max: number): Promise<string> {
@@ -165,35 +206,63 @@ async function writeTemp(target: string, data: unknown): Promise<string> {
   return tmp;
 }
 
-/** The update data files: the orchestrator's store plus status, schedules and the request spool. */
-export interface UpdateFiles extends UpdatesStore {
-  /** `updates.json` / `update-schedules.json`, parsed, or `null` when missing or not JSON. */
-  readJson(name: typeof UPDATE_FILES.status | typeof UPDATE_FILES.schedules): Promise<unknown>;
-  /** Replace `updates.json` / `update-schedules.json` atomically (0600). */
-  writeJson(
-    name: typeof UPDATE_FILES.status | typeof UPDATE_FILES.schedules,
-    data: unknown,
-  ): Promise<void>;
-  /** The last `limit` audit lines, oldest first (lines that aren't JSON are skipped; untyped). */
-  readAudit(limit: number): Promise<unknown[]>;
-  /** The pending request files (raw, untrusted JSON; validated by the caller), by name. */
-  readRequests(): Promise<{ id: string; doc: unknown }[]>;
-  /** Remove one request file (approved, refused or expired). */
-  removeRequest(id: string): Promise<void>;
+/**
+ * The update data files: the orchestrator's store (the run lock, the audit), the status the
+ * collector writes, and the panel's, scheduler's and notices' files. The one writer of every file
+ * here; the readers parse what they read back with lib/updates/files.ts (the same shapes the MCP
+ * server reads: `updates.json` is `{ v: 1, machines: { <id>: MachineStatus } }`, each audit line an
+ * `AuditEntry`, each spool file an `UpdateRequest`).
+ */
+export interface UpdateFiles extends UpdatesStore, UpdatesFilesPort {
+  /** Replace `updates.json` with these statuses (`{ v: 1, machines }`). */
+  saveStatuses(statuses: Readonly<Record<string, MachineStatus>>): Promise<void>;
+  loadSchedulerState(): Promise<SchedulerState>;
+  saveSchedulerState(s: SchedulerState): Promise<void>;
+  loadNotified(): Promise<Map<string, number>>;
+  saveNotified(seen: ReadonlyMap<string, number>): Promise<void>;
+}
+
+/** A JSON file, parsed, or `null` when missing, not a plain file, too large or not JSON. */
+async function readJsonFile(file: string, max = JSON_FILE_MAX): Promise<unknown> {
+  try {
+    // lstat: a symlink planted in the data folder or the spool is never followed.
+    const st = await Deno.lstat(file);
+    if (!st.isFile || st.size > max) return null;
+    return JSON.parse(await Deno.readTextFile(file));
+  } catch {
+    return null;
+  }
+}
+
+/** The last `max` bytes of a file, from a line start (`""` when missing). */
+async function readTail(path: string, max: number): Promise<string> {
+  let file: Deno.FsFile | null = null;
+  try {
+    const size = (await Deno.stat(path)).size;
+    file = await Deno.open(path, { read: true });
+    const from = Math.max(0, size - max);
+    if (from > 0) await file.seek(from, Deno.SeekMode.Start);
+    const buf = new Uint8Array(size - from);
+    let off = 0;
+    while (off < buf.length) {
+      const n = await file.read(buf.subarray(off));
+      if (n === null) break;
+      off += n;
+    }
+    const text = new TextDecoder().decode(buf.subarray(0, off));
+    return from > 0 ? text.slice(text.indexOf("\n") + 1) : text;
+  } catch {
+    return "";
+  } finally {
+    file?.close();
+  }
 }
 
 /** The update data files in `dataDir`. */
 export function createUpdateFiles(dataDir: string): UpdateFiles {
   const path = (name: string) => join(dataDir, name);
   const runFile = path(UPDATE_FILES.run);
-  const reqDir = path(UPDATE_FILES.requests);
-  const readJsonFile = async (file: string): Promise<unknown> => {
-    try {
-      return JSON.parse(await Deno.readTextFile(file));
-    } catch {
-      return null;
-    }
-  };
+  const spool = path(UPDATE_FILES.requests);
   const replace = async (file: string, data: unknown): Promise<void> => {
     await ensureDir(dataDir);
     const tmp = await writeTemp(file, data);
@@ -204,6 +273,7 @@ export function createUpdateFiles(dataDir: string): UpdateFiles {
       throw err;
     }
   };
+  /** The full run record (the orchestrator re-attaches from it: boot id and baseline kept). */
   const readRun = async (): Promise<RunRecord | null> => {
     const doc = await readJsonFile(runFile);
     return doc && typeof doc === "object" && (doc as { v?: unknown }).v === 1 &&
@@ -212,6 +282,7 @@ export function createUpdateFiles(dataDir: string): UpdateFiles {
       : null;
   };
   return {
+    // ---- the orchestrator's store ----
     readRun,
     async claimRun(run) {
       await ensureDir(dataDir);
@@ -249,56 +320,146 @@ export function createUpdateFiles(dataDir: string): UpdateFiles {
         mode: FILE_MODE,
       });
     },
-    readJson: (name) => readJsonFile(path(name)),
-    writeJson: (name, data) => replace(path(name), data),
-    async readAudit(limit) {
-      let text: string;
-      try {
-        text = await Deno.readTextFile(path(UPDATE_FILES.runs));
-      } catch {
-        return [];
-      }
-      const out: unknown[] = [];
-      for (const line of text.split("\n")) {
-        if (!line) continue;
-        try {
-          out.push(JSON.parse(line));
-        } catch {
-          // A torn or edited line: skipped.
-        }
-      }
-      return out.slice(-Math.max(0, Math.floor(limit)));
+
+    // ---- status (the collector writes, everyone reads) ----
+    async statuses() {
+      return parseStatusFile(await readJsonFile(path(UPDATE_FILES.status)));
     },
-    async readRequests() {
+    async saveStatuses(statuses) {
+      await replace(path(UPDATE_FILES.status), statusFile(Object.values(statuses)));
+    },
+
+    // ---- the panel ----
+    async run() {
+      return parseRunFile(await readJsonFile(runFile));
+    },
+    async audit() {
+      return parseAudit(await readTail(path(UPDATE_FILES.runs), AUDIT_TAIL_BYTES));
+    },
+    async schedules(config: UpdatesConfig) {
+      const raw = await readJsonFile(path(UPDATE_FILES.schedules));
+      if (raw === null) return [];
+      const v = validateSchedules(raw, config);
+      return v.ok ? v.value : [];
+    },
+    async saveSchedules(list: readonly UpdateSchedule[]) {
+      await replace(path(UPDATE_FILES.schedules), list);
+    },
+    async requests(config: UpdatesConfig, now: number) {
       const names: string[] = [];
       try {
-        for await (const e of Deno.readDir(reqDir)) {
-          if (e.isFile && REQUEST_NAME.test(e.name)) names.push(e.name);
+        for await (const e of Deno.readDir(spool)) {
+          if (e.isFile && requestIdOf(e.name)) names.push(e.name);
         }
       } catch {
         return [];
       }
       names.sort();
-      const out: { id: string; doc: unknown }[] = [];
+      const out: UpdateRequest[] = [];
       for (const name of names.slice(0, REQUEST_SCAN_MAX)) {
-        const file = join(reqDir, name);
-        try {
-          // lstat: a symlink planted in the spool is never followed.
-          const st = await Deno.lstat(file);
-          if (!st.isFile || st.size > REQUEST_FILE_MAX) continue;
-          out.push({
-            id: name.slice(0, -".json".length),
-            doc: JSON.parse(await Deno.readTextFile(file)),
-          });
-        } catch {
-          // Unreadable or not JSON: skipped (the caller expires stale files by name).
+        const id = requestIdOf(name)!;
+        const file = join(spool, name);
+        const raw = await readJsonFile(file, REQUEST_FILE_MAX);
+        const req = parseRequest(raw, id, config, now);
+        if (req) {
+          out.push(req);
+          continue;
+        }
+        // Expired or unreadable: dropped (an expired one by its own `at`).
+        const at = (raw as { at?: unknown } | null)?.at;
+        if (raw === null || typeof at !== "number" || requestExpired(at, now)) {
+          await Deno.remove(file).catch(() => {});
+        }
+      }
+      return out.sort((a, b) => a.at - b.at);
+    },
+    async removeRequest(id: string) {
+      if (!REQUEST_ID.test(id)) return;
+      await Deno.remove(join(spool, requestFile(id))).catch(() => {});
+    },
+
+    // ---- the scheduler's and the notices' memory ----
+    async loadSchedulerState() {
+      const raw = await readJsonFile(path(UPDATE_FILES.scheduler));
+      return raw === null ? EMPTY_SCHEDULER_STATE : parseSchedulerState(raw);
+    },
+    async saveSchedulerState(st: SchedulerState) {
+      await replace(path(UPDATE_FILES.scheduler), st);
+    },
+    async loadNotified() {
+      const raw = await readJsonFile(path(UPDATE_FILES.notified));
+      const out = new Map<string, number>();
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+        for (const [k, v] of Object.entries(raw).slice(0, 2000)) {
+          if (typeof v === "number" && Number.isFinite(v)) out.set(k, v);
         }
       }
       return out;
     },
-    async removeRequest(id) {
-      if (!REQUEST_NAME.test(`${id}.json`)) return;
-      await Deno.remove(join(reqDir, `${id}.json`)).catch(() => {});
+    async saveNotified(seen: ReadonlyMap<string, number>) {
+      await replace(path(UPDATE_FILES.notified), Object.fromEntries(seen));
+    },
+  };
+}
+
+// ---- the runner scheduler's pools ----
+
+/** What the pools port runs over on this machine. */
+export interface PoolsPortDeps {
+  /** The pool commands' programs now (`null`: no runner scheduler here). */
+  paths(): PoolPaths | null;
+  /** Run one program by exact path with argv (lib/deno-pools.ts runProgram). */
+  run(program: string, args: readonly string[]): Promise<{ code: number; out: string }>;
+  /** A pool's card facts from Fleet's snapshot (`null`: no card for it). */
+  card(pool: string): { readonly jobs: number; readonly healthy: boolean } | null;
+  /** Re-read the scheduler's state after a watchdog pass. */
+  refresh(): Promise<void>;
+}
+
+/**
+ * The orchestrator's pools over the runner scheduler's `pause-pool.sh`: `--status <pool>` says
+ * whether every slot is idle (exit 0) and prints the pause in force (its reason and expiry), the
+ * snapshot gives the running jobs and health, and `run` executes exactly the command the
+ * orchestrator built with lib/controls.ts (`holdPoolCommand` / `resumeHoldCommand`).
+ */
+export function createPoolsPort(d: PoolsPortDeps): PoolsPort {
+  return {
+    async state(pool: string): Promise<PoolState> {
+      const card = d.card(pool);
+      const paths = d.paths();
+      if (!paths) {
+        return { idle: false, jobs: card?.jobs ?? 0, pause: null, healthy: card?.healthy ?? false };
+      }
+      const r = await d.run(paths.pausePool, ["--status", pool]);
+      const pause: PoolPause | null = parsePauseStatus(r.out);
+      return {
+        idle: r.code === 0,
+        jobs: card?.jobs ?? (r.code === 0 ? 0 : 1),
+        pause,
+        healthy: card?.healthy ?? true,
+      };
+    },
+    async run(command: PoolCommand): Promise<CommandResult> {
+      const paths = d.paths();
+      // Only the pause script: the orchestrator's holds and resumes are never anything else.
+      if (!paths || command.program !== paths.pausePool) {
+        return { code: -1, output: "not the runner scheduler's pause command" };
+      }
+      const r = await d.run(command.program, command.args);
+      return { code: r.code, output: r.out };
+    },
+    async ready(pools: readonly string[]) {
+      const paths = d.paths();
+      if (!paths) return { ok: false, reason: "no runner scheduler here" };
+      if (paths.watchdog) {
+        const w = await d.run(paths.watchdog, []);
+        if (w.code !== 0) return { ok: false, reason: `the watchdog pass failed (exit ${w.code})` };
+      }
+      await d.refresh().catch(() => {});
+      const bad = pools.filter((p) => d.card(p)?.healthy === false);
+      return bad.length
+        ? { ok: false, reason: `unhealthy after the pass: ${bad.join(", ")}` }
+        : { ok: true, reason: "" };
     },
   };
 }

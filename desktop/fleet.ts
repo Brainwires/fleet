@@ -85,12 +85,16 @@ import type { PoolPaths } from "../lib/controls.ts";
 import { asRange } from "../lib/pool-detail.ts";
 import { createJobLogs, type JobLogs } from "../lib/logs.ts";
 import { launcherForJob, listLauncherLogs, poolLogLines, runnerLogView } from "../lib/deno-logs.ts";
-import { updateFiles } from "../lib/deno-update-files.ts";
+import { createPoolsPort, createSshRemote, createUpdateFiles } from "../lib/deno-updates.ts";
 import {
   createUpdatesBackend,
   type UpdatesBackend,
   type UpdatesEngine,
 } from "../lib/updates/backend.ts";
+import { createUpdatesEngine, type Engine } from "../lib/updates/engine.ts";
+import type { Clock, PoolPause, RunEvent, UpdatesConfig } from "../lib/updates/model.ts";
+import { cardFacts, peerFacts } from "../lib/updates/pools.ts";
+import { SSH_BIN } from "../lib/updates/remote.ts";
 import { createUpdatesScheduler, type SchedulerEvent, TICK_MS } from "../lib/updates/scheduler.ts";
 import { UPDATES_EVENT, updatesTrayLine, type UpdatesView } from "../lib/updates/view.ts";
 import {
@@ -263,24 +267,59 @@ function start(host: DesktopExtensionHost): void {
 const SOFTWARE_UPDATE_URL =
   "x-apple.systempreferences:com.apple.Software-Update-Settings.extension";
 
-/**
- * What acts on hosts: one UpdateOrchestrator over the remote, pools, status, peers and store ports
- * of lib/deno-updates.ts (the host helpers' package). Until that is wired into this build there is
- * no engine: the panel reads the files and shows why Check now / Update now are unavailable, and
- * the scheduler doesn't tick.
- */
-function updatesEngine(): UpdatesEngine | null {
-  return null;
+/** The update engine (lib/updates/engine.ts), built once at startup. */
+let engine: Engine | undefined;
+
+/** Whether this build may run the ssh client (an internal build whose local config has the section). */
+function sshAllowed(): boolean {
+  try {
+    return Deno.permissions.querySync({ name: "run", command: SSH_BIN }).state === "granted";
+  } catch {
+    return false;
+  }
 }
 
 /**
- * Machine updates: the panel's backend, the notices (every minute, from the status file), the
- * tray's line, and the scheduler's 60 s tick (auto-installs and restart windows) when an engine
- * exists. Everything follows the settings as they are now. Returns the stop function.
+ * What acts on hosts: one UpdateOrchestrator over the ssh remote, the runner scheduler's pools, the
+ * data files, the status collector, the pool cards and the machines service (lib/updates/engine.ts).
+ * `null` while the settings have no `integrations.updates`, or when this build may not run ssh (a
+ * release build): the panel then reads the files and says why Check now / Update now are
+ * unavailable, and nothing ticks.
+ */
+function updatesEngine(): UpdatesEngine | null {
+  return engine && (settings().integrations.updates ?? null) !== null && sshAllowed()
+    ? engine
+    : null;
+}
+
+/** Time, for the orchestrator: a sleep a cancel wakes early. */
+const clock: Clock = {
+  now: () => Date.now(),
+  sleep: (ms, signal) =>
+    new Promise<void>((resolve) => {
+      if (signal?.aborted) return resolve();
+      const done = () => {
+        clearTimeout(t);
+        signal?.removeEventListener("abort", done);
+        resolve();
+      };
+      const t = setTimeout(done, Math.max(0, ms));
+      signal?.addEventListener("abort", done, { once: true });
+    }),
+};
+
+/** The ssh config file the settings name, `~/` expanded (ssh is given an absolute path only). */
+const sshConfigFile = (cfg: UpdatesConfig): string => expandHome(cfg.ssh.configFile, home()) ?? "";
+
+/**
+ * Machine updates: the panel's backend, the engine (re-attached to a run Fleet was in the middle
+ * of), the notices (every minute, from the status file), the tray's line, and the 60 s tick: the
+ * scheduler (auto-installs and restart windows) and the collector (each machine every 6 h).
+ * Everything follows the settings as they are now. Returns the stop function.
  */
 function startUpdates(host: DesktopExtensionHost, s: FleetService): () => void {
   const dir = host.appSupportDir;
-  const files = updateFiles(dir);
+  const files = createUpdateFiles(dir);
   const tz = () => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   const changed = () => {
     try {
@@ -290,10 +329,97 @@ function startUpdates(host: DesktopExtensionHost, s: FleetService): () => void {
     }
     void refresh();
   };
+  const card = (pool: string) => {
+    const c = s.snapshot().pools.find((p) => p.id === pool);
+    return c ? cardFacts(c) : null;
+  };
+  const poolsPort = createPoolsPort({
+    paths: pools,
+    run: runProgram,
+    card,
+    refresh: () => s.localStateChanged(),
+  });
+  const logUpdate = (
+    machine: string,
+    sev: "info" | "ok" | "warn" | "bad" | "muted",
+    text: string,
+  ) =>
+    void s.logAction({
+      repo: "",
+      workflow: `update ${machine}`,
+      job: null,
+      url: null,
+      sev,
+      kind: "action",
+      text,
+    }).catch(() => {});
+  /** A run's events: the event log, the notices, the panel. */
+  const runEvents = (e: RunEvent) => {
+    const machine = e.run.machine;
+    if (e.kind === "step") logUpdate(machine, "muted", `${e.run.id} ${e.step}: ${e.text}`);
+    else if (e.kind === "alert") {
+      logUpdate(machine, "bad", e.text);
+      if (settings().notifications.updates) {
+        void post({
+          key: `upd-alert:${e.run.id}:${e.run.step}`,
+          title: `Update of ${machine} needs you`,
+          body: e.text,
+        });
+      }
+    } else {
+      // A run Update now / an approved request started is logged by the backend when it ends.
+      if (e.run.origin.kind === "auto" || e.run.origin.kind === "schedule") {
+        const bad = e.outcome !== "succeeded" && e.outcome !== "nothing-to-do";
+        logUpdate(machine, bad ? "warn" : "info", `update run ${e.run.id}: ${e.outcome}`);
+      }
+      void notifyEvent({
+        kind: "outcome",
+        runId: e.run.id,
+        machine,
+        action: e.run.action ?? "install",
+        outcome: e.outcome,
+      });
+    }
+    changed();
+  };
+  engine = createUpdatesEngine({
+    config: () => settings().integrations.updates ?? null,
+    paths: pools,
+    remote: {
+      run: (m, verb, o) => {
+        const cfg = settings().integrations.updates;
+        if (!cfg) {
+          return Promise.resolve({ code: -1, stdout: "", unreachable: false, timedOut: false });
+        }
+        return createSshRemote({ configFile: sshConfigFile(cfg) }).run(m, verb, o);
+      },
+    },
+    pools: poolsPort,
+    store: files,
+    files,
+    clock,
+    telemetry: {
+      jobsOn: (id) => {
+        const v = machines?.view();
+        if (!v?.configured || !v.connected) return null;
+        const m = v.machines.find((x) => x.id.toLowerCase() === id.toLowerCase());
+        if (!m || !m.online) return null;
+        return m.pools.reduce((n, p) => n + p.jobs.length, 0);
+      },
+    },
+    peers: (cfg, statuses) => peerFacts(s.snapshot().pools, cfg, statuses),
+    events: runEvents,
+  });
   updates = createUpdatesBackend({
     config: () => settings().integrations.updates ?? null,
     files,
     engine: updatesEngine,
+    holds: async (list) => {
+      const out = new Map<string, PoolPause | null>();
+      if (!pools()) return out;
+      for (const p of list.slice(0, 20)) out.set(p, (await poolsPort.state(p)).pause);
+      return out;
+    },
     confirm: async (o) => {
       if (!extHost) throw new DesktopCapError("unavailable", "no desktop host");
       return await extHost.confirm(o);
@@ -339,51 +465,96 @@ function startUpdates(host: DesktopExtensionHost, s: FleetService): () => void {
     await post(updateEventNotification(e, seen, Date.now(), settings().notifications.updates));
     await files.saveNotified(seen).catch(() => {});
   };
-  const engine = updatesEngine();
-  const scheduler = engine
-    ? createUpdatesScheduler({
-      config: () => settings().integrations.updates ?? null,
-      schedules: (c) => files.schedules(c),
-      statuses: () => files.statuses(),
-      orchestrator: engine.orchestrator,
-      now: () => Date.now(),
-      tz,
-      loadState: () => files.loadSchedulerState(),
-      saveState: (st) => files.saveSchedulerState(st),
-      events: (e) => {
-        void notifyEvent(e);
-        if (e.kind === "started" || e.kind === "refused" || e.kind === "skip") {
-          const text = e.kind === "started"
-            ? `${e.action} run ${e.runId} started (${e.origin})`
-            : e.kind === "refused"
-            ? `update refused: ${e.reason}`
-            : `restart window ${e.scheduleId} skipped: ${e.reason}`;
-          void s.logAction({
-            repo: "",
-            workflow: `update ${e.machine}`,
-            job: null,
-            url: null,
-            sev: e.kind === "refused" ? "warn" : "info",
-            kind: "action",
-            text,
-          }).catch(() => {});
-        }
-        changed();
-      },
-    })
-    : null;
+  // Always built: it ticks only while updatesEngine() is there (the settings may add the section).
+  const scheduler = createUpdatesScheduler({
+    config: () => settings().integrations.updates ?? null,
+    schedules: (c) => files.schedules(c),
+    statuses: () => files.statuses(),
+    orchestrator: engine.orchestrator,
+    now: () => Date.now(),
+    tz,
+    loadState: () => files.loadSchedulerState(),
+    saveState: (st) => files.saveSchedulerState(st),
+    events: (e) => {
+      void notifyEvent(e);
+      if (e.kind === "started" || e.kind === "refused" || e.kind === "skip") {
+        const text = e.kind === "started"
+          ? `${e.action} run ${e.runId} started (${e.origin})`
+          : e.kind === "refused"
+          ? `update refused: ${e.reason}`
+          : `restart window ${e.scheduleId} skipped: ${e.reason}`;
+        void s.logAction({
+          repo: "",
+          workflow: `update ${e.machine}`,
+          job: null,
+          url: null,
+          sev: e.kind === "refused" ? "warn" : "info",
+          kind: "action",
+          text,
+        }).catch(() => {});
+      }
+      changed();
+    },
+  });
+  /** The scheduler's and the collector's tick, while an engine is there; one tick at a time. */
+  let ticking = false;
+  const tick = async () => {
+    if (ticking || !updatesEngine()) return;
+    ticking = true;
+    try {
+      await scheduler.tick();
+      if (await engine!.collectTick()) changed();
+    } catch (err) {
+      console.error("fleet: updates tick:", errName(err));
+    } finally {
+      ticking = false;
+    }
+  };
+  // A run Fleet was in the middle of when it stopped: picked up where it was (its holds expire by
+  // themselves meanwhile; an install is polled, never started twice).
+  if (updatesEngine()) {
+    void engine.reattach().then((picked) => {
+      if (picked) changed();
+    }).catch((err) => console.error("fleet: updates reattach:", errName(err)));
+  }
   void refresh();
+  const first = setTimeout(() => void tick(), 15_000);
   const timer = setInterval(() => {
-    void scheduler?.tick().catch((err) => console.error("fleet: updates tick:", errName(err)));
+    void tick();
     void refresh();
   }, TICK_MS);
-  return () => clearInterval(timer);
+  return () => {
+    clearTimeout(first);
+    clearInterval(timer);
+  };
 }
 
 /** Follow the tray's updates line (desktop.ts); returns the unsubscribe. */
 export function onUpdatesTray(fn: (u: ReturnType<typeof updatesTrayLine>) => void): () => void {
   updatesTrayListeners.add(fn);
   return () => updatesTrayListeners.delete(fn);
+}
+
+/**
+ * Asked before Fleet quits (lib/quit-guard.ts): with no update run in flight, quit; with one, the
+ * OS dialog ("Don't quit" first and default). The run survives a restart of Fleet, but nobody
+ * watches its drain or boot wait until Fleet is back.
+ */
+export async function confirmQuitDuringUpdate(): Promise<boolean> {
+  const run = engine?.orchestrator.current() ?? null;
+  if (!run || !extHost) return true;
+  const answer = await extHost.confirm({
+    message: `An update of ${run.machine} is running (${run.step}). Quit Fleet anyway?`,
+    detail:
+      "The update carries on when Fleet starts again: the pools' holds expire by themselves " +
+      "and an install is picked up where it was. Until then nobody watches the drain or the restart.",
+    title: "Update running",
+    buttons: ["Don't quit", "Quit"],
+    defaultId: 0,
+    cancelId: 0,
+    kind: "warning",
+  }).catch(() => null);
+  return answer === 1;
 }
 
 /** Cancel the update run in flight (the tray's Cancel update). */
