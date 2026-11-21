@@ -537,3 +537,62 @@ export function poolPrograms(paths: PoolPaths): string[] {
     ...(paths.configHelper ? [paths.configHelper] : []),
   ];
 }
+
+// ---- holds (machine updates only) ----
+
+/** A hold lasts at most this long (pause-pool.sh refuses a longer `--for hold`). */
+export const HOLD_MAX_SECONDS = 7 * 24 * 3600;
+/** The pause reason a run's hold carries: `fleet-update:<runId>`. */
+export const holdReason = (runId: string) => `fleet-update:${runId}`;
+
+const HOLD_POOL = /^[\w.-]{1,200}$/;
+const HOLD_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9-]{0,79}$/;
+
+/**
+ * A machine update's hold on a pool: `pause-pool.sh <pool> --for hold --duration <N>s
+ * fleet-update:<runId>` (self-expiring). Built only by the update orchestrator (lib/updates/
+ * orchestrator.ts), never from a page request: it is not a `PoolControl`, so `parsePoolControl`
+ * and `poolCommand` can't produce it.
+ */
+export function holdPoolCommand(
+  pool: string,
+  seconds: number,
+  runId: string,
+  paths: PoolPaths,
+): { ok: true; command: PoolCommand } | { ok: false; message: string } {
+  if (!HOLD_POOL.test(pool) || pool.startsWith("-")) {
+    return { ok: false, message: `not a pool name: "${pool.slice(0, 40)}"` };
+  }
+  if (!HOLD_RUN_ID.test(runId)) return { ok: false, message: "not a run id" };
+  if (!Number.isInteger(seconds) || seconds < 60 || seconds > HOLD_MAX_SECONDS) {
+    return { ok: false, message: `a hold is 60 s to ${HOLD_MAX_SECONDS} s` };
+  }
+  return {
+    ok: true,
+    command: {
+      program: paths.pausePool,
+      args: [pool, "--for", "hold", "--duration", `${seconds}s`, holdReason(runId)],
+      message: `Hold pool ${pool} for a machine update (${Math.round(seconds / 60)} min).`,
+      confirmLabel: "Hold pool",
+    },
+  };
+}
+
+/** The resume of a pool a run held (`pause-pool.sh --resume <pool>`), for the orchestrator. */
+export function resumeHoldCommand(
+  pool: string,
+  paths: PoolPaths,
+): { ok: true; command: PoolCommand } | { ok: false; message: string } {
+  if (!HOLD_POOL.test(pool) || pool.startsWith("-")) {
+    return { ok: false, message: `not a pool name: "${pool.slice(0, 40)}"` };
+  }
+  return {
+    ok: true,
+    command: {
+      program: paths.pausePool,
+      args: ["--resume", pool],
+      message: `Resume pool ${pool} after a machine update.`,
+      confirmLabel: "Resume pool",
+    },
+  };
+}
