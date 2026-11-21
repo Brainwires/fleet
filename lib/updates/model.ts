@@ -352,6 +352,13 @@ export interface UpdatesMachine {
   readonly self: boolean;
   /** What a run installs by default; `"none"` for a self machine. */
   readonly install: UpdateMode | "none";
+  /**
+   * Install pending updates on its own whenever the machine is out of date (the busy, drain and
+   * hold rules still apply; a job is never stopped). Never restarts: a restart the install needs
+   * waits for a restart window or Restart now. Default on, except for the self machine (always
+   * off) and `install: "none"`.
+   */
+  readonly autoInstall: boolean;
   /** Pools held for a run; `[]` for a host with no runners. */
   readonly pools: readonly string[];
   readonly busy: readonly BusyPluginName[];
@@ -432,11 +439,19 @@ export type RunOutcome =
   /** Everything passed but a pool couldn't be resumed (the alert names the command). */
   | "resume-failed";
 
-/** Who asked for a run. */
+/** Who asked for a run (`auto`: the machine was out of date and `autoInstall` is on). */
 export type RunOrigin =
   | { readonly kind: "user" }
+  | { readonly kind: "auto" }
   | { readonly kind: "schedule"; readonly scheduleId: string }
   | { readonly kind: "request"; readonly requestId: string };
+
+/**
+ * What a run does: `install` (install, then restart only if needed and the policy allows) or
+ * `restart` (no install: restart a machine whose restart is pending, verify, resume).
+ */
+export const RUN_ACTIONS = ["install", "restart"] as const;
+export type RunAction = typeof RUN_ACTIONS[number];
 
 /** One step's record (the audit keeps them all). */
 export interface StepLog {
@@ -467,6 +482,8 @@ export interface RunRecord {
   readonly id: string;
   readonly machine: string;
   readonly origin: RunOrigin;
+  /** Absent in a record from before restart runs: `install`. */
+  readonly action?: RunAction;
   readonly mode: UpdateMode;
   readonly reboot: RebootPolicy;
   readonly drainCapMinutes: number;
@@ -499,6 +516,8 @@ export interface AuditEntry {
   readonly id: string;
   readonly machine: string;
   readonly origin: RunOrigin;
+  /** Absent in a line from before restart runs: `install`. */
+  readonly action?: RunAction;
   readonly mode: UpdateMode;
   readonly reboot: RebootPolicy;
   readonly startedAt: number;

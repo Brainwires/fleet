@@ -20,6 +20,11 @@
 // A machine with no pools (a `server`) skips the hold, the pool half of the drain, and the resume;
 // its drain and final check run only its busy plugins (none by default). Cancel is accepted
 // through step 3 and resumes the pools; after that it is refused.
+//
+// A restart run (`action: "restart"`) installs nothing: preflight finds it due only when the host
+// says a restart is required, then hold, drain, the final check, the reboot (policy `if-needed`),
+// the boot wait, verify and resume as above. Install runs started on their own (`autoInstall`)
+// use policy `never`, so a needed restart ends them `reboot-pending` with the pools resumed.
 
 import { holdPoolCommand, type PoolPaths, resumeHoldCommand } from "../controls.ts";
 import { redactText } from "../redact.ts";
@@ -43,6 +48,7 @@ import {
   type RemoteResult,
   type RemoteVerb,
   RUN_ID,
+  type RunAction,
   type RunEvents,
   type RunHold,
   type RunOrigin,
@@ -99,6 +105,11 @@ export interface OrchestratorDeps {
 export interface RunRequest {
   readonly machine: string;
   readonly origin: RunOrigin;
+  /**
+   * `install` (the default) or `restart`: no install, only the restart of a machine whose restart
+   * is pending (policy `if-needed`; nothing to do when none is required), then verify and resume.
+   */
+  readonly action?: RunAction;
   /** Defaults to the machine's `install`. */
   readonly mode?: UpdateMode;
   /** Defaults to the machine's `reboot`. */
@@ -164,13 +175,16 @@ export class UpdateOrchestrator {
     const id = (d.newRunId ?? defaultRunId)(machine.id, now);
     if (!RUN_ID.test(id)) return { ok: false, reason: "bad run id" };
     const mode = req.mode ?? (machine.install === "all" ? "all" : "security");
+    const action = req.action ?? "install";
     const rec: RunRecord = {
       v: 1,
       id,
       machine: machine.id,
       origin: req.origin,
+      action,
       mode,
-      reboot: req.reboot ?? machine.reboot,
+      // A restart run restarts only when a restart is required.
+      reboot: action === "restart" ? "if-needed" : req.reboot ?? machine.reboot,
       drainCapMinutes: req.drainCapMinutes ?? machine.drainCapMinutes,
       windowEnd: req.windowEnd ?? null,
       startedAt: now,
@@ -425,7 +439,8 @@ class Run {
       return this.#endEarly("aborted", `status check failed: ${st.error ?? "no status"}`);
     }
     const h = st.host;
-    const due = h.reboot.required || this.rec.reboot === "always" ||
+    const due = this.rec.action === "restart" ? h.reboot.required : h.reboot.required ||
+      this.rec.reboot === "always" ||
       (this.rec.mode === "all" ? h.pending.total > 0 : h.pending.security > 0);
     if (!due) return this.#endEarly("nothing-to-do", "nothing pending and no reboot due");
     const boot = await this.#verb("boot-id");
@@ -453,7 +468,8 @@ class Run {
         h.reboot.required ? ", reboot required" : ""
       }`,
     );
-    return m.pools.length > 0 ? "hold" : m.busy.length > 0 ? "drain" : "install";
+    const work = this.rec.action === "restart" ? "final-check" : "install";
+    return m.pools.length > 0 ? "hold" : m.busy.length > 0 ? "drain" : work;
   }
 
   async #hold(): Promise<Next> {
@@ -540,6 +556,11 @@ class Run {
     if (reason) return this.#endEarly("aborted", `final check: ${reason}`);
     if (this.#cancelled) return this.#endEarly("cancelled", "cancelled");
     await this.#log(true, "clear");
+    if (this.rec.action === "restart") {
+      // Restart only: nothing installs; the restart preflight found required is the reason.
+      await this.#save({ rebootNeeded: true });
+      return "reboot";
+    }
     return "install";
   }
 
@@ -721,6 +742,7 @@ class Run {
       id: this.rec.id,
       machine: this.rec.machine,
       origin: this.rec.origin,
+      ...(this.rec.action ? { action: this.rec.action } : {}),
       mode: this.rec.mode,
       reboot: this.rec.reboot,
       startedAt: this.rec.startedAt,

@@ -602,3 +602,73 @@ Deno.test("hold: only the orchestrator builds it; a page request can't", () => {
     "a page pause stays capped",
   );
 });
+
+// ---- restarts only when needed, deferred to a window (the auto-install policy) ----
+
+Deno.test("orchestrator: an install that needs no restart never reboots, whatever the policy allows", async () => {
+  const h = harness();
+  h.host.rebootRequired = false;
+  const r = await runToEnd(h, { reboot: "if-needed" });
+  assertEquals(r.outcome, "succeeded");
+  assertFalse(verbs(h).includes("reboot"));
+  assertEquals(steps(r), [
+    "preflight",
+    "hold",
+    "drain",
+    "final-check",
+    "install",
+    "reboot",
+    "verify",
+    "resume",
+  ]);
+  assertEquals(r.steps.find((s) => s.step === "reboot")!.detail, "no reboot needed");
+});
+
+Deno.test("orchestrator: an auto-install (policy never) that needs a restart ends reboot-pending, pools resumed", async () => {
+  const h = harness();
+  h.host.rebootRequired = true;
+  const r = await runToEnd(h, { origin: { kind: "auto" }, reboot: "never" });
+  assertEquals(r.outcome, "reboot-pending");
+  assertFalse(verbs(h).includes("reboot"), "the restart waits for a window");
+  assertEquals(h.pools.commands.slice(2), [["--resume", "lx-a"], ["--resume", "lx-b"]]);
+  assertEquals(h.store.audit[0].origin, { kind: "auto" });
+  assertEquals(h.store.audit[0].action, "install");
+});
+
+Deno.test("orchestrator: a restart run installs nothing, reboots, verifies and resumes", async () => {
+  const h = harness({ pending: { total: 0, security: 0 }, reboot: true });
+  const r = await runToEnd(h, { action: "restart", reboot: "never" });
+  assertEquals(r.outcome, "succeeded");
+  assertEquals(r.reboot, "if-needed", "a restart run's own policy");
+  assertEquals(steps(r), [
+    "preflight",
+    "hold",
+    "drain",
+    "final-check",
+    "reboot",
+    "wait-boot",
+    "verify",
+    "resume",
+  ]);
+  assertFalse(verbs(h).some((v) => v.startsWith("install") || v === "result"));
+  assert(verbs(h).includes("reboot"));
+  assertEquals(h.store.audit[0].action, "restart");
+});
+
+Deno.test("orchestrator: a restart run with no restart pending does nothing", async () => {
+  const h = harness({ pending: { total: 5, security: 5 }, reboot: false });
+  const r = await runToEnd(h, { action: "restart" });
+  assertEquals(r.outcome, "nothing-to-do");
+  assertFalse(verbs(h).some((v) => v.startsWith("install") || v === "reboot"));
+  assertEquals(h.pools.commands, []);
+});
+
+Deno.test("orchestrator: a server's restart run reboots without holding anything", async () => {
+  const h = harness({ pending: { total: 0, security: 0 }, reboot: true });
+  const s = await h.orch.start({ machine: "mail-1", origin: { kind: "user" }, action: "restart" });
+  if (!s.ok) throw new Error(s.reason);
+  const r = await s.done;
+  assertEquals(r.outcome, "succeeded");
+  assertEquals(steps(r), ["preflight", "final-check", "reboot", "wait-boot", "verify"]);
+  assertEquals(h.pools.commands, []);
+});

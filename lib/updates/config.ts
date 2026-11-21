@@ -119,6 +119,7 @@ function readMachine(r: Reader, x: unknown, p: string): UpdatesMachine | null {
     [...UPDATE_MODES, "none"] as const,
     self ? "none" : "security",
   );
+  const autoInstall = r.bool(x.autoInstall, `${p}.autoInstall`, !self && install !== "none");
   const pools = r.list(
     x.pools,
     `${p}.pools`,
@@ -158,6 +159,11 @@ function readMachine(r: Reader, x: unknown, p: string): UpdatesMachine | null {
   if (self && install !== "none") {
     r.err(`${p}.install`, "the machine Fleet runs on is notify-only (self: true): no install");
   }
+  if (self && autoInstall) {
+    r.err(`${p}.autoInstall`, "the machine Fleet runs on is notify-only (self: true): no install");
+  } else if (install === "none" && autoInstall) {
+    r.err(`${p}.autoInstall`, `nothing to install (install: none)`);
+  }
   if (via === "local" && !self) {
     r.err(`${p}.via`, `"local" is only for the machine Fleet runs on (self: true)`);
   }
@@ -176,6 +182,7 @@ function readMachine(r: Reader, x: unknown, p: string): UpdatesMachine | null {
     via,
     self,
     install,
+    autoInstall,
     pools: [...new Set(pools)],
     busy: x.busy === undefined ? (pools.length > 0 ? ["pools"] : []) : [...new Set(busy)],
     verify: { mounts, reach: [...new Set(reach)] },
