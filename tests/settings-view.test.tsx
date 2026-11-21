@@ -270,7 +270,9 @@ Deno.test("copy: the header names the configured owners; lists and the MCP comma
   assertEquals(splitList("acme/web, acme/api\nacme/web  x/y"), ["acme/web", "acme/api", "x/y"]);
   assertEquals(
     mcpCommand({ dataDir: "/d", spoolDir: null, healthFile: null, os: "linux" }, "/src/fleet"),
-    "claude mcp add --scope user fleet -- deno run --no-config --no-prompt --allow-read=/d /src/fleet/mcp/fleet-mcp.ts --data-dir /d",
+    "claude mcp add --scope user fleet -- deno run --no-config --no-prompt --allow-read=/d --allow-write=/d/update-requests /src/fleet/mcp/fleet-mcp.ts --data-dir /d",
   );
   assertStringIncludes(mcpCommand(MACHINE), '"--allow-read=/data dir"');
+  // The one write grant: the agents' update-request spool.
+  assertStringIncludes(mcpCommand(MACHINE), '"--allow-write=/data dir/update-requests"');
 });

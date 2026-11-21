@@ -454,7 +454,7 @@ Deno.test("notifications: a kind turned off is marked seen but not posted", () =
     }],
   } as unknown as Snapshot;
   const seen = new Map<string, number>();
-  const off = { poolUnhealthy: false, queuedLong: true, protectedFailure: false };
+  const off = { poolUnhealthy: false, queuedLong: true, protectedFailure: false, updates: true };
   assertEquals(pendingNotifications(snap, seen, 0, off), []);
   assertEquals([...seen.keys()].sort(), ["fail:3", "pool:gpu:5"]);
   // Turned back on: the past isn't replayed.

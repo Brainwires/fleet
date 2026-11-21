@@ -21,6 +21,10 @@ import type { ConfigResult } from "../lib/config-runner.ts";
 import type { MachineSeries, MachinesView } from "../lib/machines.ts";
 export { MACHINES_EVENT } from "../lib/machines.ts";
 import type { RoutingPreview, RoutingRules } from "../lib/routing.ts";
+import type { UpdatesView } from "../lib/updates/view.ts";
+export { UPDATES_EVENT } from "../lib/updates/view.ts";
+import type { UpdatesResult } from "../lib/updates/backend.ts";
+import type { RebootPolicy, UpdateMode, UpdateSchedule } from "../lib/updates/model.ts";
 import type { RoutingLoad, RoutingResult } from "../lib/routing-runner.ts";
 
 /** The runner settings' first load. */
@@ -43,8 +47,25 @@ export interface FleetClient {
       config?: boolean;
       routing?: boolean;
       machines?: boolean;
+      updates?: boolean;
     }
   >;
+  /** Machine updates: the Updates panel's view. */
+  updates(args?: Record<never, never>): Promise<UpdatesView>;
+  updatesCheck(args: { machine: string }): Promise<UpdatesResult>;
+  updatesRun(
+    args: { machine: string; mode: UpdateMode; reboot: RebootPolicy; acknowledgeOutage?: boolean },
+  ): Promise<UpdatesResult>;
+  updatesRestart(args: { machine: string; acknowledgeOutage?: boolean }): Promise<UpdatesResult>;
+  updatesCancel(args: { runId: string }): Promise<UpdatesResult>;
+  updatesSaveSchedule(args: { schedule: Partial<UpdateSchedule> }): Promise<UpdatesResult>;
+  updatesSetScheduleEnabled(args: { id: string; enabled: boolean }): Promise<UpdatesResult>;
+  updatesDeleteSchedule(args: { id: string }): Promise<UpdatesResult>;
+  updatesApproveRequest(
+    args: { id: string; mode?: UpdateMode; acknowledgeOutage?: boolean },
+  ): Promise<UpdatesResult>;
+  updatesDenyRequest(args: { id: string }): Promise<UpdatesResult>;
+  updatesOpenSoftwareUpdate(args: { machine: string }): Promise<UpdatesResult>;
   /** Machines: each machine's newest reading, its pools and jobs, and the sparklines' trails. */
   machines(args?: Record<never, never>): Promise<MachinesView>;
   machineHistory(args: { host: string; range: string }): Promise<MachineSeries | { error: string }>;

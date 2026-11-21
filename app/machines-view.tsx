@@ -3,7 +3,9 @@
 // nested inside with the jobs on them and what each uses, live sparklines (CPU, memory, swap,
 // network; hover for the value), disk bars, and a history per machine over 1 h / 24 h / 7 d drawn
 // with the pool detail's charts. "Compare" puts every machine on one chart. A second tab holds the
-// routing rules' form (app/routing-form.tsx) when the scheduler has a routing helper here.
+// routing rules' form (app/routing-form.tsx) when the scheduler has a routing helper here, and an
+// Updates tab (app/updates-panel.tsx) when machine updates are set up: each card then carries its
+// update chip, which opens that tab on the machine.
 
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "denext";
 import { type ChartSeries, TimeChart } from "./charts.tsx";
@@ -23,6 +25,8 @@ import {
   type Trail,
 } from "../lib/machines.ts";
 import { type RoutingApi, RoutingForm } from "./routing-form.tsx";
+import { UpdateChip, type UpdatesApi, UpdatesPanel } from "./updates-panel.tsx";
+import type { UpdatesMachineView, UpdatesView } from "../lib/updates/view.ts";
 
 /** What the screen needs from the backend. */
 export interface MachinesApi {
@@ -35,9 +39,14 @@ export interface MachinesViewProps {
   readonly api: MachinesApi;
   /** The routing rules' form; `null`: no routing helper on this machine. */
   readonly routing: RoutingApi | null;
-  readonly initialTab?: "machines" | "routing";
+  readonly initialTab?: "machines" | "routing" | "updates";
   readonly onBack: () => void;
+  /** Machine updates' view; `null`/absent: not set up (no Updates tab, no chips). */
+  readonly updates?: UpdatesView | null;
+  readonly updatesApi?: UpdatesApi | null;
 }
+
+type Tab = "machines" | "routing" | "updates";
 
 type Span = "live" | MachineRange;
 const SPANS: readonly { key: Span; label: string }[] = [
@@ -378,6 +387,8 @@ function MachineCard(
     now: number;
     span: Span;
     history: MachineSeries | { error: string } | null | undefined;
+    update?: UpdatesMachineView;
+    onUpdates?: (machine: string) => void;
   },
 ) {
   const { m, trail, now } = props;
@@ -399,6 +410,7 @@ function MachineCard(
         >
           {m.online ? "live" : "offline"}
         </span>
+        {props.update ? <UpdateChip m={props.update} onOpen={props.onUpdates} /> : null}
         <span
           class="muted small m-info"
           title={info
@@ -571,9 +583,26 @@ function Compare(
 
 export function MachinesView(props: MachinesViewProps) {
   const { view, now, api, onBack } = props;
-  const [tab, setTab] = useState<"machines" | "routing">(
-    props.routing && props.initialTab === "routing" ? "routing" : "machines",
+  const hasUpdates = !!(props.updates?.configured && props.updatesApi);
+  const tabs: Tab[] = [
+    ...(props.view?.configured !== false || (!props.routing && !hasUpdates)
+      ? ["machines" as const]
+      : []),
+    ...(props.routing ? ["routing" as const] : []),
+    ...(hasUpdates ? ["updates" as const] : []),
+  ];
+  const [tab, setTab] = useState<Tab>(
+    props.initialTab && tabs.includes(props.initialTab) ? props.initialTab : tabs[0],
   );
+  const [updatesPick, setUpdatesPick] = useState<string | null>(null);
+  useEffect(() => {
+    if (props.initialTab && tabs.includes(props.initialTab)) setTab(props.initialTab);
+  }, [props.initialTab]);
+  const openUpdates = (machine: string) => {
+    setUpdatesPick(machine);
+    setTab("updates");
+  };
+  const updateOf = (id: string) => props.updates?.machines.find((u) => u.id === id);
   const [span, setSpan] = useState<Span>("live");
   const [compare, setCompare] = useState(false);
   const [metric, setMetric] = useState<CompareMetric>("cpu");
@@ -662,10 +691,10 @@ export function MachinesView(props: MachinesViewProps) {
           </div>
         </dl>
       </header>
-      {props.routing
+      {tabs.length > 1
         ? (
           <nav class="tabs" role="tablist" aria-label="Machines">
-            {(["machines", "routing"] as const).map((t) => (
+            {tabs.map((t) => (
               <button
                 key={t}
                 type="button"
@@ -674,13 +703,19 @@ export function MachinesView(props: MachinesViewProps) {
                 class={`tab${tab === t ? " is-active" : ""}`}
                 onClick={() => setTab(t)}
               >
-                {t === "machines" ? "Machines" : "Routing"}
+                {t === "machines" ? "Machines" : t === "routing" ? "Routing" : "Updates"}
               </button>
             ))}
           </nav>
         )
         : null}
-      {tab === "routing" && props.routing
+      {tab === "updates" && hasUpdates
+        ? (
+          <div class="detail-body">
+            <UpdatesPanel view={props.updates!} api={props.updatesApi!} selected={updatesPick} />
+          </div>
+        )
+        : tab === "routing" && props.routing
         ? (
           <div class="detail-body">
             <RoutingForm api={props.routing} />
@@ -759,6 +794,8 @@ export function MachinesView(props: MachinesViewProps) {
                         now={now}
                         span={span}
                         history={span === "live" ? undefined : histories[`${span}:${m.id}`]}
+                        update={updateOf(m.id)}
+                        onUpdates={hasUpdates ? openUpdates : undefined}
                       />
                     ))}
                   </div>

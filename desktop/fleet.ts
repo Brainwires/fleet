@@ -85,6 +85,20 @@ import type { PoolPaths } from "../lib/controls.ts";
 import { asRange } from "../lib/pool-detail.ts";
 import { createJobLogs, type JobLogs } from "../lib/logs.ts";
 import { launcherForJob, listLauncherLogs, poolLogLines, runnerLogView } from "../lib/deno-logs.ts";
+import { updateFiles } from "../lib/deno-update-files.ts";
+import {
+  createUpdatesBackend,
+  type UpdatesBackend,
+  type UpdatesEngine,
+} from "../lib/updates/backend.ts";
+import { createUpdatesScheduler, type SchedulerEvent, TICK_MS } from "../lib/updates/scheduler.ts";
+import { UPDATES_EVENT, updatesTrayLine, type UpdatesView } from "../lib/updates/view.ts";
+import {
+  type RunOutcomeEvent,
+  updateEventNotification,
+  updateNotifications,
+} from "../lib/notify.ts";
+import { OPEN_BIN } from "../lib/notifier.ts";
 
 let service: FleetService | undefined;
 let jobLogs: JobLogs | undefined;
@@ -104,6 +118,10 @@ const DRY_RUN = (() => {
   }
 })();
 const waiting: ((s: FleetService) => void)[] = [];
+/** Machine updates' panel backend (lib/updates/backend.ts); idle until the settings name machines. */
+let updates: UpdatesBackend | undefined;
+/** The tray's updates line, followed by desktop.ts. */
+const updatesTrayListeners = new Set<(u: ReturnType<typeof updatesTrayLine>) => void>();
 
 /** Start the service once the extension's host (secure store, data folder) is known. */
 function start(host: DesktopExtensionHost): void {
@@ -230,13 +248,161 @@ function start(host: DesktopExtensionHost): void {
       else machinesPending = setTimeout(() => saveMachines(machines!.view()), wait);
     },
   });
+  const stopUpdates = startUpdates(host, service);
   host.onAppQuit(async () => {
+    stopUpdates();
     machines?.stop();
     clearTimeout(machinesPending);
     stopSpool?.();
     stateWatch?.stop();
     await Promise.all([receiver?.stop(), service?.flushHistory(), streamListener?.stop()]);
   });
+}
+
+/** macOS's Software Update pane (the self machine's only control). */
+const SOFTWARE_UPDATE_URL =
+  "x-apple.systempreferences:com.apple.Software-Update-Settings.extension";
+
+/**
+ * What acts on hosts: one UpdateOrchestrator over the remote, pools, status, peers and store ports
+ * of lib/deno-updates.ts (the host helpers' package). Until that is wired into this build there is
+ * no engine: the panel reads the files and shows why Check now / Update now are unavailable, and
+ * the scheduler doesn't tick.
+ */
+function updatesEngine(): UpdatesEngine | null {
+  return null;
+}
+
+/**
+ * Machine updates: the panel's backend, the notices (every minute, from the status file), the
+ * tray's line, and the scheduler's 60 s tick (auto-installs and restart windows) when an engine
+ * exists. Everything follows the settings as they are now. Returns the stop function.
+ */
+function startUpdates(host: DesktopExtensionHost, s: FleetService): () => void {
+  const dir = host.appSupportDir;
+  const files = updateFiles(dir);
+  const tz = () => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const changed = () => {
+    try {
+      host.emit(UPDATES_EVENT, null);
+    } catch {
+      // No page subscribed: it reads the view when it opens.
+    }
+    void refresh();
+  };
+  updates = createUpdatesBackend({
+    config: () => settings().integrations.updates ?? null,
+    files,
+    engine: updatesEngine,
+    confirm: async (o) => {
+      if (!extHost) throw new DesktopCapError("unavailable", "no desktop host");
+      return await extHost.confirm(o);
+    },
+    openSoftwareUpdate: async () => {
+      if (Deno.build.os !== "darwin") {
+        return { ok: false, message: "Open your system's update settings to install updates." };
+      }
+      const r = await runProgram(OPEN_BIN, [SOFTWARE_UPDATE_URL]);
+      return r.code === 0
+        ? { ok: true, message: "Software Update is open." }
+        : { ok: false, message: "Software Update couldn't be opened." };
+    },
+    now: () => Date.now(),
+    tz,
+    log: (e) => s.logAction(e),
+    onChange: changed,
+    dryRun: DRY_RUN,
+  });
+  let seen: Map<string, number> | null = null;
+  const post = async (n: { key: string; title: string; body: string } | null) => {
+    if (n && !s.notificationsPaused) await postNotification(n).catch(() => {});
+  };
+  /** The notices and the tray line, from the view as it is now. */
+  const refresh = async () => {
+    if (!updates) return;
+    let view: UpdatesView;
+    try {
+      view = await updates.view();
+    } catch {
+      return;
+    }
+    const line = updatesTrayLine(view);
+    for (const fn of updatesTrayListeners) fn(line);
+    if (!view.configured) return;
+    seen ??= await files.loadNotified().catch(() => new Map<string, number>());
+    const on = settings().notifications.updates;
+    for (const n of updateNotifications(view.machines, seen, Date.now(), on)) await post(n);
+    await files.saveNotified(seen).catch(() => {});
+  };
+  const notifyEvent = async (e: SchedulerEvent | RunOutcomeEvent) => {
+    seen ??= await files.loadNotified().catch(() => new Map<string, number>());
+    await post(updateEventNotification(e, seen, Date.now(), settings().notifications.updates));
+    await files.saveNotified(seen).catch(() => {});
+  };
+  const engine = updatesEngine();
+  const scheduler = engine
+    ? createUpdatesScheduler({
+      config: () => settings().integrations.updates ?? null,
+      schedules: (c) => files.schedules(c),
+      statuses: () => files.statuses(),
+      orchestrator: engine.orchestrator,
+      now: () => Date.now(),
+      tz,
+      loadState: () => files.loadSchedulerState(),
+      saveState: (st) => files.saveSchedulerState(st),
+      events: (e) => {
+        void notifyEvent(e);
+        if (e.kind === "started" || e.kind === "refused" || e.kind === "skip") {
+          const text = e.kind === "started"
+            ? `${e.action} run ${e.runId} started (${e.origin})`
+            : e.kind === "refused"
+            ? `update refused: ${e.reason}`
+            : `restart window ${e.scheduleId} skipped: ${e.reason}`;
+          void s.logAction({
+            repo: "",
+            workflow: `update ${e.machine}`,
+            job: null,
+            url: null,
+            sev: e.kind === "refused" ? "warn" : "info",
+            kind: "action",
+            text,
+          }).catch(() => {});
+        }
+        changed();
+      },
+    })
+    : null;
+  void refresh();
+  const timer = setInterval(() => {
+    void scheduler?.tick().catch((err) => console.error("fleet: updates tick:", errName(err)));
+    void refresh();
+  }, TICK_MS);
+  return () => clearInterval(timer);
+}
+
+/** Follow the tray's updates line (desktop.ts); returns the unsubscribe. */
+export function onUpdatesTray(fn: (u: ReturnType<typeof updatesTrayLine>) => void): () => void {
+  updatesTrayListeners.add(fn);
+  return () => updatesTrayListeners.delete(fn);
+}
+
+/** Cancel the update run in flight (the tray's Cancel update). */
+export function cancelUpdateRun(runId: string): void {
+  updates?.cancel({ runId });
+}
+
+/** Ask the page to show the Updates panel (the tray's updates line). */
+export function showUpdatesPanel(): void {
+  try {
+    extHost?.emit(UPDATES_EVENT, { show: true });
+  } catch {
+    // No page yet: the window opens on the dashboard.
+  }
+}
+
+function upd(): UpdatesBackend {
+  if (!updates) throw new DesktopCapError("unavailable", "Fleet's backend is starting");
+  return updates;
 }
 
 let stateWatch: StateWatch | null = null;
@@ -486,7 +652,7 @@ const optNum = (v: unknown): number | undefined =>
 
 export default defineDesktopExtension({
   name: "fleet",
-  events: [CHANGED_EVENT, ZOOM_EVENT, MACHINES_EVENT],
+  events: [CHANGED_EVENT, ZOOM_EVENT, MACHINES_EVENT, UPDATES_EVENT],
   setup: start,
   methods: {
     /** The snapshot; `visible` says whether the calling page is on screen (poll rate). */
@@ -534,6 +700,7 @@ export default defineDesktopExtension({
           config: localConfigHelper(settings().integrations.runnerScheduler) !== null,
           routing: localRoutingHelper(settings().integrations.runnerScheduler) !== null,
           machines: (settings().integrations.machines ?? null) !== null,
+          updates: (settings().integrations.updates ?? null) !== null,
         };
       },
     },
@@ -715,6 +882,32 @@ export default defineDesktopExtension({
         return machines.view();
       },
     },
+    /** Machine updates: the Updates panel's view (status, run in flight, windows, requests). */
+    updates: { timeoutMs: 30_000, handler: () => upd().view() },
+    /** Check now: one collector run for a machine. */
+    updatesCheck: { timeoutMs: 180_000, handler: (raw: unknown) => upd().checkNow(raw) },
+    /** Update now: the OS dialog ("Don't" by default), then the run. */
+    updatesRun: { timeoutMs: false, handler: (raw: unknown) => upd().updateNow(raw) },
+    /** Restart now (a pending restart, nothing installed): the OS dialog, then the run. */
+    updatesRestart: { timeoutMs: false, handler: (raw: unknown) => upd().restartNow(raw) },
+    /** Cancel the run in flight (through the final check). */
+    updatesCancel: { handler: (raw: unknown) => upd().cancel(raw) },
+    /** Save a restart window: validated, the OS dialog, then the file. */
+    updatesSaveSchedule: { timeoutMs: false, handler: (raw: unknown) => upd().saveSchedule(raw) },
+    /** Turn a restart window off or (after the dialog) back on. */
+    updatesSetScheduleEnabled: {
+      timeoutMs: false,
+      handler: (raw: unknown) => upd().setScheduleEnabled(raw),
+    },
+    updatesDeleteSchedule: { handler: (raw: unknown) => upd().deleteSchedule(raw) },
+    /** Approve an agent's request: the update dialog, naming the request. */
+    updatesApproveRequest: {
+      timeoutMs: false,
+      handler: (raw: unknown) => upd().approveRequest(raw),
+    },
+    updatesDenyRequest: { handler: (raw: unknown) => upd().denyRequest(raw) },
+    /** The self machine's only control: the OS's Software Update pane. */
+    updatesOpenSoftwareUpdate: { handler: (raw: unknown) => upd().openSoftwareUpdate(raw) },
     /** A machine's history over a range (1h, 24h, 7d), from the machines service. */
     machineHistory: {
       timeoutMs: 30_000,

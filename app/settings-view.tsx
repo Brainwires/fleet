@@ -17,6 +17,7 @@ import {
 } from "../lib/settings.ts";
 import type { RepoChoice, TokenInfo } from "../lib/discover.ts";
 import type { AuthState } from "../lib/model.ts";
+import { UPDATE_REQUESTS_DIR } from "../lib/agent-files.ts";
 import { TokenForm, type TokenScreenProps } from "./token-screen.tsx";
 import { type ConfigApi, RunnerConfigForm } from "./runner-config-form.tsx";
 
@@ -69,6 +70,8 @@ export function mcpCommand(m: MachineInfo, checkout = "<path to fleet>"): string
     "claude mcp add --scope user fleet --",
     "deno run --no-config --no-prompt",
     q(`--allow-read=${reads.join(",")}`),
+    // The one write: agents' update requests, a spool the user approves from in Fleet.
+    q(`--allow-write=${m.dataDir.replace(/\/$/, "")}/${UPDATE_REQUESTS_DIR}`),
     `${checkout}/mcp/fleet-mcp.ts`,
     "--data-dir",
     q(m.dataDir),
@@ -605,6 +608,9 @@ function StartSection(props: { draft: Draft; set: SetDraft; focus?: boolean }) {
         </Check>
         <Check id="set-n-fail" checked={n.protectedFailure} onChange={note("protectedFailure")}>
           a job fails on a protected branch
+        </Check>
+        <Check id="set-n-updates" checked={n.updates} onChange={note("updates")}>
+          a machine needs updates or a restart, and when an update run ends
         </Check>
       </fieldset>
     </Section>

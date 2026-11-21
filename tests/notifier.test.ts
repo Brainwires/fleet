@@ -234,7 +234,7 @@ const snapWith = (jobs: JobRow[]): Snapshot => ({
   hooks: { state: "off", lastDeliveryAt: null },
 });
 
-const PREFS = { poolUnhealthy: true, queuedLong: true, protectedFailure: true };
+const PREFS = { poolUnhealthy: true, queuedLong: true, protectedFailure: true, updates: true };
 
 Deno.test("notify: with the watchdog notifying, a self-hosted pool's long wait is its alert alone", () => {
   const snap = snapWith([

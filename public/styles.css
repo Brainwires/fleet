@@ -3199,3 +3199,155 @@ table.data .cell-actions {
 :root[data-fleet-mid] .rf-side {
   position: static;
 }
+
+/* ---- machine updates (app/updates-panel.tsx) ---- */
+
+.upd-chip {
+  cursor: pointer;
+  font-weight: 500;
+}
+.updates {
+  display: grid;
+  gap: 16px;
+}
+.upd-inflight,
+.upd-requests,
+.upd-schedules,
+.upd-history,
+.upd-machine {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: var(--surface);
+}
+.upd-inflight {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.upd-layout {
+  display: grid;
+  grid-template-columns: minmax(160px, 240px) 1fr;
+  gap: 12px;
+  align-items: start;
+}
+@media (max-width: 640px) {
+  .upd-layout {
+    grid-template-columns: 1fr;
+  }
+}
+.upd-list {
+  display: grid;
+  gap: 4px;
+}
+.upd-pick {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.upd-pick.is-on {
+  border-color: var(--run);
+}
+.upd-pick-name,
+.upd-name,
+.upd-run-machine {
+  font-family: var(--mono);
+  font-weight: 500;
+}
+.upd-machine-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+}
+.upd-name {
+  margin: 0;
+  font-size: 15px;
+}
+.upd-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 24px;
+  margin: 8px 0;
+}
+.upd-facts dt {
+  font-size: 12px;
+  color: var(--text-3);
+}
+.upd-facts dd {
+  margin: 0;
+}
+.upd-actions,
+.upd-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: end;
+  margin: 8px 0;
+}
+.upd-field {
+  display: grid;
+  gap: 2px;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.upd-days {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+.upd-h {
+  width: 100%;
+  margin: 8px 0 4px;
+  font-size: 13px;
+}
+.upd-runs,
+.upd-requests ul,
+.upd-schedules ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+.upd-run summary,
+.upd-request,
+.upd-schedule {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: baseline;
+}
+.upd-steps {
+  margin: 4px 0 4px 18px;
+  font-size: 12.5px;
+}
+.upd-step-bad,
+.upd-outcome-install-failed,
+.upd-outcome-host-down,
+.upd-outcome-verify-failed,
+.upd-outcome-resume-failed {
+  color: var(--bad);
+}
+.upd-step-name {
+  font-family: var(--mono);
+}
+.upd-sec {
+  color: var(--warn);
+}
+.upd-reason {
+  font-style: italic;
+  overflow-wrap: anywhere;
+}

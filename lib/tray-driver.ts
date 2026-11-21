@@ -22,6 +22,8 @@ export const MENU = {
   pause: "pause-notifications",
   login: "start-at-login",
   refresh: "refresh",
+  updates: "updates",
+  cancelUpdate: "cancel-update",
   quit: "quit",
 } as const;
 
@@ -33,6 +35,11 @@ export interface MenuState {
   readonly notificationsPaused: boolean;
   /** `null` where start at login is unavailable (no runtime support). */
   readonly startAtLogin: boolean | null;
+  /**
+   * Machine updates' one line ("2 machines need updates", "Updating x: draining"), and whether a
+   * run in flight can still be cancelled; absent or `null`: no line.
+   */
+  readonly updates?: { readonly line: string; readonly cancellable: boolean } | null;
 }
 
 /** A tray menu entry (denext's AppMenuItem shape). */
@@ -45,6 +52,8 @@ export function trayMenu(s: MenuState): TrayMenuItem[] {
   return [
     { id: MENU.toggle, label: s.windowVisible ? "Close Fleet" : "Open Fleet" },
     { id: MENU.summary, label: s.summary, disabled: true },
+    ...(s.updates ? [{ id: MENU.updates, label: s.updates.line }] : []),
+    ...(s.updates?.cancellable ? [{ id: MENU.cancelUpdate, label: "Cancel update" }] : []),
     { separator: true },
     { id: MENU.settings, label: "Settings…" },
     { id: MENU.pause, label: "Pause notifications", checked: s.notificationsPaused },
@@ -215,6 +224,10 @@ export interface TrayActions {
   setNotificationsPaused(paused: boolean): Promise<void>;
   /** Turn start at login on / off; resolves the state after (`null`: unavailable). */
   setStartAtLogin(on: boolean): Promise<boolean | null>;
+  /** Open the window on the Updates panel (the updates line). */
+  openUpdates?(): void;
+  /** Cancel the update run in flight (while it is still cancellable). */
+  cancelUpdate?(runId: string): void;
   quit(): void;
 }
 
@@ -231,6 +244,13 @@ export interface TrayDriver {
   refreshMenu(): void;
   /** The start-at-login state the menu shows. */
   startAtLogin: boolean | null;
+  /**
+   * Machine updates' line (lib/updates/view.ts `updatesTrayLine`): a menu line, the tooltip's
+   * second line, and the attention icon when a machine is bad. `null`: none.
+   */
+  setUpdates(
+    u: { readonly line: string; readonly bad: boolean; readonly cancellable: string | null } | null,
+  ): void;
   stop(): void;
 }
 
@@ -246,12 +266,14 @@ export function driveTray(
   let lastTip = "";
   let lastAlert: boolean | null = null;
   let lastMenu = "";
+  let updates: { line: string; bad: boolean; cancellable: string | null } | null = null;
   const menuNow = () =>
     trayMenu({
       windowVisible: windows.visible,
       summary: last ? summaryLine(last) : "Starting…",
       notificationsPaused: last?.notificationsPaused ?? false,
       startAtLogin: driver.startAtLogin,
+      updates: updates ? { line: updates.line, cancellable: updates.cancellable !== null } : null,
     });
   const push = (opts: Parameters<FleetTray["update"]>[0]) => {
     try {
@@ -298,6 +320,15 @@ export function driveTray(
           driver.startAtLogin = on;
           syncMenu();
         }).catch(onError);
+      } else if (id === MENU.updates) {
+        try {
+          if (actions.openUpdates) actions.openUpdates();
+          else windows.toggle();
+        } catch (err) {
+          onError(err);
+        }
+      } else if (id === MENU.cancelUpdate) {
+        if (updates?.cancellable) actions.cancelUpdate?.(updates.cancellable);
       } else if (id === MENU.quit) actions.quit();
       syncMenu();
     }),
@@ -306,27 +337,40 @@ export function driveTray(
     startAtLogin: null,
     update(snap) {
       last = snap;
-      const tip = snap.setupComplete === false
-        ? "Fleet: set up"
-        : snap.auth === "needs-token" || snap.auth === "invalid"
-        ? "Fleet: sign in to GitHub"
-        : trayText(snap.summary);
-      const alert = trayAlert(snap);
-      if (alert !== lastAlert) {
-        const look = alert ? icons.alert : icons.normal;
-        push({ tooltip: tip, icon: look.icon, iconDark: look.iconDark });
-      } else if (tip !== lastTip) {
-        push({ tooltip: tip });
-      }
-      lastTip = tip;
-      lastAlert = alert;
-      syncMenu();
+      paint();
+    },
+    setUpdates(u) {
+      updates = u;
+      paint();
     },
     refreshMenu: syncMenu,
     stop() {
       for (const off of offs) off();
     },
   };
+  function paint() {
+    if (!last) {
+      syncMenu();
+      return;
+    }
+    const snap = last;
+    const base = snap.setupComplete === false
+      ? "Fleet: set up"
+      : snap.auth === "needs-token" || snap.auth === "invalid"
+      ? "Fleet: sign in to GitHub"
+      : trayText(snap.summary);
+    const tip = updates ? `${base}\n${updates.line}` : base;
+    const alert = trayAlert(snap) || (updates?.bad ?? false);
+    if (alert !== lastAlert) {
+      const look = alert ? icons.alert : icons.normal;
+      push({ tooltip: tip, icon: look.icon, iconDark: look.iconDark });
+    } else if (tip !== lastTip) {
+      push({ tooltip: tip });
+    }
+    lastTip = tip;
+    lastAlert = alert;
+    syncMenu();
+  }
   return driver;
 }
 

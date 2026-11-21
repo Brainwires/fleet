@@ -14,7 +14,7 @@
 // Settings view. Start at login is opt-in: set only when the settings change it.
 import config from "./.deno-desktop/config.json" with { type: "json" };
 import { resolveDesktopCapabilities, runDesktop } from "denext/desktop";
-import { fleetService } from "./desktop/fleet.ts";
+import { cancelUpdateRun, fleetService, onUpdatesTray, showUpdatesPanel } from "./desktop/fleet.ts";
 import { trayIcons } from "./lib/icons.ts";
 import type { Snapshot } from "./lib/model.ts";
 import { onNotificationClick } from "./lib/deno-host.ts";
@@ -149,6 +149,11 @@ if (app.tray) {
       openWindow();
     },
     setNotificationsPaused: (p) => fleet.setNotificationsPaused(p),
+    openUpdates: () => {
+      openWindow();
+      showUpdatesPanel();
+    },
+    cancelUpdate: (runId) => cancelUpdateRun(runId),
     setStartAtLogin: async (on) => {
       const state = await setLoginItem(desktopApi?.launchAtLogin, on);
       // Kept in the settings, so the Settings view agrees (the change itself is already made).
@@ -166,6 +171,8 @@ if (app.tray) {
   }, (err) => console.error("fleet: tray:", err instanceof Error ? err.name : "error"));
   fleet.onChange((snap) => tray!.update(snap));
   tray.update(fleet.snapshot());
+  // Machine updates: one menu line while a machine needs updates or a run is in flight.
+  onUpdatesTray((u) => tray!.setUpdates(u));
 } else {
   // No tray host (stock GNOME without the AppIndicator extension): the window is the only way in.
   openWindow();

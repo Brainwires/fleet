@@ -23,3 +23,20 @@ export const STREAM_STATE_FILE = "fleet-stream.json";
 export const DEFAULT_STREAM_PORT = 8790;
 /** The machines document for agents (lib/machines.ts agentMachines): the latest stats per machine. */
 export const MACHINES_FILE = "machines.json";
+
+// ---- machine updates (docs/updates.md); every file 0600 in the data folder ----
+
+/** The update status per machine (lib/updates/files.ts `StatusFile`), rewritten on change. */
+export const UPDATES_FILE = "updates.json";
+/** The maintenance windows, written only by the backend after the dialog. */
+export const UPDATE_SCHEDULES_FILE = "update-schedules.json";
+/** The one run in flight (its presence is the fleet-wide lock). */
+export const UPDATE_RUN_FILE = "update-run.json";
+/** The append-only run audit: one AuditEntry a line. */
+export const UPDATE_RUNS_FILE = "update-runs.jsonl";
+/** The scheduler's memory: the windows handled, the notices sent, each schedule's last outcomes. */
+export const UPDATE_SCHEDULER_FILE = "update-scheduler.json";
+/** The MCP server's request spool: one `<id>.json` per agent request awaiting the user. */
+export const UPDATE_REQUESTS_DIR = "update-requests";
+/** The machine-update notices already posted (lib/notify.ts keys, epoch ms). */
+export const UPDATE_NOTIFIED_FILE = "update-notified.json";

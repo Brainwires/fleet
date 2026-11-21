@@ -14,7 +14,9 @@ import { openExternal } from "denext/mobile";
 import { type FleetEvent, LOG_LIMIT, mergeEvents } from "../lib/events.ts";
 import type { Snapshot } from "../lib/model.ts";
 import { linkStatus } from "../lib/link-status.ts";
-import { CHANGED_EVENT, errorText, fleet, MACHINES_EVENT } from "./fleet-client.ts";
+import { CHANGED_EVENT, errorText, fleet, MACHINES_EVENT, UPDATES_EVENT } from "./fleet-client.ts";
+import type { UpdatesApi } from "./updates-panel.tsx";
+import type { UpdatesView } from "../lib/updates/view.ts";
 import { type MachinesApi, MachinesView } from "./machines-view.tsx";
 import type { RoutingApi } from "./routing-form.tsx";
 import type { MachinesView as MachinesViewData } from "../lib/machines.ts";
@@ -67,6 +69,20 @@ const isMac = () => typeof navigator !== "undefined" && /Mac/.test(navigator.use
 const MACHINES_API: MachinesApi = {
   history: (host, range) => fleet.machineHistory({ host, range }),
 };
+/** The Updates panel's calls. */
+const UPDATES_API: UpdatesApi = {
+  check: (machine) => fleet.updatesCheck({ machine }),
+  run: (a) => fleet.updatesRun(a),
+  restart: (a) => fleet.updatesRestart(a),
+  cancel: (runId) => fleet.updatesCancel({ runId }),
+  saveSchedule: (schedule) => fleet.updatesSaveSchedule({ schedule }),
+  setScheduleEnabled: (id, enabled) => fleet.updatesSetScheduleEnabled({ id, enabled }),
+  deleteSchedule: (id) => fleet.updatesDeleteSchedule({ id }),
+  approve: (a) => fleet.updatesApproveRequest(a),
+  deny: (id) => fleet.updatesDenyRequest({ id }),
+  openSoftwareUpdate: (machine) => fleet.updatesOpenSoftwareUpdate({ machine }),
+};
+
 /** The routing form's calls. */
 const ROUTING_API: RoutingApi = {
   load: () => fleet.routingLoad(),
@@ -133,12 +149,17 @@ export function FleetApp() {
       config?: boolean;
       routing?: boolean;
       machines?: boolean;
+      updates?: boolean;
     }
   >({
     pools: false,
   });
   /** The Machines screen's live view (read while the screen shows, and on each machines event). */
   const [machinesView, setMachinesView] = useState<MachinesViewData | null>(null);
+  /** Machine updates' view (read while the Machines screen shows, and on each updates event). */
+  const [updatesView, setUpdatesView] = useState<UpdatesView | null>(null);
+  /** The Machines screen's tab to open on (the tray's updates line asks for "updates"). */
+  const [machinesTab, setMachinesTab] = useState<"machines" | "routing" | "updates" | null>(null);
   /** The settings and machine facts while a settings screen is open (`null`: not loaded). */
   const [config, setConfig] = useState<{ settings: FleetSettings; machine: MachineInfo } | null>(
     null,
@@ -396,6 +417,34 @@ export function FleetApp() {
     };
   }, [screen]);
 
+  // Machine updates: the view while the Machines screen shows; the tray's line opens the panel.
+  useEffect(() => {
+    if (!pools.updates) return;
+    let live = true;
+    const read = () => {
+      if (screen !== "machines") return;
+      void fleet.updates().then((v) => {
+        if (live) setUpdatesView(v);
+      }).catch(() => {});
+    };
+    read();
+    const stop = onDesktopEvent<{ show?: unknown } | null>("fleet", UPDATES_EVENT, (data) => {
+      if (data && data.show === true) {
+        setMachinesTab("updates");
+        setDetailPool(null);
+        setScreen("machines");
+      }
+      read();
+    });
+    // A run's step changes on the backend's ticks: re-read every few seconds while one is live.
+    const t = setInterval(read, 5_000);
+    return () => {
+      live = false;
+      stop();
+      clearInterval(t);
+    };
+  }, [screen, pools.updates]);
+
   if (error && !snap) {
     return (
       <div class="signin">
@@ -503,8 +552,14 @@ export function FleetApp() {
         now={now}
         api={MACHINES_API}
         routing={pools.routing ? ROUTING_API : null}
-        initialTab={pools.machines ? "machines" : "routing"}
-        onBack={() => setScreen("main")}
+        initialTab={machinesTab ??
+          (pools.machines ? "machines" : pools.routing ? "routing" : "updates")}
+        onBack={() => {
+          setMachinesTab(null);
+          setScreen("main");
+        }}
+        updates={pools.updates ? updatesView : null}
+        updatesApi={pools.updates ? UPDATES_API : null}
       />
     );
   }
@@ -531,7 +586,9 @@ export function FleetApp() {
       refreshing={refreshing}
       events={events}
       onSettings={() => setScreen("settings")}
-      onMachines={pools.machines || pools.routing ? () => setScreen("machines") : undefined}
+      onMachines={pools.machines || pools.routing || pools.updates
+        ? () => setScreen("machines")
+        : undefined}
       onPoolDetail={(pool) => {
         setDetailTab("usage");
         setDetailPool(pool);

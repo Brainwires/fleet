@@ -12,7 +12,7 @@
     "check": "deno fmt --check && deno lint && deno task test",
     "icons": "deno run --allow-write=icons,public tools/make-icons.ts",
     "hooks": "deno run --allow-net=127.0.0.1 --allow-run=/usr/bin/security --allow-env=HOME \"--allow-read=$HOME/Library/Application Support/dev.brainwires.fleet,$HOME/Library/LaunchAgents,/Library/LaunchAgents,/Library/LaunchDaemons\" \"--allow-write=$HOME/Library/Application Support/dev.brainwires.fleet\" hooks-only.ts --settings \"$HOME/Library/Application Support/dev.brainwires.fleet/fleet-settings.json\"",
-    "mcp": "deno run --no-config --no-prompt \"--allow-read=$HOME/Library/Application Support/dev.brainwires.fleet\" mcp/fleet-mcp.ts --data-dir \"$HOME/Library/Application Support/dev.brainwires.fleet\"",
+    "mcp": "deno run --no-config --no-prompt \"--allow-read=$HOME/Library/Application Support/dev.brainwires.fleet\" \"--allow-write=$HOME/Library/Application Support/dev.brainwires.fleet/update-requests\" mcp/fleet-mcp.ts --data-dir \"$HOME/Library/Application Support/dev.brainwires.fleet\"",
     "stream": "deno run --no-config --no-prompt \"--allow-read=$HOME/Library/Application Support/dev.brainwires.fleet\" --allow-net=127.0.0.1 mcp/fleet-stream.ts --data-dir \"$HOME/Library/Application Support/dev.brainwires.fleet\""
   },
   "minimumDependencyAge": {

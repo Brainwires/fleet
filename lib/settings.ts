@@ -12,6 +12,8 @@
 // them, and every reader (the poller, classification, guardrails, notifications) follows.
 
 import { DEFAULT_STREAM_PORT } from "./agent-files.ts";
+import type { UpdatesConfig } from "./updates/model.ts";
+import { validateUpdatesConfig } from "./updates/config.ts";
 
 /** The schema version this build reads and writes. */
 export const SETTINGS_VERSION = 1;
@@ -202,6 +204,8 @@ export interface FleetSettings {
     readonly poolUnhealthy: boolean;
     readonly queuedLong: boolean;
     readonly protectedFailure: boolean;
+    /** Machine updates: warn / bad levels, restart windows, each run's outcome. */
+    readonly updates: boolean;
   };
   /** Start Fleet at login (applied when changed in the wizard, the Settings view or the tray). */
   readonly startAtLogin: boolean;
@@ -210,6 +214,8 @@ export interface FleetSettings {
   readonly integrations: {
     readonly runnerScheduler: RunnerSchedulerIntegration | null;
     readonly machines?: MachinesIntegration | null;
+    /** Machine updates (docs/updates.md); file-only, like `machines`. */
+    readonly updates?: UpdatesConfig | null;
   };
 }
 
@@ -225,7 +231,7 @@ export const DEFAULT_SETTINGS: FleetSettings = Object.freeze({
   },
   pools: { healthVariable: null },
   runnerHosts: [],
-  notifications: { poolUnhealthy: true, queuedLong: true, protectedFailure: true },
+  notifications: { poolUnhealthy: true, queuedLong: true, protectedFailure: true, updates: true },
   startAtLogin: false,
   webhooks: {
     enabled: false,
@@ -476,6 +482,7 @@ export function validateSettings(raw: unknown): SettingsResult {
     poolUnhealthy: r.bool(no.poolUnhealthy, "notifications.poolUnhealthy", true),
     queuedLong: r.bool(no.queuedLong, "notifications.queuedLong", true),
     protectedFailure: r.bool(no.protectedFailure, "notifications.protectedFailure", true),
+    updates: r.bool(no.updates, "notifications.updates", true),
   };
 
   const wo = r.obj(doc.webhooks, "webhooks");
@@ -644,6 +651,10 @@ export function validateSettings(raw: unknown): SettingsResult {
     if (url && tokenFile) machines = { url: url.replace(/\/$/, ""), tokenFile };
   }
 
+  const upd = validateUpdatesConfig(io.updates);
+  if (!upd.ok) r.errors.push(...upd.errors);
+  const updates = upd.ok ? upd.value : null;
+
   const setupComplete = r.bool(doc.setupComplete, "setupComplete", false);
   const startAtLogin = r.bool(doc.startAtLogin, "startAtLogin", false);
   if (r.errors.length) return { ok: false, errors: r.errors };
@@ -661,7 +672,11 @@ export function validateSettings(raw: unknown): SettingsResult {
       startAtLogin,
       webhooks,
       stream,
-      integrations: machines ? { runnerScheduler, machines } : { runnerScheduler },
+      integrations: {
+        runnerScheduler,
+        ...(machines ? { machines } : {}),
+        ...(updates ? { updates } : {}),
+      },
     },
   };
 }
