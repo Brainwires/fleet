@@ -1,0 +1,269 @@
+#!/bin/sh
+# fleet-update-apply: the root half of Fleet's update gate on an Ubuntu / Debian or Fedora host
+# (docs/updates.md). Installed root-owned, 0755, as /usr/local/sbin/fleet-update-apply; the update
+# account may run it through sudo with exactly one of these verbs (sudoers lists each, no wildcard):
+#
+#   busy              run /etc/fleet-update/busy.d/* (exit 10 from any = busy); JSON, exit 10 / 1 / 0
+#   install-security  start the install, detached (a transient systemd unit), and return:
+#                       apt: unattended-upgrade -v  (the origins unattended-upgrades allows, by
+#                            default the security pockets)
+#                       dnf: dnf -y upgrade --security
+#   install-all         apt: apt-get update, then apt-get -y upgrade --with-new-pkgs (never removes
+#                            a package)
+#                       dnf: dnf -y upgrade
+#   result            the last install's result document (state, exit code, output tail)
+#   verify            system state, failed units, docker, mounts, /etc/fleet-update/verify.d/*; JSON
+#   reboot            shutdown -r +1
+#
+# apt runs with DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l (needrestart lists, never
+# restarts a service), --force-confdef --force-confold (a changed config file keeps the local one)
+# and a 600 s dpkg lock wait. One install at a time (flock). No argument beyond the verb and no
+# input is read; anything else exits 64. Hooks run only when the hook and its folder are root-owned
+# and writable by root alone.
+
+set -u
+# --- Locations. Fixed: nothing here is read from the environment (sudo's env_reset clears it
+# --- anyway). The tests rewrite these three lines only, to point at a scratch tree and fakes.
+ROOT=
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+HOOK_UID=0
+# ---
+export PATH
+umask 022
+LC_ALL=C
+export LC_ALL
+
+SELF="$ROOT/usr/local/sbin/fleet-update-apply"
+ETC="$ROOT/etc/fleet-update"
+STATE="$ROOT/var/lib/fleet-update"
+UNIT=fleet-update-install
+CAP=4096
+# Seconds a busy hook / a verify hook may run (a verify hook may wait for services after a boot).
+BUSY_TIMEOUT=120
+VERIFY_TIMEOUT=900
+
+refuse() {
+  echo "fleet-update-apply: refused" >&2
+  exit 64
+}
+
+[ "$#" -ge 1 ] || refuse
+verb=$1
+case "$verb" in
+  busy | result | install-security | install-all | verify | reboot)
+    [ "$#" -eq 1 ] || refuse
+    ;;
+  __job)
+    # The detached install itself: started only by systemd-run below (systemd sets INVOCATION_ID;
+    # sudo's env_reset removes it, and sudoers never lists this verb).
+    [ "$#" -eq 2 ] || refuse
+    [ -n "${INVOCATION_ID-}" ] || refuse
+    case "$2" in install-security | install-all) ;; *) refuse ;; esac
+    ;;
+  *) refuse ;;
+esac
+
+# --- Helpers. ------------------------------------------------------------------------------------
+
+# stdin as JSON: `json str` is one string (its lines joined with \n), `json arr` an array of its
+# non-empty lines. Control characters are escaped; bytes >= 0x80 pass through.
+json() {
+  awk -v mode="$1" '
+    function enc(s,   i, n, o, c) {
+      n = length(s); o = ""
+      for (i = 1; i <= n; i++) { c = substr(s, i, 1); o = o ((c in esc) ? esc[c] : c) }
+      return o
+    }
+    BEGIN {
+      for (i = 1; i < 32; i++) esc[sprintf("%c", i)] = sprintf("\\u%04x", i)
+      esc["\177"] = "\\u007f"; esc["\\"] = "\\\\"; esc["\""] = "\\\""
+      if (mode == "arr") printf "["; else printf "\""
+      count = 0
+    }
+    mode == "arr" {
+      if ($0 == "") next
+      if (count++) printf ","
+      printf "\"%s\"", enc($0)
+      next
+    }
+    { if (NR > 1) printf "\\n"; printf "%s", enc($0) }
+    END { if (mode == "arr") printf "]"; else printf "\"" }'
+}
+
+TMP=$(mktemp) || exit 70
+trap 'rm -f "$TMP"' EXIT HUP INT TERM
+
+# apt | dnf | unknown, from /etc/os-release's ID and ID_LIKE.
+pkg_manager() {
+  ids=$(sed -n 's/^ID\(_LIKE\)\{0,1\}=//p' "$ROOT/etc/os-release" 2>/dev/null | tr -d "\"'" | tr '\n' ' ')
+  case " $ids " in
+    *" debian "* | *" ubuntu "*) echo apt ;;
+    *" fedora "* | *" rhel "*) echo dnf ;;
+    *) echo unknown ;;
+  esac
+}
+
+# Whether a path is owned by HOOK_UID and writable by its owner alone (`d`: a folder, `f`: an
+# executable file). A symlink never counts.
+owned() {
+  [ -L "$2" ] && return 1
+  if [ "$1" = d ]; then
+    [ -n "$(find "$2" -prune -type d -user "$HOOK_UID" ! -perm -0020 ! -perm -0002 -print 2>/dev/null)" ]
+  else
+    [ -n "$(find "$2" -prune -type f -user "$HOOK_UID" -perm -0100 ! -perm -0020 ! -perm -0002 -print 2>/dev/null)" ]
+  fi
+}
+
+# Run the hooks in folder $1, each capped at $2 seconds, sorted by name; print a JSON array of
+# {"name","ok","exit","out"}. Sets HOOKS_BUSY (any exit 10) and HOOKS_FAILED (any other non-zero).
+HOOKS_BUSY=0
+HOOKS_FAILED=0
+run_hooks() {
+  printf '['
+  first=1
+  if [ -d "$1" ] && owned d "$1"; then
+    for f in "$1"/*; do
+      [ -e "$f" ] || continue
+      name=${f##*/}
+      case "$name" in .* | *[!A-Za-z0-9._-]*) continue ;; esac
+      owned f "$f" || continue
+      timeout "$2" "$f" </dev/null >"$TMP" 2>&1
+      c=$?
+      if [ "$c" -eq 10 ]; then HOOKS_BUSY=1; elif [ "$c" -ne 0 ]; then HOOKS_FAILED=1; fi
+      if [ "$c" -eq 0 ]; then hook_ok=true; else hook_ok=false; fi
+      [ "$first" -eq 1 ] || printf ','
+      first=0
+      printf '{"name":"%s","ok":%s,"exit":%d,"out":' "$name" "$hook_ok" "$c"
+      head -c 1024 "$TMP" | json str
+      printf '}'
+    done
+  fi
+  printf ']'
+}
+
+# The result document (lib/updates/model.ts parseResultDoc), written atomically:
+# write_result <verb> <running|succeeded|failed> <exitCode|null> <startedAt> <finishedAt|null> <rebootRequired>
+write_result() {
+  mkdir -p "$STATE"
+  r_tmp="$STATE/result.json.tmp"
+  {
+    printf '{"v":1,"verb":"%s","state":"%s","exitCode":%s,"startedAt":%s,"finishedAt":%s,"rebootRequired":%s,"tail":' \
+      "$1" "$2" "$3" "$4" "$5" "$6"
+    if [ -f "$STATE/install.log" ]; then tail -c "$CAP" "$STATE/install.log" | json str; else printf '""'; fi
+    printf '}\n'
+  } >"$r_tmp" && mv -f "$r_tmp" "$STATE/result.json"
+}
+
+# true | false: the host needs a reboot now.
+reboot_flag() {
+  case "$(pkg_manager)" in
+    apt) if [ -e "$ROOT/var/run/reboot-required" ]; then echo true; else echo false; fi ;;
+    dnf) if dnf needs-restarting -r >/dev/null 2>&1; then echo false; else echo true; fi ;;
+    *) echo false ;;
+  esac
+}
+
+start_install() {
+  pm=$(pkg_manager)
+  if [ "$pm" = unknown ]; then
+    echo "fleet-update-apply: unsupported OS" >&2
+    exit 69
+  fi
+  if systemctl is-active --quiet "$UNIT.service"; then
+    echo '{"state":"running"}'
+    exit 75
+  fi
+  mkdir -p "$STATE"
+  : >"$STATE/install.log"
+  now=$(date +%s)
+  write_result "$1" running null "$now" null false
+  if ! systemd-run --unit="$UNIT" --collect --quiet --property=RuntimeMaxSec=3600 -- "$SELF" __job "$1"; then
+    write_result "$1" failed 1 "$now" "$(date +%s)" false
+    echo '{"state":"failed"}'
+    exit 1
+  fi
+  echo '{"state":"started"}'
+}
+
+run_job() {
+  pm=$(pkg_manager)
+  mkdir -p "$STATE"
+  exec 9>"$STATE/lock"
+  flock -w 0 9 || exit 75
+  started=$(date +%s)
+  log="$STATE/install.log"
+  : >"$log"
+  write_result "$1" running null "$started" null false
+  DEBIAN_FRONTEND=noninteractive
+  NEEDRESTART_MODE=l
+  APT_LISTCHANGES_FRONTEND=none
+  export DEBIAN_FRONTEND NEEDRESTART_MODE APT_LISTCHANGES_FRONTEND
+  case "$pm:$1" in
+    apt:install-security)
+      unattended-upgrade -v >>"$log" 2>&1
+      ;;
+    apt:install-all)
+      apt-get -q -o DPkg::Lock::Timeout=600 update >>"$log" 2>&1 &&
+        apt-get -q -y -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef \
+          -o Dpkg::Options::=--force-confold upgrade --with-new-pkgs >>"$log" 2>&1
+      ;;
+    dnf:install-security)
+      dnf -y upgrade --security >>"$log" 2>&1
+      ;;
+    dnf:install-all)
+      dnf -y upgrade >>"$log" 2>&1
+      ;;
+    *)
+      echo "unsupported OS" >>"$log"
+      false
+      ;;
+  esac
+  c=$?
+  if [ "$c" -eq 0 ]; then state=succeeded; else state=failed; fi
+  write_result "$1" "$state" "$c" "$started" "$(date +%s)" "$(reboot_flag)"
+  exit "$c"
+}
+
+# The verify document (lib/updates/model.ts parseVerifyDoc); exit 0 when the host looks healthy.
+verify() {
+  system=$(systemctl is-system-running 2>/dev/null | head -n 1 | tr -cd 'a-z-')
+  if [ -n "$(systemctl list-unit-files docker.service --no-legend 2>/dev/null)" ]; then
+    if [ "$(systemctl is-active docker.service 2>/dev/null)" = active ]; then docker=active; else docker=inactive; fi
+  else
+    docker=absent
+  fi
+  free=$(df -Pm / 2>/dev/null | awk 'NR == 2 { print $4 + 0 }')
+  printf '{"v":1,"system":"%s","docker":"%s","failedUnits":' "$system" "$docker"
+  systemctl list-units --state=failed --plain --no-legend --no-pager 2>/dev/null |
+    awk '{ print $1 }' | head -n 100 | json arr
+  printf ',"mounts":'
+  awk '{ print $2 }' "$ROOT/proc/mounts" 2>/dev/null | head -n 400 | json arr
+  printf ',"freeDiskMb":%s,"xcodePlatforms":null,"rebootRequired":%s,"checks":' "${free:-null}" "$(reboot_flag)"
+  run_hooks "$ETC/verify.d" "$VERIFY_TIMEOUT"
+  ok=true
+  case "$system" in running | degraded) ;; *) ok=false ;; esac
+  [ "$docker" != inactive ] || ok=false
+  if [ "$HOOKS_FAILED" -ne 0 ] || [ "$HOOKS_BUSY" -ne 0 ]; then ok=false; fi
+  printf ',"ok":%s}\n' "$ok"
+  [ "$ok" = true ]
+}
+
+# --- The verb. -----------------------------------------------------------------------------------
+case "$verb" in
+  busy)
+    printf '{"v":1,"checks":'
+    run_hooks "$ETC/busy.d" "$BUSY_TIMEOUT"
+    if [ "$HOOKS_BUSY" -ne 0 ]; then b=true; elif [ "$HOOKS_FAILED" -ne 0 ]; then b=null; else b=false; fi
+    printf ',"busy":%s}\n' "$b"
+    [ "$HOOKS_BUSY" -eq 0 ] || exit 10
+    [ "$HOOKS_FAILED" -eq 0 ] || exit 1
+    exit 0
+    ;;
+  result)
+    if [ -f "$STATE/result.json" ]; then head -c 65536 "$STATE/result.json"; else echo '{"v":1,"state":"none","startedAt":null,"exitCode":null,"rebootRequired":false,"tail":""}'; fi
+    ;;
+  install-security | install-all) start_install "$verb" ;;
+  __job) run_job "$2" ;;
+  verify) verify ;;
+  reboot) exec shutdown -r +1 ;;
+esac

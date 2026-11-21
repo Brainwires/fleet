@@ -1,0 +1,180 @@
+#!/bin/sh
+# fleet-update-gate: the forced command of Fleet's update account on an Ubuntu / Debian or Fedora
+# host (docs/updates.md). Installed root-owned, 0755, as /usr/local/sbin/fleet-update-gate and named
+# in /etc/ssh/authorized_keys.d/<account> by `command="..."`:
+#
+#   command="/usr/local/sbin/fleet-update-gate status",restrict,from="..." <status key>
+#   command="/usr/local/sbin/fleet-update-gate",restrict,from="..." <update key>
+#
+# It reads one verb from SSH_ORIGINAL_COMMAND and runs exactly that verb's command; anything else,
+# including extra words, quoting or shell syntax, exits 64 having run nothing. The verb is matched
+# against fixed words and never evaluated, split or passed to a shell. The status key's line passes
+# `status`, which pins it to that verb.
+#
+#   status            the pending updates, the reboot flag and the index age, as one JSON document
+#                     (no root; never refreshes the package index)
+#   boot-id           this boot's id (no root)
+#   busy | install-security | install-all | result | verify | reboot
+#                     `sudo -n /usr/local/sbin/fleet-update-apply <verb>` (sudoers lists each one)
+
+set -u
+# --- Locations. Fixed: nothing here is read from the environment. The tests rewrite these two
+# --- lines only, to point at a scratch tree and fake programs.
+ROOT=
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# ---
+export PATH
+umask 077
+LC_ALL=C
+export LC_ALL
+
+APPLY="$ROOT/usr/local/sbin/fleet-update-apply"
+# At most this much of a command's output goes into the document.
+CAP=65536
+ERRCAP=2048
+
+refuse() {
+  echo "fleet-update-gate: refused" >&2
+  exit 64
+}
+
+# --- Which verb. ---------------------------------------------------------------------------------
+if [ "$#" -gt 1 ]; then refuse; fi
+if [ "$#" -eq 1 ]; then
+  [ "$1" = status ] || refuse
+  case "${SSH_ORIGINAL_COMMAND-}" in
+    "" | status) verb=status ;;
+    *) refuse ;;
+  esac
+else
+  verb=${SSH_ORIGINAL_COMMAND-}
+fi
+case "$verb" in
+  status | busy | install-security | install-all | result | verify | reboot | boot-id) ;;
+  *) refuse ;;
+esac
+
+# --- Helpers. ------------------------------------------------------------------------------------
+
+# stdin as JSON: `json str` is one string (its lines joined with \n), `json arr` an array of its
+# non-empty lines. Control characters are escaped; bytes >= 0x80 pass through.
+json() {
+  awk -v mode="$1" '
+    function enc(s,   i, n, o, c) {
+      n = length(s); o = ""
+      for (i = 1; i <= n; i++) { c = substr(s, i, 1); o = o ((c in esc) ? esc[c] : c) }
+      return o
+    }
+    BEGIN {
+      for (i = 1; i < 32; i++) esc[sprintf("%c", i)] = sprintf("\\u%04x", i)
+      esc["\177"] = "\\u007f"; esc["\\"] = "\\\\"; esc["\""] = "\\\""
+      if (mode == "arr") printf "["; else printf "\""
+      count = 0
+    }
+    mode == "arr" {
+      if ($0 == "") next
+      if (count++) printf ","
+      printf "\"%s\"", enc($0)
+      next
+    }
+    { if (NR > 1) printf "\\n"; printf "%s", enc($0) }
+    END { if (mode == "arr") printf "]"; else printf "\"" }'
+}
+
+TMP_OUT=$(mktemp) || exit 70
+trap 'rm -f "$TMP_OUT"' EXIT HUP INT TERM
+
+# Run a fixed command with no input: its exit code in RC, its stdout and stderr in TMP_OUT.
+capture() {
+  "$@" >"$TMP_OUT" 2>&1 </dev/null
+  RC=$?
+}
+
+# TMP_OUT, capped, as one JSON string.
+captured() {
+  head -c "$CAP" "$TMP_OUT" | json str
+}
+
+# A file's mtime in epoch seconds, or null.
+mtime() {
+  if [ -e "$1" ]; then date -r "$1" +%s 2>/dev/null || echo null; else echo null; fi
+}
+
+# apt | dnf | unknown, from /etc/os-release's ID and ID_LIKE.
+pkg_manager() {
+  ids=$(sed -n 's/^ID\(_LIKE\)\{0,1\}=//p' "$ROOT/etc/os-release" 2>/dev/null | tr -d "\"'" | tr '\n' ' ')
+  case " $ids " in
+    *" debian "* | *" ubuntu "*) echo apt ;;
+    *" fedora "* | *" rhel "*) echo dnf ;;
+    *) echo unknown ;;
+  esac
+}
+
+boot_id() {
+  head -c 64 "$ROOT/proc/sys/kernel/random/boot_id" 2>/dev/null | tr -cd '0-9a-f-'
+}
+
+# {"os":"ubuntu","apt":"<apt list --upgradable>","rebootRequired":<epoch s>|true|null,
+#  "rebootPkgs":"…","indexStamp":<epoch s>|null,"bootId":"…"}   (lib/updates/collect-apt.ts)
+status_apt() {
+  reboot_file="$ROOT/var/run/reboot-required"
+  since=null
+  if [ -e "$reboot_file" ]; then
+    since=$(mtime "$reboot_file")
+    [ "$since" != null ] || since=true
+  fi
+  capture apt list --upgradable
+  printf '{"v":1,"os":"ubuntu","apt":'
+  captured
+  printf ',"aptExit":%d,"rebootRequired":%s,"rebootPkgs":' "$RC" "$since"
+  head -c "$ERRCAP" "$reboot_file.pkgs" 2>/dev/null | json str
+  printf ',"indexStamp":%s,"bootId":"%s"}\n' \
+    "$(mtime "$ROOT/var/lib/apt/periodic/update-success-stamp")" "$(boot_id)"
+}
+
+# {"os":"fedora","checkUpdate":"…","security":"…","needsRestartingCode":<n>,"needsRestarting":"…",
+#  "indexStamp":<epoch s>|null,"bootId":"…"}   (lib/updates/collect-dnf.ts)
+status_dnf() {
+  stamp=null
+  for f in "$ROOT/var/cache/dnf/last_makecache" "$ROOT/var/cache/libdnf5/last_makecache"; do
+    if [ -e "$f" ]; then
+      stamp=$(mtime "$f")
+      break
+    fi
+  done
+  printf '{"v":1,"os":"fedora","checkUpdate":'
+  capture dnf -q check-update
+  captured
+  printf ',"checkUpdateExit":%d,"security":' "$RC"
+  capture dnf -q updateinfo list --security
+  captured
+  capture dnf needs-restarting -r
+  printf ',"needsRestartingCode":%d,"needsRestarting":' "$RC"
+  captured
+  printf ',"indexStamp":%s,"bootId":"%s"}\n' "$stamp" "$(boot_id)"
+}
+
+# --- The verb. -----------------------------------------------------------------------------------
+case "$verb" in
+  status)
+    case "$(pkg_manager)" in
+      apt) status_apt ;;
+      dnf) status_dnf ;;
+      *)
+        echo "fleet-update-gate: unsupported OS" >&2
+        exit 69
+        ;;
+    esac
+    ;;
+  boot-id)
+    id=$(boot_id)
+    [ -n "$id" ] || exit 1
+    echo "$id"
+    ;;
+  busy) exec sudo -n "$APPLY" busy ;;
+  install-security) exec sudo -n "$APPLY" install-security ;;
+  install-all) exec sudo -n "$APPLY" install-all ;;
+  result) exec sudo -n "$APPLY" result ;;
+  verify) exec sudo -n "$APPLY" verify ;;
+  reboot) exec sudo -n "$APPLY" reboot ;;
+esac

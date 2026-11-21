@@ -82,7 +82,8 @@ export default {
       netConnect: ["api.github.com", ...LOG_HOSTS, ...INTERNAL.net],
       // `gh auth token`, a webhook secret from the macOS login keychain, and for the embedded Fleet
       // Notifier (lib/notifier.ts) LaunchServices' lsregister and `open` (its permission instance),
-      // by absolute path only; an internal build adds the runner scheduler's pool commands.
+      // by absolute path only; an internal build adds the runner scheduler's pool commands and,
+      // with the machine updates section, /usr/bin/ssh (lib/build-grants.ts).
       run: [...ALL_GH_PATHS, SECURITY_BIN, LSREGISTER, OPEN_BIN, ...INTERNAL.run],
       // The settings, state, event log and webhook spool: the app's own data folder only
       // ($DENO_DESKTOP_DATA on the pinned runtime). No GitHub token is ever written there (the

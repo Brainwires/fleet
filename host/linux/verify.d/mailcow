@@ -1,0 +1,89 @@
+#!/bin/sh
+# verify.d/mailcow: after an update or a reboot, every container of the mailcow compose project is
+# running (and healthy where it has a health check) within 10 minutes of boot, and SMTP (25),
+# submission (587) and IMAPS (993) listen on this host (docs/updates.md).
+#
+# Install as /etc/fleet-update/verify.d/mailcow (root-owned, 0755) with its config in
+# /etc/fleet-update/mailcow.conf (root-owned, 0644), one line:
+#
+#   MAILCOW_DIR=/opt/mailcow-dockerized
+#
+# The config is parsed, never sourced. Exit 0 = healthy; anything else fails verify and names what.
+
+set -u
+# --- Fixed; the tests rewrite these two lines only.
+ROOT=
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# ---
+export PATH
+LC_ALL=C
+export LC_ALL
+
+CONF="$ROOT/etc/fleet-update/mailcow.conf"
+# How long after boot the containers may take to come up, and how often to look meanwhile.
+BOOT_GRACE=600
+POLL=10
+PORTS="25 587 993"
+
+dir=$(sed -n 's/^MAILCOW_DIR=//p' "$CONF" 2>/dev/null | head -n 1)
+case "$dir" in
+  /*) ;;
+  *)
+    echo "mailcow: no MAILCOW_DIR in $CONF"
+    exit 2
+    ;;
+esac
+case "$dir" in *[!A-Za-z0-9._/-]* | *..*)
+  echo "mailcow: MAILCOW_DIR has characters this hook doesn't accept"
+  exit 2
+  ;;
+esac
+if [ ! -d "$dir" ]; then
+  echo "mailcow: $dir is not a folder"
+  exit 2
+fi
+
+uptime_s() {
+  awk '{ printf "%d\n", $1 }' "$ROOT/proc/uptime" 2>/dev/null || echo 0
+}
+
+# Prints the containers that aren't up yet (one per line); exit 0 when every one is, 1 when some
+# aren't, 2 when compose can't list them.
+not_up() {
+  list=$(cd "$dir" && docker compose ps --all --format '{{.Service}} {{.State}} {{.Health}}' 2>&1) || {
+    echo "docker compose ps failed: $(printf '%s' "$list" | head -n 1)"
+    return 2
+  }
+  [ -n "$list" ] || {
+    echo "no containers in the mailcow project"
+    return 1
+  }
+  printf '%s\n' "$list" | awk '
+    NF == 0 { next }
+    { state = $2; health = (NF >= 3) ? $3 : "" }
+    state != "running" || (health != "" && health != "healthy") { print $1 " " state (health != "" ? " (" health ")" : ""); bad = 1 }
+    END { exit bad }'
+}
+
+while :; do
+  bad=$(not_up)
+  c=$?
+  [ "$c" -eq 0 ] && break
+  if [ "$(uptime_s)" -ge "$BOOT_GRACE" ] || [ "$c" -eq 2 ]; then
+    echo "mailcow: not up: $(printf '%s' "$bad" | tr '\n' ',' | sed 's/,$//')"
+    exit 1
+  fi
+  sleep "$POLL"
+done
+
+listening=$(ss -Hltn 2>/dev/null | awk '{ a = $4; sub(/.*:/, "", a); print a }')
+missing=""
+for p in $PORTS; do
+  printf '%s\n' "$listening" | grep -qx "$p" || missing="$missing $p"
+done
+if [ -n "$missing" ]; then
+  echo "mailcow: nothing listens on port(s)$missing"
+  exit 1
+fi
+echo "mailcow: all containers up; ports $PORTS listening"
+exit 0

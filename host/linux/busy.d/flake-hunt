@@ -1,0 +1,20 @@
+#!/bin/sh
+# busy.d/flake-hunt: a host running a long flake hunt is busy (docs/updates.md). The hunt's
+# containers carry the label flake-hunt=1. Install as /etc/fleet-update/busy.d/flake-hunt, root-owned,
+# 0755. Exit 10 = busy (the first output line is the reason), 0 = free, anything else = can't tell.
+
+set -u
+# --- Fixed; the tests rewrite this line only.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# ---
+export PATH
+
+ids=$(docker ps -q --filter label=flake-hunt=1) || {
+  echo "docker ps failed"
+  exit 1
+}
+if [ -n "$ids" ]; then
+  echo "flake hunt running"
+  exit 10
+fi
+exit 0
