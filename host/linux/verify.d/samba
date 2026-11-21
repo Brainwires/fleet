@@ -1,0 +1,65 @@
+#!/bin/sh
+# verify.d/samba: after an update or a reboot, smbd is active (and nmbd, when it is enabled),
+# `testparm -s` loads the configuration without an error, and every configured share path is
+# mounted (docs/updates.md).
+#
+# Install as /etc/fleet-update/verify.d/samba (root-owned, 0755) with its config in
+# /etc/fleet-update/samba.conf (root-owned, 0644), one line per share path that must be a mount:
+#
+#   SHARE_PATH=/srv/share
+#
+# The config is parsed, never sourced. Exit 0 = healthy; anything else fails verify and names what.
+
+set -u
+# --- Fixed; the tests rewrite these two lines only.
+ROOT=
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# ---
+export PATH
+LC_ALL=C
+export LC_ALL
+
+CONF="$ROOT/etc/fleet-update/samba.conf"
+problems=""
+add() { problems="$problems; $1"; }
+
+[ "$(systemctl is-active smbd.service 2>/dev/null)" = active ] || add "smbd is not active"
+if [ "$(systemctl is-enabled nmbd.service 2>/dev/null)" = enabled ]; then
+  [ "$(systemctl is-active nmbd.service 2>/dev/null)" = active ] || add "nmbd is enabled but not active"
+fi
+
+out=$(testparm -s 2>&1 >/dev/null)
+c=$?
+if [ "$c" -ne 0 ]; then
+  add "testparm -s failed ($c)"
+elif printf '%s\n' "$out" | grep -Eqi '^(ERROR|.*unknown parameter)'; then
+  add "testparm -s: $(printf '%s\n' "$out" | grep -Ei '^(ERROR|.*unknown parameter)' | head -n 1)"
+fi
+
+paths=$(sed -n 's/^SHARE_PATH=//p' "$CONF" 2>/dev/null)
+[ -n "$paths" ] || add "no SHARE_PATH in $CONF"
+for p in $paths; do
+  case "$p" in
+    /*) ;;
+    *)
+      add "share path $p is not absolute"
+      continue
+      ;;
+  esac
+  case "$p" in *[!A-Za-z0-9._/-]*)
+    add "share path has characters this hook doesn't accept"
+    continue
+    ;;
+  esac
+  p=${p%/}
+  [ -n "$p" ] || p=/
+  awk -v want="$p" '$2 == want { found = 1 } END { exit !found }' "$ROOT/proc/mounts" 2>/dev/null ||
+    add "$p is not mounted"
+done
+
+if [ -n "$problems" ]; then
+  echo "samba:${problems#;}"
+  exit 1
+fi
+echo "samba: smbd active, configuration loads, shares mounted"
+exit 0

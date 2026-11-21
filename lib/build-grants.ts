@@ -1,11 +1,14 @@
 // The extra permissions an internal build bakes (denext.config.ts), derived from the build machine's
 // local config (lib/settings.ts LOCAL_CONFIG_FILE) instead of from anything in this repo: the runner
 // scheduler integration's pool commands and routing helper (`--allow-run`), a webhook spool folder
-// outside the app's data folder (`--allow-write`) and the machines service's address (`--allow-net`). Only with FLEET_INTERNAL=1; a release build gets none of it.
+// outside the app's data folder (`--allow-write`), the machines service's address (`--allow-net`)
+// and, with the machine updates section (`integrations.updates`, docs/updates.md), the ssh client
+// (`--allow-run`, /usr/bin/ssh only). Only with FLEET_INTERNAL=1; a release build gets none of it.
 
 import { APP_ID } from "./agent-files.ts";
 import { poolPaths, poolPrograms } from "./controls.ts";
 import { expandHome, LOCAL_CONFIG_FILE, validateSettings } from "./settings.ts";
+import { SSH_BIN, sshProgram } from "./updates/remote.ts";
 
 /** The grants. */
 export interface BuildGrants {
@@ -25,6 +28,8 @@ export function grantsFromConfig(raw: unknown, home: string | null): BuildGrants
   // The routing helper, like the configuration helper (controls.ts poolPrograms covers that one).
   const routing = expandHome(s.integrations.runnerScheduler?.controls?.routingHelper ?? "", home);
   if (routing) run.push(routing);
+  const ssh = updatesSsh(raw);
+  if (ssh) run.push(ssh);
   const net: string[] = [];
   if (s.integrations.machines) {
     const u = new URL(s.integrations.machines.url);
@@ -36,6 +41,23 @@ export function grantsFromConfig(raw: unknown, home: string | null): BuildGrants
     if (dir) write.push(dir);
   }
   return { run: [...new Set(run)], write, net };
+}
+
+/**
+ * The ssh client when the local config has the machine updates section (read from the raw document:
+ * the section is validated by lib/updates/config.ts, not lib/settings.ts). Only SSH_BIN is ever
+ * granted; a section naming another program fails the build rather than bake it.
+ */
+function updatesSsh(raw: unknown): typeof SSH_BIN | null {
+  const obj = (v: unknown): Record<string, unknown> | null =>
+    typeof v === "object" && v !== null && !Array.isArray(v) ? v as Record<string, unknown> : null;
+  const updates = obj(obj(obj(raw)?.integrations)?.updates);
+  if (!updates) return null;
+  const program = sshProgram(obj(updates.ssh)?.program);
+  if (!program) {
+    throw new Error(`the local config's integrations.updates.ssh.program must be ${SSH_BIN}`);
+  }
+  return program;
 }
 
 /** Where the build machine's local config is: $FLEET_LOCAL_CONFIG, else the macOS data folder's. */

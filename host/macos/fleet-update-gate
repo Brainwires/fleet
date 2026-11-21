@@ -1,0 +1,280 @@
+#!/bin/sh
+# fleet-update-gate: the forced command of Fleet's update account on a Mac (docs/updates.md).
+# Installed root-owned, 0755, as /usr/local/sbin/fleet-update-gate and named in the account's
+# root-owned authorized_keys by `command="..."`:
+#
+#   command="/usr/local/sbin/fleet-update-gate status",restrict,from="..." <status key>
+#   command="/usr/local/sbin/fleet-update-gate",restrict,from="..." <update key>
+#
+# It reads one verb from SSH_ORIGINAL_COMMAND and runs exactly that verb's command; anything else
+# exits 64 having run nothing. The verb is matched against fixed words, never evaluated.
+#
+#   status            softwareupdate -l and the iOS platform list, as one JSON document (no root)
+#   boot-id           this boot's session id (no root)
+#   busy              /etc/fleet-update/busy.d/* (exit 10 from any = busy)
+#   install-security  sudo -n /usr/sbin/softwareupdate -i -r   (recommended updates), detached
+#   install-all       sudo -n /usr/sbin/softwareupdate -i -a   (every update), detached
+#   result            the last install's result document
+#   verify            the iOS platform list against the one taken before the install, and
+#                     /etc/fleet-update/verify.d/*
+#   reboot            sudo -n /sbin/shutdown -r +1
+#
+# The iOS platform check only lists folder names (read-only). Nothing here removes, moves, manages
+# or downloads Xcode platforms, simulator runtimes or device support, and no Xcode tool is run.
+
+set -u
+# --- Locations. Fixed: nothing here is read from the environment. The tests rewrite these three
+# --- lines only, to point at a scratch tree, fake programs and the test user.
+ROOT=
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+HOOK_UID=0
+# ---
+export PATH
+umask 077
+LC_ALL=C
+export LC_ALL
+
+SWU="$ROOT/usr/sbin/softwareupdate"
+SHUTDOWN="$ROOT/sbin/shutdown"
+ETC="$ROOT/etc/fleet-update"
+# The account's own state (its home is /var/<account>): results, the install log, the baseline.
+STATE="${HOME:-/nonexistent}/fleet-update"
+# Folders whose entry names make up the iOS platform list (listed, never changed).
+PLATFORM_DIRS="$ROOT/Library/Developer/CoreSimulator/Images $ROOT/Library/Developer/CoreSimulator/Volumes $ROOT/System/Library/AssetsV2/com_apple_MobileAsset_iOSSimulatorRuntime"
+CAP=65536
+BUSY_TIMEOUT=120
+VERIFY_TIMEOUT=900
+
+refuse() {
+  echo "fleet-update-gate: refused" >&2
+  exit 64
+}
+
+# --- Which verb. ---------------------------------------------------------------------------------
+if [ "$#" -gt 1 ]; then refuse; fi
+if [ "$#" -eq 1 ]; then
+  [ "$1" = status ] || refuse
+  case "${SSH_ORIGINAL_COMMAND-}" in
+    "" | status) verb=status ;;
+    *) refuse ;;
+  esac
+else
+  verb=${SSH_ORIGINAL_COMMAND-}
+fi
+case "$verb" in
+  status | busy | install-security | install-all | result | verify | reboot | boot-id) ;;
+  *) refuse ;;
+esac
+
+# --- Helpers. ------------------------------------------------------------------------------------
+
+# stdin as JSON: `json str` is one string (its lines joined with \n), `json arr` an array of its
+# non-empty lines. Control characters are escaped; bytes >= 0x80 pass through.
+json() {
+  awk -v mode="$1" '
+    function enc(s,   i, n, o, c) {
+      n = length(s); o = ""
+      for (i = 1; i <= n; i++) { c = substr(s, i, 1); o = o ((c in esc) ? esc[c] : c) }
+      return o
+    }
+    BEGIN {
+      for (i = 1; i < 32; i++) esc[sprintf("%c", i)] = sprintf("\\u%04x", i)
+      esc["\177"] = "\\u007f"; esc["\\"] = "\\\\"; esc["\""] = "\\\""
+      if (mode == "arr") printf "["; else printf "\""
+      count = 0
+    }
+    mode == "arr" {
+      if ($0 == "") next
+      if (count++) printf ","
+      printf "\"%s\"", enc($0)
+      next
+    }
+    { if (NR > 1) printf "\\n"; printf "%s", enc($0) }
+    END { if (mode == "arr") printf "]"; else printf "\"" }'
+}
+
+TMP_OUT=$(mktemp) || exit 70
+trap 'rm -f "$TMP_OUT"' EXIT HUP INT TERM
+
+# Run a fixed command with no input: exit code in RC, stdout and stderr together in TMP_OUT.
+capture() {
+  "$@" >"$TMP_OUT" 2>&1 </dev/null
+  RC=$?
+}
+
+# The iOS platform list: the entry names in PLATFORM_DIRS, sorted (read-only).
+platforms() {
+  for d in $PLATFORM_DIRS; do
+    [ -d "$d" ] || continue
+    for e in "$d"/*; do
+      [ -e "$e" ] || continue
+      printf '%s/%s\n' "${d##*/}" "${e##*/}"
+    done
+  done | sort
+}
+
+boot_id() {
+  sysctl -n kern.bootsessionuuid 2>/dev/null | head -c 64 | tr -cd '0-9A-Fa-f-'
+}
+
+owned() {
+  [ -L "$2" ] && return 1
+  if [ "$1" = d ]; then
+    [ -n "$(find "$2" -prune -type d -user "$HOOK_UID" ! -perm -0020 ! -perm -0002 -print 2>/dev/null)" ]
+  else
+    [ -n "$(find "$2" -prune -type f -user "$HOOK_UID" -perm -0100 ! -perm -0020 ! -perm -0002 -print 2>/dev/null)" ]
+  fi
+}
+
+# Run one hook with a time cap (macOS has no timeout(1)); its exit code.
+run_capped() {
+  "$2" </dev/null >"$TMP_OUT" 2>&1 &
+  pid=$!
+  (
+    sleep "$1"
+    kill -9 "$pid" 2>/dev/null
+  ) </dev/null >/dev/null 2>&1 &
+  watcher=$!
+  wait "$pid"
+  c=$?
+  kill "$watcher" 2>/dev/null
+  return "$c"
+}
+
+HOOKS_BUSY=0
+HOOKS_FAILED=0
+run_hooks() {
+  printf '['
+  first=1
+  if [ -d "$1" ] && owned d "$1"; then
+    for f in "$1"/*; do
+      [ -e "$f" ] || continue
+      name=${f##*/}
+      case "$name" in .* | *[!A-Za-z0-9._-]*) continue ;; esac
+      owned f "$f" || continue
+      run_capped "$2" "$f"
+      c=$?
+      if [ "$c" -eq 10 ]; then HOOKS_BUSY=1; elif [ "$c" -ne 0 ]; then HOOKS_FAILED=1; fi
+      if [ "$c" -eq 0 ]; then hook_ok=true; else hook_ok=false; fi
+      [ "$first" -eq 1 ] || printf ','
+      first=0
+      printf '{"name":"%s","ok":%s,"exit":%d,"out":' "$name" "$hook_ok" "$c"
+      head -c 1024 "$TMP_OUT" | json str
+      printf '}'
+    done
+  fi
+  printf ']'
+}
+
+# The result document (lib/updates/model.ts parseResultDoc), written atomically:
+# write_result <verb> <running|succeeded|failed> <exitCode|null> <startedAt> <finishedAt|null>
+write_result() {
+  r_tmp="$STATE/result.json.tmp"
+  restart=false
+  if [ "$2" = succeeded ] && grep -qi 'restart' "$STATE/install.log" 2>/dev/null; then restart=true; fi
+  {
+    printf '{"v":1,"verb":"%s","state":"%s","exitCode":%s,"startedAt":%s,"finishedAt":%s,"rebootRequired":%s,"tail":' \
+      "$1" "$2" "$3" "$4" "$5" "$restart"
+    if [ -f "$STATE/install.log" ]; then tail -c 4096 "$STATE/install.log" | json str; else printf '""'; fi
+    printf '}\n'
+  } >"$r_tmp" && mv -f "$r_tmp" "$STATE/result.json"
+}
+
+# One install at a time: a lock folder holding the installer's pid (a stale one is taken over).
+take_lock() {
+  if mkdir "$STATE/lock" 2>/dev/null; then return 0; fi
+  old=$(cat "$STATE/lock/pid" 2>/dev/null)
+  if [ -n "$old" ] && kill -0 "$old" 2>/dev/null; then return 1; fi
+  rm -rf "$STATE/lock"
+  mkdir "$STATE/lock" 2>/dev/null
+}
+
+install_job() {
+  started=$(date +%s)
+  echo "$$" >"$STATE/lock/pid"
+  write_result "$1" running null "$started" null
+  # The log is the account's own file, written by this shell (not by root): SC2024 is intended.
+  # shellcheck disable=SC2024
+  if [ "$1" = install-all ]; then
+    sudo -n "$SWU" -i -a >>"$STATE/install.log" 2>&1
+  else
+    sudo -n "$SWU" -i -r >>"$STATE/install.log" 2>&1
+  fi
+  c=$?
+  if [ "$c" -eq 0 ]; then state=succeeded; else state=failed; fi
+  write_result "$1" "$state" "$c" "$started" "$(date +%s)"
+  rm -rf "$STATE/lock"
+}
+
+start_install() {
+  mkdir -p "$STATE" || exit 73
+  take_lock || {
+    echo '{"state":"running"}'
+    exit 75
+  }
+  : >"$STATE/install.log"
+  platforms >"$STATE/platforms.before"
+  write_result "$1" running null "$(date +%s)" null
+  # Detached: survives the ssh session ending (SIGHUP ignored, no terminal, no open ssh streams).
+  (
+    trap '' HUP
+    install_job "$1"
+  ) </dev/null >/dev/null 2>&1 &
+  echo '{"state":"started"}'
+}
+
+# The verify document (lib/updates/model.ts parseVerifyDoc); exit 0 when the iOS platform list
+# lost nothing since the install started and every verify.d hook passed.
+verify() {
+  now_list=$(platforms)
+  missing=""
+  if [ -f "$STATE/platforms.before" ]; then
+    missing=$(printf '%s\n' "$now_list" | sort | comm -23 "$STATE/platforms.before" -)
+  fi
+  free=$(df -Pm / 2>/dev/null | awk 'NR == 2 { print $4 + 0 }')
+  printf '{"v":1,"system":"","failedUnits":[],"docker":"absent","mounts":'
+  mount 2>/dev/null | sed -n 's/^.* on \(\/.*\) (.*$/\1/p' | head -n 400 | json arr
+  printf ',"freeDiskMb":%s,"xcodePlatforms":' "${free:-null}"
+  printf '%s\n' "$now_list" | json arr
+  printf ',"xcodePlatformsMissing":'
+  printf '%s\n' "$missing" | json arr
+  printf ',"checks":'
+  run_hooks "$ETC/verify.d" "$VERIFY_TIMEOUT"
+  ok=true
+  [ -z "$missing" ] || ok=false
+  if [ "$HOOKS_FAILED" -ne 0 ] || [ "$HOOKS_BUSY" -ne 0 ]; then ok=false; fi
+  printf ',"ok":%s}\n' "$ok"
+  [ "$ok" = true ]
+}
+
+# --- The verb. -----------------------------------------------------------------------------------
+case "$verb" in
+  status)
+    # {"os":"macos","softwareupdate":"<stdout and stderr>","xcodePlatforms":[…]}
+    capture "$SWU" -l
+    printf '{"v":1,"os":"macos","softwareupdate":'
+    head -c "$CAP" "$TMP_OUT" | json str
+    printf ',"softwareupdateExit":%d,"bootId":"%s","xcodePlatforms":' "$RC" "$(boot_id)"
+    platforms | json arr
+    printf '}\n'
+    ;;
+  boot-id)
+    id=$(boot_id)
+    [ -n "$id" ] || exit 1
+    echo "$id"
+    ;;
+  busy)
+    printf '{"v":1,"checks":'
+    run_hooks "$ETC/busy.d" "$BUSY_TIMEOUT"
+    if [ "$HOOKS_BUSY" -ne 0 ]; then b=true; elif [ "$HOOKS_FAILED" -ne 0 ]; then b=null; else b=false; fi
+    printf ',"busy":%s}\n' "$b"
+    [ "$HOOKS_BUSY" -eq 0 ] || exit 10
+    [ "$HOOKS_FAILED" -eq 0 ] || exit 1
+    ;;
+  install-security | install-all) start_install "$verb" ;;
+  result)
+    if [ -f "$STATE/result.json" ]; then head -c 65536 "$STATE/result.json"; else echo '{"v":1,"state":"none","startedAt":null,"exitCode":null,"rebootRequired":false,"tail":""}'; fi
+    ;;
+  verify) verify ;;
+  reboot) exec sudo -n "$SHUTDOWN" -r +1 ;;
+esac
