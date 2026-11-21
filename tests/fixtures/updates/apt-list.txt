@@ -1,0 +1,6 @@
+Listing... Done
+libssl3t64/noble-updates,noble-security 3.0.13-0ubuntu3.5 amd64 [upgradable from: 3.0.13-0ubuntu3.4]
+openssl/noble-updates,noble-security 3.0.13-0ubuntu3.5 amd64 [upgradable from: 3.0.13-0ubuntu3.4]
+curl/noble-infra-security 8.5.0-2ubuntu10.6+esm1 amd64 [upgradable from: 8.5.0-2ubuntu10.5]
+docker-ce/noble 5:27.3.1-1~ubuntu.24.04~noble amd64 [upgradable from: 5:27.3.0-1~ubuntu.24.04~noble]
+python3-update-manager/noble-updates 1:24.04.9 all [upgradable from: 1:24.04.8]

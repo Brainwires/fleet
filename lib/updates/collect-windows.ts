@@ -16,9 +16,13 @@ import {
   type PendingItem,
 } from "./model.ts";
 
-/** A list ConvertTo-Json may have flattened to one object (or `null`). */
+/** A list ConvertTo-Json may have flattened to its one element (or `null`). */
 const asList = (v: unknown): unknown[] =>
-  Array.isArray(v) ? v.slice(0, MAX_COUNT) : v && typeof v === "object" ? [v] : [];
+  Array.isArray(v)
+    ? v.slice(0, MAX_COUNT)
+    : (v && typeof v === "object") || typeof v === "string"
+    ? [v]
+    : [];
 
 /** One update's security verdict and display name. */
 export function windowsItem(raw: unknown): PendingItem | null {

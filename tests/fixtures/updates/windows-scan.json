@@ -1,0 +1,26 @@
+{
+  "os": "windows",
+  "updates": [
+    {
+      "title": "2026-11 Cumulative Update for Windows 11 Version 24H2 for x64-based Systems",
+      "kb": "KB5046617",
+      "categories": ["Security Updates", "Windows 11"],
+      "msrcSeverity": "Critical"
+    },
+    {
+      "title": "Security Intelligence Update for Microsoft Defender Antivirus",
+      "kb": "2267602",
+      "categories": ["Definition Updates"],
+      "msrcSeverity": ""
+    },
+    {
+      "title": "Intel - Display - 31.0.101.5590",
+      "kb": "",
+      "categories": ["Drivers"],
+      "msrcSeverity": null
+    }
+  ],
+  "rebootRequired": false,
+  "rebootPending": true,
+  "pendingFileRename": false
+}
