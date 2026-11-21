@@ -25,6 +25,10 @@ export type RebootPolicy = typeof REBOOT_POLICIES[number];
 /** A machine's update severity. */
 export type Level = "ok" | "info" | "warn" | "bad";
 
+/** What a machine is: a runner host (its pools are held for a run) or a service host (no pools). */
+export const MACHINE_KINDS = ["runner", "server"] as const;
+export type MachineKind = typeof MACHINE_KINDS[number];
+
 /** The busy plugins a machine may list (lib/updates/busy.ts implements them). */
 export const BUSY_PLUGIN_NAMES = ["pools", "remote", "telemetry", "local-vms"] as const;
 export type BusyPluginName = typeof BUSY_PLUGIN_NAMES[number];
@@ -132,6 +136,52 @@ export interface HostStatus {
   };
   /** When the package index was last refreshed (ms); `null`: not reported (macOS, Windows). */
   readonly indexAt: number | null;
+}
+
+/** One pending update a collector found. */
+export interface PendingItem {
+  readonly name: unknown;
+  readonly security: boolean;
+}
+
+/**
+ * A HostStatus from what a collector found: counts clamped, names clamped and capped (security
+ * first), a reboot's packages capped. Duplicate names count once.
+ */
+export function hostStatus(
+  items: readonly PendingItem[],
+  reboot: { required: boolean; since: number | null; packages: readonly unknown[] },
+  indexAt: number | null,
+): HostStatus {
+  const seen = new Map<string, boolean>();
+  for (const it of items.slice(0, MAX_COUNT)) {
+    const name = clampText(it.name);
+    if (!name) continue;
+    seen.set(name, (seen.get(name) ?? false) || it.security);
+  }
+  const all = [...seen.entries()];
+  const sec = all.filter(([, s]) => s).map(([n]) => n);
+  const other = all.filter(([, s]) => !s).map(([n]) => n);
+  return {
+    pending: {
+      total: Math.min(all.length, MAX_COUNT),
+      security: Math.min(sec.length, MAX_COUNT),
+      names: [...sec, ...other].slice(0, MAX_NAMES),
+      securityNames: sec.slice(0, MAX_NAMES),
+    },
+    reboot: {
+      required: reboot.required,
+      since: reboot.required ? reboot.since : null,
+      packages: reboot.required ? clampNames(reboot.packages.slice(0, MAX_NAMES * 4)) : [],
+    },
+    indexAt,
+  };
+}
+
+/** Lines of a command's output a host printed (size-capped first). */
+export function outputLines(v: unknown): string[] {
+  if (typeof v !== "string") return [];
+  return v.slice(0, MAX_DOC_BYTES).replace(/\r\n?/g, "\n").split("\n");
 }
 
 /** A collector's verdict. */
@@ -291,6 +341,12 @@ export interface UpdatesMachine {
   /** The machines service's id when there is one. */
   readonly id: string;
   readonly os: UpdatesOs;
+  /**
+   * `runner`: pools held, drained and resumed around a run. `server` (a service host with no CI):
+   * no pools, so no hold, drain or resume, and only the fleet-wide one-run lock applies; it runs
+   * only when asked (Update now, an approved request) or in a user-set window, never on its own.
+   */
+  readonly kind: MachineKind;
   readonly via: MachineVia;
   /** Fleet's own machine: notify only (no schedule, no install, no reboot). */
   readonly self: boolean;
